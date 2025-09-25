@@ -1,0 +1,77 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE");
+
+<comment>
+problem = Intentionally trying to cause grid refinement issues
+
+<job>
+problem_id = breakRefinementBoundaries
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic          # none (disabled) or ohmic
+resistivity_coeff = fixed
+ohm_diff_coeff_code = 1e-5  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
+
+<problem/breakRefinementBoundaries>
+
+<parthenon/mesh>
+refinement = static
+nghost = 2
+
+nx1 = 256
+x1min = -1.0
+x1max =  1.0
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2 = 256
+x2min = -1.0
+x2max = 1.0
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/static_refinement0>
+x1min =  -0.001
+x1max =   0.001
+x2min =  -0.001
+x2max =   0.001
+x3min = -0.0
+x3max =  0.0
+level =  9
+
+<parthenon/meshblock>
+nx1 = 32
+nx2 = 32
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.45
+tlim = 2.0
+nlim = 10
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.001           # gamma = C_p/C_v
+first_order_flux_correct = true
+
+<parthenon/output0>
+file_type = hdf5
+dn = 1
+id = out0
+variables = prim
+
+<parthenon/output1>
+file_type = hst
+dt = 0.1

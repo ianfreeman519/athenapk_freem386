@@ -1,0 +1,83 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE");
+
+<comment>
+problem = Reconnection I made it up
+
+<job>
+problem_id = periodic_reconnection
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic          # none (disabled) or ohmic
+resistivity_coeff = fixed
+ohm_diff_coeff_code = 1e-5  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
+
+<problem/periodic_reconnection>
+B0 = 1.0
+rho0 = 1.0
+P0 = 0.01
+P1 = 3.0
+delta = 0.25
+Nloop = 4
+
+<parthenon/mesh>
+refinement = static
+nghost = 2
+
+nx1 = 256
+x1min = -1.0
+x1max = 1.0
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2 = 256
+x2min = -1.0
+x2max = 1.0
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/static_refinement0>
+x1min = -1.0
+x1max =  1.0
+x2min = -0.01
+x2max =  0.01
+x3min = -0.0
+x3max =  0.0
+level = 4
+
+<parthenon/meshblock>
+nx1 = 32
+nx2 = 32
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.45
+tlim = 2.0
+nlim = -1
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.001 # gamma = C_p/C_v
+first_order_flux_correct = true
+
+<parthenon/output0>
+file_type = hdf5
+dt = 1e-2
+id = out0
+variables = prim, curlBx, curlBy, curlBz
+
+<parthenon/output1>
+file_type = hst
+dt = 0.1

@@ -25,4 +25,7 @@ target_sources(athenaPK PRIVATE
     rand_blast.cpp
     sod.cpp
     turbulence.cpp
+    reconnection.cpp
+    breakRefinementBoundaries.cpp
+    periodic_reconnection.cpp
     )

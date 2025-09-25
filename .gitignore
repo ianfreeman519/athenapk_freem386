@@ -1,6 +1,9 @@
 # Object and binary directories
 build*/
 
+# Python env
+athenapk-env/
+
 # Mac OS metadata
 .DS_Store
 

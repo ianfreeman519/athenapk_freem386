@@ -487,20 +487,27 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   if (eos_str == "adiabatic") {
     Real gamma = pin->GetReal("hydro", "gamma");
     pkg->AddParam<>("AdiabaticIndex", gamma);
-
+    std::cout << pkg->AllParams().hasKey("units") << std::endl;
     if (pin->DoesParameterExist("hydro", "He_mass_fraction") &&
         pkg->AllParams().hasKey("units")) {
-      auto units = pkg->Param<Units>("units");
-      const auto He_mass_fraction = pin->GetReal("hydro", "He_mass_fraction");
-      const auto mu = 1 / (He_mass_fraction * 3. / 4. + (1 - He_mass_fraction) * 2);
-      const auto mu_e = 1 / (He_mass_fraction * 2. / 4. + (1 - He_mass_fraction));
-      pkg->AddParam<>("mu", mu);
-      pkg->AddParam<>("mu_e", mu_e);
-      pkg->AddParam<>("He_mass_fraction", He_mass_fraction);
-      pkg->AddParam<>("mbar", mu * units.atomic_mass_unit());
-      // Following convention in the astro community, we're using mh as unit for the mean
-      // molecular weight
-      pkg->AddParam<>("mbar_over_kb", mu * units.mh() / units.k_boltzmann());
+        auto units = pkg->Param<Units>("units");
+        const auto He_mass_fraction = pin->GetReal("hydro", "He_mass_fraction");
+        const auto mu = 1 / (He_mass_fraction * 3. / 4. + (1 - He_mass_fraction) * 2);
+        const auto mu_e = 1 / (He_mass_fraction * 2. / 4. + (1 - He_mass_fraction));
+        pkg->AddParam<>("mu", mu);
+        pkg->AddParam<>("mu_e", mu_e);
+        pkg->AddParam<>("He_mass_fraction", He_mass_fraction);
+        pkg->AddParam<>("mbar", mu * units.atomic_mass_unit());
+        // Following convention in the astro community, we're using mh as unit for the mean
+        // molecular weight
+        pkg->AddParam<>("mbar_over_kb", mu * units.mh() / units.k_boltzmann());
+    } else if (pin->DoesParameterExist("hydro", "mu")) {
+        auto units = pkg->Param<Units>("units");
+        const auto mu = pin->GetReal("hydro", "mu");
+        pkg->AddParam<>("mu", mu);
+        pkg->AddParam<>("mu_e", mu);
+        pkg->AddParam<>("mbar", mu * units.atomic_mass_unit());
+        pkg->AddParam<>("mbar_over_kb", mu * units.mh() / units.k_boltzmann());
     }
 
     // By default disable floors by setting a negative value
@@ -662,8 +669,11 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       if (resistivity_coeff_str == "spitzer") {
         // If this is implemented, check how the Spitzer coeff for thermal conduction is
         // handled.
-        PARTHENON_FAIL("needs impl");
-
+        resistivity_coeff = ResistivityCoeff::spitzer;
+        // Check for specified coulomb logarithm (eta depends on ln(Lambda))
+        // Reasonable value for coulomb log is 10
+        Real spitzer_log_lambda = pin->GetOrAddReal("diffusion", "spitzer_log_lambda", 10.0);
+        // auto
       } else if (resistivity_coeff_str == "fixed") {
         resistivity_coeff = ResistivityCoeff::fixed;
         Real ohm_diff_coeff_code = pin->GetReal("diffusion", "ohm_diff_coeff_code");

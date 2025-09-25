@@ -1,0 +1,102 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE");
+
+<comment>
+problem = Reconnection I made it up
+
+<job>
+problem_id = reconnection
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic          # none (disabled) or ohmic
+resistivity_coeff = fixed
+ohm_diff_coeff_code = 1e-5  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
+
+<problem/reconnection>
+B0 = 1.0
+rho0 = 1.0
+P0 = 0.01
+powP = 2.0
+delta = 0.5
+w = 0.5
+
+<hydro>
+mean_molecular_weight = 26.9815 # mean molecular weight of aluminum
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.001 # gamma = C_p/C_v
+first_order_flux_correct = true
+
+<units>
+code_length_cgs = 1.0   # should just be cgs
+code_mass_cgs = 1.0     # should just be cgs
+code_time_cgs = 1.0     # should just be cgs
+
+<cooling>
+enable_cooling = tabular                # To disable, set to `none`
+table_filename = schure.cooling_4.Al    # Path to the cooling table (in a text file)
+lambda_units_cgs = 1.0                    # Conversion factor of the cooling rate relative to CGS units
+
+integrator = rk12
+max_iter = 100
+cfl = 0.1
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
+
+<parthenon/mesh>
+refinement = adaptive
+numlevel = 5
+nghost = 2
+
+nx1 = 1024
+x1min = -1.0
+x1max = 1.0
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2 = 512
+x2min = -0.5
+x2max = 0.5
+ix2_bc = linear
+ox2_bc = linear
+
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<refinement>
+type                     = maxdensity
+maxdensity_deref_below   = 10
+maxdensity_refine_above  = 50
+
+<parthenon/meshblock>
+nx1 = 64
+nx2 = 64
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.45
+tlim = 2.0
+nlim = -1
+
+<parthenon/output0>
+file_type = hdf5
+dt = 1e-2
+id = out0
+variables = prim, curlBx, curlBy, curlBz
+
+<parthenon/output1>
+file_type = hst
+dn = 1
+
+
+<parthenon/output2>
+file_type = rst
+dt = 5e-2

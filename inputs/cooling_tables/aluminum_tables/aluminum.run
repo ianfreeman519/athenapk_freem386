@@ -1,0 +1,28 @@
+# Run started Mon Aug 25 14:35:52 2025.
+#
+# cloudyRunMode = 1 
+# outputFilePrefix = aluminum
+# outputDir = /mnt/home/freem386/athenapk/inputs/cooling_tables/aluminum_tables/
+#
+# Commands to be executed everytime:
+# stop zone 1
+# iterate to convergence
+# set WeakHeatCool -20
+# no H2 molecule
+# no charge transfer
+# metals 1
+# Commands from file: aluminum.dat
+#
+# Loop commands and values:
+# hden: -10 -9 -8 -7 -6 -5 -4 -3 -2 -1 0 1 2 3 4
+#
+#run	hden
+1	-10
+2	-9
+3	-8
+4	-7
+5	-6
+6	-5
+7	-4
+8	-3
+9	-2

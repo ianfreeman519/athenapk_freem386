@@ -45,8 +45,11 @@ TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md) {
     if (resistivity == Resistivity::ohmic &&
         ohm_diff.GetCoeffType() == ResistivityCoeff::fixed) {
       OhmicDiffFluxIsoFixed(md);
-    } else {
+    } else if (resistivity == Resistivity::ohmic &&
+        ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer) {
       OhmicDiffFluxGeneral(md);
+    } else {
+      PARTHENON_FAIL("Something horrible happened in diffusion.cpp")
     }
   }
   return TaskStatus::complete;

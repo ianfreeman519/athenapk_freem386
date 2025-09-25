@@ -85,6 +85,16 @@ int main(int argc, char *argv[]) {
     pman.app_input->ProblemGenerator = advection::ProblemGenerator;
   } else if (problem == "orszag_tang") {
     pman.app_input->ProblemGenerator = orszag_tang::ProblemGenerator;
+  } else if (problem == "reconnection") {
+    pman.app_input->ProblemGenerator = reconnection::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput = reconnection::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = reconnection::ProblemInitPackageData;
+  } else if (problem == "periodic_reconnection") {
+    pman.app_input->ProblemGenerator = periodic_reconnection::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput = periodic_reconnection::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = periodic_reconnection::ProblemInitPackageData;
+  } else if (problem == "breakRefinementBoundaries") {
+    pman.app_input->ProblemGenerator = breakRefinementBoundaries::ProblemGenerator;
   } else if (problem == "diffusion") {
     pman.app_input->ProblemGenerator = diffusion::ProblemGenerator;
   } else if (problem == "field_loop") {
@@ -138,6 +148,23 @@ int main(int argc, char *argv[]) {
                                             ReflectBC<X3DIR, BCSide::Inner>);
   pman.app_input->RegisterBoundaryCondition(BF::outer_x3, REFLECTING,
                                             ReflectBC<X3DIR, BCSide::Outer>);
+
+const std::string LINEAR = "linear";
+  using BF = parthenon::BoundaryFace;
+  using Hydro::BoundaryFunction::LinearBC;
+  using parthenon::BoundaryFunction::BCSide;
+  pman.app_input->RegisterBoundaryCondition(BF::inner_x1, LINEAR,
+                                            LinearBC<X1DIR, BCSide::Inner>);
+  pman.app_input->RegisterBoundaryCondition(BF::outer_x1, LINEAR,
+                                            LinearBC<X1DIR, BCSide::Outer>);
+  pman.app_input->RegisterBoundaryCondition(BF::inner_x2, LINEAR,
+                                            LinearBC<X2DIR, BCSide::Inner>);
+  pman.app_input->RegisterBoundaryCondition(BF::outer_x2, LINEAR,
+                                            LinearBC<X2DIR, BCSide::Outer>);
+  pman.app_input->RegisterBoundaryCondition(BF::inner_x3, LINEAR,
+                                            LinearBC<X3DIR, BCSide::Inner>);
+  pman.app_input->RegisterBoundaryCondition(BF::outer_x3, LINEAR,
+                                            LinearBC<X3DIR, BCSide::Outer>);
 
   pman.ParthenonInitPackagesAndMesh();
 
