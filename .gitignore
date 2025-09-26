@@ -1,6 +1,8 @@
 # Object and binary directories
 build*/
 
+test*/
+
 # Python env
 athenapk-env/
 
