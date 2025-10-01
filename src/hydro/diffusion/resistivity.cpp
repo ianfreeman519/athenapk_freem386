@@ -24,7 +24,12 @@ Real OhmicDiffusivity::Get(const Real pres, const Real rho) const {
   if (resistivity_coeff_type_ == ResistivityCoeff::fixed) {
     return coeff_;
   } else if (resistivity_coeff_type_ == ResistivityCoeff::spitzer) {
-    PARTHENON_FAIL("needs impl");
+    Real T_cgs = mbar_ / kb_ * pres / rho;
+    Real ln_Lambda = coeff_;
+    Real Z_bar_e_squared = 10*std::pow(1.702691733e-9, 2);  // TODO THIS IS AN ASSUMPTION ABOUT THE PLASMA THAT NEEDS TO BE FIXED!!! 
+    // ^^ THIS ASSUMES Z=10, which is NOT TRUE for most situations. Eventually I should pass e_cgs_heaviside into this function as well
+    Real coeff = Z_bar_e_squared * sqrt(me_) / ( 16 * M_PI) * pow(T_cgs * kb_, -1.5);
+    return coeff;
   } else {
     PARTHENON_FAIL("Unknown Resistivity coeff");
   }
@@ -74,6 +79,35 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
           if (ndim >= 3) {
             min_dt = fmin(min_dt,
                           SQR(coords.Dxc<3>(k, j, i)) / (ohm_diff_coeff + TINY_NUMBER));
+          }
+        },
+        Kokkos::Min<Real>(min_dt_resist));
+  } else if (ohm_diff.GetType() == Resistivity::ohmic &&
+              ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer) {
+    const auto ohm_diff_val = ohm_diff; // capture by value for the device kernel
+    Kokkos::parallel_reduce(
+        "EstimateResistivityTimestep (ohmic spitzer)",
+        Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+            DevExecSpace(), {0, kb.s, jb.s, ib.s},
+            {prim_pack.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1},
+            {1, 1, 1, ib.e + 1 - ib.s}),
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i,
+                      Real &min_dt) {
+          const auto &coords = prim_pack.GetCoords(b);
+          const auto &prim = prim_pack(b);
+          const Real rho = prim(IDN, k, j, i);
+          const Real p = prim(IPR, k, j, i);
+          const Real eta = ohm_diff_val.Get(p, rho);
+
+          min_dt =
+              fmin(min_dt, SQR(coords.Dxc<1>(k, j, i)) / (eta + TINY_NUMBER));
+          if (ndim >= 2) {
+            min_dt = fmin(min_dt,
+                          SQR(coords.Dxc<2>(k, j, i)) / (eta + TINY_NUMBER));
+          }
+          if (ndim >= 3) {
+            min_dt = fmin(min_dt,
+                          SQR(coords.Dxc<3>(k, j, i)) / (eta + TINY_NUMBER));
           }
         },
         Kokkos::Min<Real>(min_dt_resist));
@@ -252,9 +286,8 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
   const int ndim = pmb->pmy_mesh->ndim;
 
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
-  // Using fixed and uniform coefficient so it's safe to get it outside the kernel.
-  // Using 0.0 as parameters rho and p as they're not used anyway for a fixed coeff.
-  const auto eta = ohm_diff.Get(0.0, 0.0);
+
+  const auto ohm_diff_val = ohm_diff; // capture by value for the device kernel
 
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "Resist. X1 fluxes (ohmic)", DevExecSpace(), 0,
@@ -263,7 +296,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-
+        const Real rho = prim(IDN, k, j, i);
+        const Real p = prim(IPR, k, j, i);
+        const Real eta = ohm_diff_val.Get(p, rho);
         // Face centered current densities
         // j2 = d3B1 - d1B3
         const auto d3B1 =
@@ -308,6 +343,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
+        const Real rho = prim(IDN, k, j, i);
+        const Real p = prim(IPR, k, j, i);
+        const Real eta = ohm_diff_val.Get(p, rho);
 
         // Face centered current densities
         // j3 = d1B2 - d2B1
@@ -351,6 +389,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
+        const Real rho = prim(IDN, k, j, i);
+        const Real p = prim(IPR, k, j, i);
+        const Real eta = ohm_diff_val.Get(p, rho);
 
         // Face centered current densities
         // j1 = d2B3 - d3B2

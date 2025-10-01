@@ -159,7 +159,7 @@ struct OhmicDiffusivity {
 Real EstimateResistivityTimestep(MeshData<Real> *md);
 
 //! Calculate isotropic resistivity with fixed coefficient
-  void OhmicDiffFluxIsoFixed(MeshData<Real> *md);
+void OhmicDiffFluxIsoFixed(MeshData<Real> *md);
 
 //! Calculate resistivity (general case incl. Spitzer)
 void OhmicDiffFluxGeneral(MeshData<Real> *md);

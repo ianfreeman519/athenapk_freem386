@@ -501,13 +501,14 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         // Following convention in the astro community, we're using mh as unit for the mean
         // molecular weight
         pkg->AddParam<>("mbar_over_kb", mu * units.mh() / units.k_boltzmann());
-    } else if (pin->DoesParameterExist("hydro", "mu")) {
+    } else if (pin->DoesParameterExist("hydro", "mean_molecular_weight") && pin->DoesParameterExist("hydro", "Z")) {
         auto units = pkg->Param<Units>("units");
-        const auto mu = pin->GetReal("hydro", "mu");
-        pkg->AddParam<>("mu", mu);
-        pkg->AddParam<>("mu_e", mu);
-        pkg->AddParam<>("mbar", mu * units.atomic_mass_unit());
-        pkg->AddParam<>("mbar_over_kb", mu * units.mh() / units.k_boltzmann());
+        const auto mmw = pin->GetReal("hydro", "mean_molecular_weight");
+        const auto Z = pin->GetReal("hydro", "Z");
+        pkg->AddParam<>("mu", mmw);
+        pkg->AddParam<>("mu_e", Z);
+        pkg->AddParam<>("mbar", mmw * units.atomic_mass_unit());
+        pkg->AddParam<>("mbar_over_kb", mmw * units.mh() / units.k_boltzmann());
     }
 
     // By default disable floors by setting a negative value
@@ -667,18 +668,21 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       auto resistivity_coeff = ResistivityCoeff::none;
 
       if (resistivity_coeff_str == "spitzer") {
+        auto units = pkg->Param<Units>("units");
         // If this is implemented, check how the Spitzer coeff for thermal conduction is
         // handled.
         resistivity_coeff = ResistivityCoeff::spitzer;
         // Check for specified coulomb logarithm (eta depends on ln(Lambda))
         // Reasonable value for coulomb log is 10
         Real spitzer_log_lambda = pin->GetOrAddReal("diffusion", "spitzer_log_lambda", 10.0);
-        // auto
+        auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff, spitzer_log_lambda, 
+                                         pkg->Param<Real>("mbar"), units.electron_mass(), units.k_boltzmann());
+        pkg->AddParam<>("ohm_diff", ohm_diff);
       } else if (resistivity_coeff_str == "fixed") {
         resistivity_coeff = ResistivityCoeff::fixed;
         Real ohm_diff_coeff_code = pin->GetReal("diffusion", "ohm_diff_coeff_code");
-        auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff,
-                                         ohm_diff_coeff_code, 0.0, 0.0, 0.0);
+        auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff, ohm_diff_coeff_code, 
+                                         0.0, 0.0, 0.0);
         pkg->AddParam<>("ohm_diff", ohm_diff);
 
       } else {

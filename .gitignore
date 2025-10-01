@@ -1,6 +1,6 @@
 # Object and binary directories
 build*/
-
+CMakeFiles/*
 test*/
 
 # Python env

@@ -33,6 +33,7 @@ class Units {
   static constexpr parthenon::Real electron_mass_cgs = 9.1093837015e-28;   // g
   static constexpr parthenon::Real g_cm3_cgs = 1.0;                        // gcm**3
   static constexpr parthenon::Real erg_cgs = 1;                            // erg
+  static constexpr parthenon::Real e_cgs = 1.702691733e-9;                 // 1 HLC (Heaviside-Lorentz Coulomb)
   static constexpr parthenon::Real gauss_cgs = 1;                          // gauss
   static constexpr parthenon::Real microgauss_cgs = 1e-6;                  // gauss
   static constexpr parthenon::Real mh_cgs =

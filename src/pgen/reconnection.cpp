@@ -21,6 +21,7 @@
 
 // AthenaPK headers
 #include "../main.hpp"
+#include "../units.hpp"
 
 namespace reconnection {
 using namespace parthenon::driver::prelude;
@@ -84,12 +85,39 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto &u = mbd->Get("cons").data;
 
   Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
-  Real B0   = pin->GetOrAddReal("problem/reconnection", "B0", 1.0);
+  Real B0   = pin->GetOrAddReal("problem/reconnection", "B0", 1.0) / std::sqrt(4*M_PI);
   Real rho0 = pin->GetOrAddReal("problem/reconnection", "rho0", 1.0);
-  Real P0   =  pin->GetOrAddReal("problem/reconnection", "P0", 2.0);
+  Real T0   =  pin->GetOrAddReal("problem/reconnection", "T0", 2.0);
   Real w    = pin->GetOrAddReal("problem/reconnection", "w", 0.5);
   Real delta = pin->GetOrAddReal("problem/reconnection", "delta", 0.5);
   Real powP = pin->GetOrAddReal("problem/reconnection", "powP", 2.0);
+  
+  // Checking if spitzer or fixed ohmic resistivity is turned on:
+  Real k_b, atomic_mass_unit, m_bar;
+  auto detected_resistivity_type = pin->GetString("diffusion", "resistivity_coeff");
+if (detected_resistivity_type == "spitzer") {
+    // if spitzer is defined, grab the hydro package and units now...
+    auto hydro_pkg = pmb->packages.Get("Hydro");
+    const auto units = hydro_pkg->Param<Units>("units");
+    k_b = units.k_boltzmann();
+    atomic_mass_unit = units.atomic_mass_unit();
+    m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
+  } else {
+    PARTHENON_FAIL("Unknown resitivity type given in input file");
+  }
+
+  // Printing out input values for slurm records
+  std::cout << "========================================" << std::endl;
+  std::cout << "Input parameters:" << std::endl;
+  std::cout << "gamma ..... " << pin->GetReal("hydro", "gamma") << std::endl;
+  std::cout << "B0 [Gauss]  " << B0 * std::sqrt(4*M_PI) << std::endl;
+  std::cout << "rho0 [g] .. " << rho0 << std::endl;
+  std::cout << "T0 [K] .... " << T0 << std::endl;
+  std::cout << "w [cm] .... " << w << std::endl;
+  std::cout << "delta [cm]  " << delta << std::endl;
+  std::cout << "powP [-] .. " << powP << std::endl;
+  std::cout << "resistivity: " << detected_resistivity_type << std::endl;
+  std::cout << "========================================" << std::endl;
 
 
   auto &coords = pmb->coords;
@@ -119,7 +147,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IB2, k, j, i) = B0*(b1y + b2y);
         u(IB3, k, j, i) = 0.0;
 
-        Real P = (P0 + std::pow(std::abs(y), powP));
+        // if spitzer turned on, use units, otherwise treat T0 as an initial P_thermal
+        Real P_thermal;
+        if (detected_resistivity_type == "spitzer") {
+          P_thermal = T0 * k_b / (m_bar * u(IDN, k, j, i));
+        } else {
+          P_thermal = T0;
+        }
+        Real P = P_thermal * (1.0 + std::pow(std::abs(y), powP));
 
         u(IEN, k, j, i) =
             P / gm1 +
