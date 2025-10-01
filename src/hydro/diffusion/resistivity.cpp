@@ -19,22 +19,6 @@
 
 using namespace parthenon::package::prelude;
 
-KOKKOS_INLINE_FUNCTION
-Real OhmicDiffusivity::Get(const Real pres, const Real rho) const {
-  if (resistivity_coeff_type_ == ResistivityCoeff::fixed) {
-    return coeff_;
-  } else if (resistivity_coeff_type_ == ResistivityCoeff::spitzer) {
-    Real T_cgs = mbar_ / kb_ * pres / rho;
-    Real ln_Lambda = coeff_;
-    Real Z_bar_e_squared = 10*std::pow(1.702691733e-9, 2);  // TODO THIS IS AN ASSUMPTION ABOUT THE PLASMA THAT NEEDS TO BE FIXED!!! 
-    // ^^ THIS ASSUMES Z=10, which is NOT TRUE for most situations. Eventually I should pass e_cgs_heaviside into this function as well
-    Real coeff = Z_bar_e_squared * sqrt(me_) / ( 16 * M_PI) * pow(T_cgs * kb_, -1.5);
-    return coeff;
-  } else {
-    PARTHENON_FAIL("Unknown Resistivity coeff");
-  }
-}
-
 Real EstimateResistivityTimestep(MeshData<Real> *md) {
   // get to package via first block in Meshdata (which exists by construction)
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");

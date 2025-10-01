@@ -22,6 +22,7 @@
 // AthenaPK headers
 #include "../main.hpp"
 #include "../units.hpp"
+#include "../hydro/diffusion/diffusion.hpp" // For storing eta later
 
 namespace reconnection {
 using namespace parthenon::driver::prelude;
@@ -35,6 +36,7 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   hydro_pkg->AddField("curlBx", m);
   hydro_pkg->AddField("curlBy", m);
   hydro_pkg->AddField("curlBz", m);
+  hydro_pkg->AddField("eta", m);
 }
 
 // storing the curls just before output
@@ -44,11 +46,16 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
   auto &data = pmb->meshblock_data.Get(); // This is for grabbing the meshblocks defined above
+  auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
+  const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const auto ohm_diff_dev = ohm_diff; // "Capture friendly copy?"
+  auto &eta = mbd->Get("eta_resistivity").data;
 
   // Get derived fields
   auto &curlBx = data->Get("curlBx").data;
   auto &curlBy = data->Get("curlBy").data;
   auto &curlBz = data->Get("curlBz").data;
+  auto &eta_field    = data->Get("eta").data;
 
   // Getting indices???
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
@@ -72,6 +79,11 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         term1 = (u(IB2,k,j,i+1) - u(IB2,k,j,i-1))/(coords.Xc<1>(i+1)-coords.Xc<1>(i-1));
         term2 = (u(IB1,k,j+1,i) - u(IB1,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1));
         curlBz(k, j, i) = term1 - term2;
+        // Calculating 
+        Real rho = u(IDN, k, j, i);
+        Real p = u(IPR, k, j, i);
+        const Real eta_val = ohm_diff_dev.Get(p, rho);
+        eta(k, j, i) = eta_val;
       }
   );
 }

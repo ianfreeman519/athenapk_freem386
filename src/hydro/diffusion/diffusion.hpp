@@ -147,7 +147,19 @@ struct OhmicDiffusivity {
         coeff_(coeff), mbar_(mbar), me_(me), kb_(kb) {}
 
   KOKKOS_INLINE_FUNCTION
-  Real Get(const Real pres, const Real rho) const;
+  Real Get(const Real pres, const Real rho) const {
+    if (resistivity_coeff_type_ == ResistivityCoeff::fixed) {
+      return coeff_;
+    } else if (resistivity_coeff_type_ == ResistivityCoeff::spitzer) {
+      Real T_cgs = mbar_ / kb_ * pres / rho;
+      Real ln_Lambda = coeff_;
+      Real Z_bar_e_squared = 10 * std::pow(1.702691733e-9, 2);
+      Real coeff = Z_bar_e_squared * std::sqrt(me_) /
+                   (16 * M_PI) * std::pow(T_cgs * kb_, -1.5);
+      return coeff;
+    }
+    PARTHENON_FAIL("Unknown Resistivity coeff");
+  }
 
   KOKKOS_INLINE_FUNCTION
   Resistivity GetType() const { return resistivity_; }
