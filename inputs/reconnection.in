@@ -11,8 +11,13 @@ problem_id = reconnection
 <diffusion>
 integrator = rkl2
 resistivity = ohmic          # none (disabled) or ohmic
-resistivity_coeff = fixed
-ohm_diff_coeff_code = 1e-5  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
+resistivity_coeff = spitzer
+spitzer_log_lambda = 10
+
+<units>
+code_length_cgs = 1.0 
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
 
 <problem/reconnection>
 B0 = 1.0
@@ -71,6 +76,9 @@ riemann = hlld
 reconstruction = plm
 gamma = 1.001 # gamma = C_p/C_v
 first_order_flux_correct = true
+
+mean_molecular_weight = 27
+Z = 13
 
 <parthenon/output0>
 file_type = hdf5
