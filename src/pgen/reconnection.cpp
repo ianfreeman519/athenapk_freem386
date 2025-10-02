@@ -49,7 +49,6 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   const auto ohm_diff_dev = ohm_diff; // "Capture friendly copy?"
-  auto &eta = mbd->Get("eta_resistivity").data;
 
   // Get derived fields
   auto &curlBx = data->Get("curlBx").data;
@@ -83,7 +82,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         Real rho = u(IDN, k, j, i);
         Real p = u(IPR, k, j, i);
         const Real eta_val = ohm_diff_dev.Get(p, rho);
-        eta(k, j, i) = eta_val;
+        eta_field(k, j, i) = eta_val;
       }
   );
 }
