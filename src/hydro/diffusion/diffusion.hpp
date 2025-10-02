@@ -154,8 +154,6 @@ struct OhmicDiffusivity {
       Real T_cgs = mbar_ / kb_ * pres / rho;
       Real ln_Lambda = coeff_;
       Real Z_bar_e_squared = 10 * std::pow(1.702691733e-9, 2);
-      printf("Check it out bozo %.5e", std::pow(100, -1.5));
-      PARTHENON_FAIL("Ian said to crash here...");
       Real coeff = Z_bar_e_squared * std::sqrt(me_) / (16 * M_PI) * std::pow(T_cgs * kb_, -1.5);
       return coeff;
     }
