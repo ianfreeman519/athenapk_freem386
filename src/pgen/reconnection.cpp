@@ -90,52 +90,8 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         eta_field(k, j, i) = eta_val;
         // beta = p / (B^2 / 2) - in Heaviside Lorentz units, this is p / (0.5 * 4pi * B^2)
         beta_field(k, j, i) = p / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
-
-        // Printing averaged plasma betas for console:
-        
       }
   );
-  
-  Real beta_sum = 0.0;
-  pmb->par_reduce(
-      "reconnection::AverageBeta", kb_int.s, kb_int.e, jb_int.s, jb_int.e, ib_int.s,
-      ib_int.e,
-      KOKKOS_LAMBDA(const int k, const int j, const int i, Real &local_sum) {
-        local_sum += beta_field(k, j, i);
-      },
-      Kokkos::Sum<Real>(beta_sum));
-
-  const Real local_cell_count = static_cast<Real>(
-      pmb->cellbounds.ncellsk(IndexDomain::interior) *
-      pmb->cellbounds.ncellsj(IndexDomain::interior) *
-      pmb->cellbounds.ncellsi(IndexDomain::interior));
-
-  static Real rank_beta_sum = 0.0;
-  static Real rank_cell_count = 0.0;
-
-  if (pmb->lid == 0) {
-    rank_beta_sum = 0.0;
-    rank_cell_count = 0.0;
-  }
-
-  rank_beta_sum += beta_sum;
-  rank_cell_count += local_cell_count;
-
-  if (pmb->lid == pmb->pmy_mesh->GetNumMeshBlocksThisRank() - 1) {
-    Real reduce_buffer[2] = {rank_beta_sum, rank_cell_count};
-
-#ifdef MPI_PARALLEL
-    PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, reduce_buffer, 2, MPI_PARTHENON_REAL,
-                                      MPI_SUM, MPI_COMM_WORLD));
-#endif
-
-    const Real total_cells = reduce_buffer[1];
-    const Real avg_beta = total_cells > 0.0 ? reduce_buffer[0] / total_cells : 0.0;
-
-    if (my_rank == 0) {
-      std::cout << "Average plasma beta: " << avg_beta << std::endl;
-    }
-  }
 }
 
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
@@ -229,6 +185,10 @@ if (detected_resistivity_type == "spitzer") {
             0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i)) +
                    (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) /
                        u(IDN, k, j, i));
+
+        // Displaying a sample beta value near center of domain
+        Real beta_sample = P_thermal / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
+        std::cout << "Initializing with central plasma beta ~ " << beta_sample << std::endl;
       });
 }
 } // namespace reconnection
