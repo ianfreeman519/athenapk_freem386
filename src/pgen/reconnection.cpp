@@ -43,13 +43,24 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
 // storing the curls just before output
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm) {
+  // Handle the case of resistivity set to none
+  bool resistivity_on;
+  auto detected_resistivity_type = pin->GetString("diffusion", "resistivity_coeff");
+  if (detected_resistivity_type == "none") {
+    resistivity_on = false;
+  } else {
+    resistivity_on = true;
+  }
+
   auto &coords = pmb->coords;
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
   auto &data = pmb->meshblock_data.Get(); // This is for grabbing the meshblocks defined above
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
-  const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
-  const auto ohm_diff_dev = ohm_diff; // "Capture friendly copy?"
+  if (resistivity_on) {
+    const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+    const auto ohm_diff_dev = ohm_diff; // "Capture friendly copy?"
+  }
 
   // Get derived fields
   auto &curlBx = data->Get("curlBx").data;
@@ -86,10 +97,15 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         // Calculating 
         Real rho = u(IDN, k, j, i);
         Real p = u(IPR, k, j, i);
-        const Real eta_val = ohm_diff_dev.Get(p, rho);
-        eta_field(k, j, i) = eta_val;
+
         // beta = p / (B^2 / 2) - in Heaviside Lorentz units, this is p / (0.5 * 4pi * B^2)
         beta_field(k, j, i) = p / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
+        if (resistivity_on) {
+          const Real eta_val = ohm_diff_dev.Get(p, rho);
+          eta_field(k, j, i) = eta_val;
+        } else {
+          eta_field(k, j, i) = 0.0;
+        }
       }
   );
 }
@@ -101,6 +117,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
+  auto detected_resistivity_type = pin->GetString("diffusion", "resistivity_coeff");
 
   Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
   Real B0   = pin->GetOrAddReal("problem/reconnection", "B0", 1.0) / std::sqrt(4*M_PI);
@@ -116,21 +133,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   
   // Checking if spitzer or fixed ohmic resistivity is turned on:
   Real k_b, atomic_mass_unit, m_bar, P_thermal_central;
-  auto detected_resistivity_type = pin->GetString("diffusion", "resistivity_coeff");
-if (detected_resistivity_type == "spitzer") {
-    // if spitzer is defined, grab the hydro package and units now...
-    auto hydro_pkg = pmb->packages.Get("Hydro");
-    const auto units = hydro_pkg->Param<Units>("units");
-    k_b = units.k_boltzmann();
-    atomic_mass_unit = units.atomic_mass_unit();
-    m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
-    std::cout << "P_thermal_central = " << T0 << " * " << k_b << " * " << rho0 << " / " << m_bar << std::endl;
-    P_thermal_central = T0 * k_b * rho0 / m_bar;
-  } else if (detected_resistivity_type == "fixed") {
-    P_thermal_central = T0;
-  } else {
-    PARTHENON_FAIL("Unknown resitivity type given in input file");
-  }
+  // Grabbing hydro pkg and units objects now...
+  auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto units = hydro_pkg->Param<Units>("units");
+  k_b = units.k_boltzmann();
+  atomic_mass_unit = units.atomic_mass_unit();
+  m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
+  std::cout << "P_thermal_central = " << T0 << " * " << k_b << " * " << rho0 << " / " << m_bar << std::endl;
+  P_thermal_central = T0 * k_b * rho0 / m_bar;
 
   // Printing out input values for slurm records
   if (parthenon::Globals::my_rank == 0) {
@@ -183,12 +193,7 @@ if (detected_resistivity_type == "spitzer") {
         u(IB3, k, j, i) = 0.0;
 
         // if spitzer turned on, use units, otherwise treat T0 as an initial P_thermal
-        Real P_thermal;
-        if (detected_resistivity_type == "spitzer") {
-          P_thermal = T0 * k_b * u(IDN, k, j, i)/ m_bar;
-        } else {
-          P_thermal = T0;
-        }
+        Real P_thermal = T0 * k_b * u(IDN, k, j, i)/ m_bar;
         Real P = P_thermal * (1.0 + std::pow(std::abs(y), powP));
 
         u(IEN, k, j, i) =
