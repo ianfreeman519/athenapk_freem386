@@ -21,11 +21,14 @@ code_time_cgs = 1.0
 
 <problem/reconnection>
 B0 = 1e5
-rho0 = 1.0
-T0 = 1e5        # this is passed into internal energy as += rho*k*T/mbar
+rho0 = 0.1
+powRho = 3.0
+T0 = 1e3        # this is passed into internal energy as += rho*k*T/mbar
 powP = 3.0
 delta = 0.25
 w = 1.0
+v0 = 1e6
+powV = 0.0
 
 <parthenon/mesh>
 refinement = static
@@ -84,7 +87,7 @@ Z = 13
 file_type = hdf5
 dt = 1e-2
 id = out0
-variables = prim, curlBx, curlBy, curlBz
+variables = prim, curlBx, curlBy, curlBz, beta
 
 <parthenon/output1>
 file_type = hst

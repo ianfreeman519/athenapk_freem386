@@ -111,9 +111,11 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real powP = pin->GetOrAddReal("problem/reconnection", "powP", 2.0);
   Real powV = pin->GetOrAddReal("problem/reconnection", "powV", 0.0);
   Real v0   = pin->GetOrAddReal("problem/reconnection", "v0", 0.0);
+  Real powRho = pin->GetOrAddReal("problem/reconnection", "powRho", 0.0);
+  
   
   // Checking if spitzer or fixed ohmic resistivity is turned on:
-  Real k_b, atomic_mass_unit, m_bar;
+  Real k_b, atomic_mass_unit, m_bar, P_thermal_central;
   auto detected_resistivity_type = pin->GetString("diffusion", "resistivity_coeff");
 if (detected_resistivity_type == "spitzer") {
     // if spitzer is defined, grab the hydro package and units now...
@@ -122,6 +124,10 @@ if (detected_resistivity_type == "spitzer") {
     k_b = units.k_boltzmann();
     atomic_mass_unit = units.atomic_mass_unit();
     m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
+    std::cout << "P_thermal_central = " << T0 << " * " << k_b << " * " << rho0 << " / " << m_bar << std::endl;
+    P_thermal_central = T0 * k_b * rho0 / m_bar;
+  } else if (detected_resistivity_type == "fixed") {
+    P_thermal_central = T0;
   } else {
     PARTHENON_FAIL("Unknown resitivity type given in input file");
   }
@@ -139,8 +145,13 @@ if (detected_resistivity_type == "spitzer") {
     std::cout << "delta [cm]  " << delta << std::endl;
     std::cout << "powP [-] .. " << powP << std::endl;
     std::cout << "powV [-] .. " << powV << std::endl;
-    std::cout << "resistivity:" << detected_resistivity_type << std::endl;
+    std::cout << "powRho [-]  " << powRho << std::endl;
+    std::cout << "resistivity:  " << detected_resistivity_type << std::endl;
     std::cout << "mbar: ..... " << m_bar << std::endl;
+    // Displaying a sample beta value near center of domain
+    std::cout << P_thermal_central << " / (0.5 * 4 * 3.14 * SQR(" << B0 << "))" << std::endl;
+    Real beta_sample = P_thermal_central / (0.5 * 4 * M_PI * SQR(B0));
+    std::cout << "Initializing with central plasma beta ~ " << beta_sample << std::endl;
     std::cout << "========================================" << std::endl;
   }
 
@@ -152,7 +163,7 @@ if (detected_resistivity_type == "spitzer") {
         Real x, y;
         x = coords.Xc<1>(i);
         y = coords.Xc<2>(j);
-        u(IDN, k, j, i) = rho0; // Density
+        u(IDN, k, j, i) = rho0 * (1.0 + std::pow(std::abs(y), powRho)); // Density
 
         u(IM1, k, j, i) = 0.0;  // Initial Momentum is zero
         u(IM2, k, j, i) = -1.0 * SIGN(y) * u(IDN, k, j, i) * v0 * (1.0 + std::pow(std::abs(y), powV));
@@ -185,10 +196,6 @@ if (detected_resistivity_type == "spitzer") {
             0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i)) +
                    (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) /
                        u(IDN, k, j, i));
-
-        // Displaying a sample beta value near center of domain
-        Real beta_sample = P_thermal / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
-        std::cout << "Initializing with central plasma beta ~ " << beta_sample << std::endl;
       });
 }
 } // namespace reconnection
