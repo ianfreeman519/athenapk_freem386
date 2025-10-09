@@ -62,6 +62,9 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::entire);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::entire);
+  IndexRange ib_int = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb_int = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb_int = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
   // Actually computing and storing curl data?
   pmb->par_for(
@@ -92,6 +95,47 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         
       }
   );
+  
+  Real beta_sum = 0.0;
+  pmb->par_reduce(
+      "reconnection::AverageBeta", kb_int.s, kb_int.e, jb_int.s, jb_int.e, ib_int.s,
+      ib_int.e,
+      KOKKOS_LAMBDA(const int k, const int j, const int i, Real &local_sum) {
+        local_sum += beta_field(k, j, i);
+      },
+      Kokkos::Sum<Real>(beta_sum));
+
+  const Real local_cell_count = static_cast<Real>(
+      pmb->cellbounds.ncellsk(IndexDomain::interior) *
+      pmb->cellbounds.ncellsj(IndexDomain::interior) *
+      pmb->cellbounds.ncellsi(IndexDomain::interior));
+
+  static Real rank_beta_sum = 0.0;
+  static Real rank_cell_count = 0.0;
+
+  if (pmb->lid == 0) {
+    rank_beta_sum = 0.0;
+    rank_cell_count = 0.0;
+  }
+
+  rank_beta_sum += beta_sum;
+  rank_cell_count += local_cell_count;
+
+  if (pmb->lid == pmb->pmy_mesh->GetNumMeshBlocksThisRank() - 1) {
+    Real reduce_buffer[2] = {rank_beta_sum, rank_cell_count};
+
+#ifdef MPI_PARALLEL
+    PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, reduce_buffer, 2, MPI_PARTHENON_REAL,
+                                      MPI_SUM, MPI_COMM_WORLD));
+#endif
+
+    const Real total_cells = reduce_buffer[1];
+    const Real avg_beta = total_cells > 0.0 ? reduce_buffer[0] / total_cells : 0.0;
+
+    if (my_rank == 0) {
+      std::cout << "Average plasma beta: " << avg_beta << std::endl;
+    }
+  }
 }
 
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
