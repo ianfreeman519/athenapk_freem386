@@ -109,7 +109,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
-  auto detected_resistivity_type = pin->GetString("diffusion", "resistivity_coeff");
+  auto detected_resistivity_type = pin->GetOrAddString("diffusion", "resistivity_coeff", "none");
 
   Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
   Real B0   = pin->GetOrAddReal("problem/reconnection", "B0", 1.0) / std::sqrt(4*M_PI);
