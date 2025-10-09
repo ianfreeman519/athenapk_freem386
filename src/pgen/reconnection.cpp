@@ -43,23 +43,16 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
 // storing the curls just before output
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm) {
-  // Handle the case of resistivity set to none
-  bool resistivity_on;
-  auto detected_resistivity_type = pin->GetString("diffusion", "resistivity_coeff");
-  if (detected_resistivity_type == "none") {
-    resistivity_on = false;
-  } else {
-    resistivity_on = true;
-  }
-
   auto &coords = pmb->coords;
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
   auto &data = pmb->meshblock_data.Get(); // This is for grabbing the meshblocks defined above
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
-  if (resistivity_on) {
-    const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
-    const auto ohm_diff_dev = ohm_diff; // "Capture friendly copy?"
+  const bool has_ohm_diff = hydro_pkg->AllParams().hasKey("ohm_diff");
+  OhmicDiffusivity ohm_diff_dev(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0, 0.0,
+                                0.0);
+  if (has_ohm_diff) {
+    ohm_diff_dev = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   }
 
   // Get derived fields
@@ -100,12 +93,11 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
 
         // beta = p / (B^2 / 2) - in Heaviside Lorentz units, this is p / (0.5 * 4pi * B^2)
         beta_field(k, j, i) = p / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
-        if (resistivity_on) {
-          const Real eta_val = ohm_diff_dev.Get(p, rho);
-          eta_field(k, j, i) = eta_val;
-        } else {
-          eta_field(k, j, i) = 0.0;
+        Real eta_val = 0.0;
+        if (has_ohm_diff) {
+          eta_val = ohm_diff_dev.Get(p, rho);
         }
+        eta_field(k, j, i) = eta_val;
       }
   );
 }
