@@ -49,7 +49,7 @@ TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md) {
         ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer) {
       OhmicDiffFluxGeneral(md);
     } else {
-      PARTHENON_FAIL("Something horrible happened in diffusion.cpp")
+      PARTHENON_FAIL("Unknown Resistivity Type")
     }
   }
   return TaskStatus::complete;

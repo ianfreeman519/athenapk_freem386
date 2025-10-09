@@ -50,6 +50,7 @@ class AdiabaticGLMMHDEOS : public EquationOfState {
     Real ct2 = by * by + bz * bz;
     Real qsq = bx * bx + ct2 + asq;
     Real tmp = bx * bx + ct2 - asq;
+    // printf("asq=%e, ct2=%e, qsq=%e, tmp=%e, d=%e\n", asq, ct2, qsq, tmp, d);
     return std::sqrt(0.5 * (qsq + std::sqrt(tmp * tmp + 4.0 * asq * ct2)) / d);
   }
   //

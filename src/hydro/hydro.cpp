@@ -934,6 +934,9 @@ Real EstimateTimestep(MeshData<Real> *md) {
   const auto calc_dt_hyp = hydro_pkg->Param<bool>("calc_dt_hyp");
   if (calc_dt_hyp) {
     dt_hyp = EstimateHyperbolicTimestep<fluid>(md);
+    if (my_rank == 0) {
+      std::cout << "Estimated hyperbolic timestep: " << dt_hyp;
+    }
     min_dt = std::min(min_dt, dt_hyp);
   }
 
@@ -942,7 +945,10 @@ Real EstimateTimestep(MeshData<Real> *md) {
   if (enable_cooling == Cooling::tabular) {
     const TabularCooling &tabular_cooling =
         hydro_pkg->Param<TabularCooling>("tabular_cooling");
-
+    if (my_rank == 0) {
+      std::cout << "\tEstimated cooling timestep: "
+                << tabular_cooling.EstimateTimeStep(md);
+    }
     min_dt = std::min(min_dt, tabular_cooling.EstimateTimeStep(md));
   }
 
@@ -957,7 +963,9 @@ Real EstimateTimestep(MeshData<Real> *md) {
     if (hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none) {
       dt_diff = std::min(dt_diff, EstimateResistivityTimestep(md));
     }
-
+    if (my_rank == 0) {
+      std::cout << "\tEstimated diffusive timestep: " << dt_diff;
+    }
     // For unsplit ingegration use strict limit
     if (hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
       min_dt = std::min(min_dt, dt_diff);
@@ -978,14 +986,22 @@ Real EstimateTimestep(MeshData<Real> *md) {
 
   if (ProblemEstimateTimestep != nullptr) {
     min_dt = std::min(min_dt, ProblemEstimateTimestep(md));
+    if (my_rank == 0) {
+      std::cout << "\tEstimated problem timestep: " << min_dt;
+    }
   }
 
   // maximum user dt
   const auto max_dt = hydro_pkg->Param<Real>("max_dt");
   if (max_dt > 0.0) {
+    if (my_rank == 0) {
+      std::cout << "\tMaximum user timestep: " << max_dt;
+    }
     min_dt = std::min(min_dt, max_dt);
   }
-
+  if (my_rank == 0) {
+    std::cout << "\tUsing timestep: " << min_dt << std::endl;
+  }
   return min_dt;
 }
 

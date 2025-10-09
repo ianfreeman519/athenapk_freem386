@@ -36,6 +36,7 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   hydro_pkg->AddField("curlBx", m);
   hydro_pkg->AddField("curlBy", m);
   hydro_pkg->AddField("curlBz", m);
+  hydro_pkg->AddField("beta", m);
   hydro_pkg->AddField("eta", m);
 }
 
@@ -55,6 +56,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &curlBy = data->Get("curlBy").data;
   auto &curlBz = data->Get("curlBz").data;
   auto &eta_field    = data->Get("eta").data;
+  auto &beta_field   = data->Get("beta").data;
 
   // Getting indices???
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
@@ -83,6 +85,11 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         Real p = u(IPR, k, j, i);
         const Real eta_val = ohm_diff_dev.Get(p, rho);
         eta_field(k, j, i) = eta_val;
+        // beta = p / (B^2 / 2) - in Heaviside Lorentz units, this is p / (0.5 * 4pi * B^2)
+        beta_field(k, j, i) = p / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
+
+        // Printing averaged plasma betas for console:
+        
       }
   );
 }
@@ -102,6 +109,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real w    = pin->GetOrAddReal("problem/reconnection", "w", 0.5);
   Real delta = pin->GetOrAddReal("problem/reconnection", "delta", 0.5);
   Real powP = pin->GetOrAddReal("problem/reconnection", "powP", 2.0);
+  Real powV = pin->GetOrAddReal("problem/reconnection", "powV", 0.0);
+  Real v0   = pin->GetOrAddReal("problem/reconnection", "v0", 0.0);
   
   // Checking if spitzer or fixed ohmic resistivity is turned on:
   Real k_b, atomic_mass_unit, m_bar;
@@ -118,18 +127,22 @@ if (detected_resistivity_type == "spitzer") {
   }
 
   // Printing out input values for slurm records
-  std::cout << "========================================" << std::endl;
-  std::cout << "Input parameters:" << std::endl;
-  std::cout << "gamma ..... " << pin->GetReal("hydro", "gamma") << std::endl;
-  std::cout << "B0 [Gauss]  " << B0 * std::sqrt(4*M_PI) << std::endl;
-  std::cout << "rho0 [g] .. " << rho0 << std::endl;
-  std::cout << "T0 [K] .... " << T0 << std::endl;
-  std::cout << "w [cm] .... " << w << std::endl;
-  std::cout << "delta [cm]  " << delta << std::endl;
-  std::cout << "powP [-] .. " << powP << std::endl;
-  std::cout << "resistivity: " << detected_resistivity_type << std::endl;
-  std::cout << "========================================" << std::endl;
-
+  if (parthenon::Globals::my_rank == 0) {
+    std::cout << "========================================" << std::endl;
+    std::cout << "Input parameters:" << std::endl;
+    std::cout << "gamma ..... " << pin->GetReal("hydro", "gamma") << std::endl;
+    std::cout << "B0 [Gauss]  " << B0 * std::sqrt(4*M_PI) << std::endl;
+    std::cout << "rho0 [g] .. " << rho0 << std::endl;
+    std::cout << "v0 [cm/s] . " << v0 << std::endl;
+    std::cout << "T0 [K] .... " << T0 << std::endl;
+    std::cout << "w [cm] .... " << w << std::endl;
+    std::cout << "delta [cm]  " << delta << std::endl;
+    std::cout << "powP [-] .. " << powP << std::endl;
+    std::cout << "powV [-] .. " << powV << std::endl;
+    std::cout << "resistivity:" << detected_resistivity_type << std::endl;
+    std::cout << "mbar: ..... " << m_bar << std::endl;
+    std::cout << "========================================" << std::endl;
+  }
 
   auto &coords = pmb->coords;
 
@@ -142,7 +155,7 @@ if (detected_resistivity_type == "spitzer") {
         u(IDN, k, j, i) = rho0; // Density
 
         u(IM1, k, j, i) = 0.0;  // Initial Momentum is zero
-        u(IM2, k, j, i) = 0.0;
+        u(IM2, k, j, i) = -1.0 * SIGN(y) * u(IDN, k, j, i) * v0 * (1.0 + std::pow(std::abs(y), powV));
         u(IM3, k, j, i) = 0.0;
 
         Real b1x, b2x, b1y, b2y;  // Helper variables for clarity
@@ -161,7 +174,7 @@ if (detected_resistivity_type == "spitzer") {
         // if spitzer turned on, use units, otherwise treat T0 as an initial P_thermal
         Real P_thermal;
         if (detected_resistivity_type == "spitzer") {
-          P_thermal = T0 * k_b / (m_bar * u(IDN, k, j, i));
+          P_thermal = T0 * k_b * u(IDN, k, j, i)/ m_bar;
         } else {
           P_thermal = T0;
         }

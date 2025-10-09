@@ -138,7 +138,7 @@ void LinearBC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
           const Real m = (dx != 0.0) ? (u_ref - u_nbr) / dx : 0.0;
 
           const Real x_g = coords.Xc<1>(i);
-          cons(v, k, j, i) = m * (x_ref - x_g) + u_ref;
+          cons(v, k, j, i) = m * (x_g - x_ref) + u_ref;
 
         } else if constexpr (X2) {
           const int nbr = ref + (INNER ? +1 : -1);
@@ -152,7 +152,7 @@ void LinearBC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
           const Real m = (dx != 0.0) ? (u_ref - u_nbr) / dx : 0.0;
 
           const Real x_g = coords.Xc<2>(j);
-          cons(v, k, j, i) = m * (x_ref - x_g) + u_ref;
+          cons(v, k, j, i) = m * (x_g - x_ref) + u_ref;
 
         } else { // X3
           const int nbr = ref + (INNER ? +1 : -1);
@@ -166,7 +166,7 @@ void LinearBC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
           const Real m = (dx != 0.0) ? (u_ref - u_nbr) / dx : 0.0;
 
           const Real x_g = coords.Xc<3>(k);
-          cons(v, k, j, i) = m * (x_ref - x_g) + u_ref;
+          cons(v, k, j, i) = m * (x_g - x_ref) + u_ref;
         }
       });
 }
