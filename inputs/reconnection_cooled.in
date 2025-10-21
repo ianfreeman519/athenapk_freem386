@@ -12,57 +12,46 @@ problem_id = reconnection
 integrator = rkl2
 resistivity = ohmic          # none (disabled) or ohmic
 resistivity_coeff = fixed
-ohm_diff_coeff_code = 1e-5  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
-
-<problem/reconnection>
-B0 = 1.0
-rho0 = 1.0
-P0 = 0.01
-powP = 2.0
-delta = 0.5
-w = 0.5
-
-<hydro>
-mean_molecular_weight = 26.9815 # mean molecular weight of aluminum
-fluid = glmmhd
-eos = adiabatic
-riemann = hlld
-reconstruction = plm
-gamma = 1.001 # gamma = C_p/C_v
-first_order_flux_correct = true
+ohm_diff_coeff_code = 1e-14
 
 <units>
-code_length_cgs = 1.0   # should just be cgs
-code_mass_cgs = 1.0     # should just be cgs
-code_time_cgs = 1.0     # should just be cgs
+code_length_cgs = 1.0 
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
 
 <cooling>
 enable_cooling = tabular                # To disable, set to `none`
 table_filename = schure.cooling_4.Al    # Path to the cooling table (in a text file)
 lambda_units_cgs = 1.0                    # Conversion factor of the cooling rate relative to CGS units
 
-integrator = rk12
-max_iter = 100
-cfl = 0.1
-d_log_temp_tol = 1e-8
-d_e_tol = 1e-8
+
+<problem/reconnection>
+B0 = 1e5
+rho0 = 1e-2
+powRho = 3.0
+T0 = 1e3        # this is passed into internal energy as += rho*k*T/mbar
+powP = 3.0
+delta = 0.125
+w = 1.0
+v0 = 1e4
+powV = 3.0
+v_offset = 0.0
 
 <parthenon/mesh>
-refinement = adaptive
-numlevel = 5
+refinement = static
 nghost = 2
 
-nx1 = 1024
-x1min = -1.0
-x1max = 1.0
-ix1_bc = periodic
-ox1_bc = periodic
+nx1 = 768
+x1min = -1.5
+x1max = 1.5
+ix1_bc = outflow
+ox1_bc = outflow
 
-nx2 = 512
+nx2 = 256
 x2min = -0.5
 x2max = 0.5
-ix2_bc = linear
-ox2_bc = linear
+ix2_bc = outflow
+ox2_bc = outflow
 
 nx3 = 1
 x3min = -1.0
@@ -70,33 +59,48 @@ x3max = 1.0
 ix3_bc = periodic
 ox3_bc = periodic
 
-<refinement>
-type                     = maxdensity
-maxdensity_deref_below   = 10
-maxdensity_refine_above  = 50
+<parthenon/static_refinement0>
+x1min = -0.75
+x1max =  0.75
+x2min = -0.01
+x2max =  0.01
+x3min = -0.0
+x3max =  0.0
+level = 3
 
 <parthenon/meshblock>
-nx1 = 64
-nx2 = 64
+nx1 = 128
+nx2 = 128
 nx3 = 1
 
 <parthenon/time>
 integrator = vl2
 cfl = 0.45
-tlim = 2.0
+tlim = 1e-5
 nlim = -1
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.1             # gamma = C_p/C_v
+first_order_flux_correct = true
+
+mean_molecular_weight = 27
+Z = 13
 
 <parthenon/output0>
 file_type = hdf5
-dt = 1e-2
+dt = 1e-8
 id = out0
-variables = prim, curlBx, curlBy, curlBz
+variables = prim, curlBx, curlBy, curlBz, beta, eta
 
 <parthenon/output1>
 file_type = hst
-dn = 1
-
+ncycle = 1
 
 <parthenon/output2>
 file_type = rst
-dt = 5e-2
+dt = 1e-7
+
