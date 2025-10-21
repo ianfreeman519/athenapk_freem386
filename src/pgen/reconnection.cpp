@@ -50,7 +50,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
   const bool has_ohm_diff = hydro_pkg->AllParams().hasKey("ohm_diff");
   OhmicDiffusivity ohm_diff_dev(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0, 0.0,
-                                0.0);
+                                0.0);   // Dummy init
   if (has_ohm_diff) {
     ohm_diff_dev = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   }
@@ -62,7 +62,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &eta_field    = data->Get("eta").data;
   auto &beta_field   = data->Get("beta").data;
 
-  // Getting indices???
+  // Getting indices
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::entire);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::entire);
@@ -121,6 +121,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real powV = pin->GetOrAddReal("problem/reconnection", "powV", 0.0);
   Real v0   = pin->GetOrAddReal("problem/reconnection", "v0", 0.0);
   Real powRho = pin->GetOrAddReal("problem/reconnection", "powRho", 0.0);
+  Real v_offset = pin->GetOrAddReal("problem/reconnection", "v_offset", 1.0); 
   
   
   // Checking if spitzer or fixed ohmic resistivity is turned on:
@@ -131,7 +132,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   k_b = units.k_boltzmann();
   atomic_mass_unit = units.atomic_mass_unit();
   m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
-  std::cout << "P_thermal_central = " << T0 << " * " << k_b << " * " << rho0 << " / " << m_bar << std::endl;
+  // std::cout << "P_thermal_central = " << T0 << " * " << k_b << " * " << rho0 << " / " << m_bar << std::endl;
   P_thermal_central = T0 * k_b * rho0 / m_bar;
 
   // Printing out input values for slurm records
@@ -144,6 +145,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "v0 [cm/s] . " << v0 << std::endl;
     std::cout << "T0 [K] .... " << T0 << std::endl;
     std::cout << "w [cm] .... " << w << std::endl;
+    std::cout << "v_offset .. " << v_offset << std::endl;
     std::cout << "delta [cm]  " << delta << std::endl;
     std::cout << "powP [-] .. " << powP << std::endl;
     std::cout << "powV [-] .. " << powV << std::endl;
@@ -168,7 +170,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IDN, k, j, i) = rho0 * (1.0 + std::pow(std::abs(y), powRho)); // Density
 
         u(IM1, k, j, i) = 0.0;  // Initial Momentum is zero
-        u(IM2, k, j, i) = -1.0 * SIGN(y) * u(IDN, k, j, i) * v0 * (1.0 + std::pow(std::abs(y), powV));
+        u(IM2, k, j, i) = -1.0 * SIGN(y) * u(IDN, k, j, i) * v0 * (v_offset + std::pow(std::abs(y), powV));
         u(IM3, k, j, i) = 0.0;
 
         Real b1x, b2x, b1y, b2y;  // Helper variables for clarity
