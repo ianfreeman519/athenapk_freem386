@@ -509,6 +509,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         pkg->AddParam<>("mu_e", Z);
         pkg->AddParam<>("mbar", mmw * units.atomic_mass_unit());
         pkg->AddParam<>("mbar_over_kb", mmw * units.mh() / units.k_boltzmann());
+        pkg->AddParam<>("He_mass_fraction", 0.0);
     }
 
     // By default disable floors by setting a negative value
