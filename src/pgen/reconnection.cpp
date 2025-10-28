@@ -38,6 +38,7 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   hydro_pkg->AddField("curlBz", m);
   hydro_pkg->AddField("beta", m);
   hydro_pkg->AddField("eta", m);
+  hydro_pkg->AddField("T", m);
 }
 
 // storing the curls just before output
@@ -61,6 +62,8 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &curlBz = data->Get("curlBz").data;
   auto &eta_field    = data->Get("eta").data;
   auto &beta_field   = data->Get("beta").data;
+  auto &T_field      = data->Get("T").data;
+  const auto units = hydro_pkg->Param<Units>("units");
 
   // Getting indices
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
@@ -70,7 +73,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   IndexRange jb_int = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb_int = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  // Actually computing and storing curl data?
+  // Actually computing and storing curl data
   pmb->par_for(
       "reconnection::UserWorkBeforeOutput", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int k, const int j, const int i) {
@@ -90,6 +93,9 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         // Calculating 
         Real rho = u(IDN, k, j, i);
         Real p = u(IPR, k, j, i);
+        Real mbar = hydro_pkg->Param<Real>("mbar");
+        Real kb = units.k_boltzmann();
+        T_field(k, j, i) = mbar / kb * p / rho;
 
         // beta = p / (B^2 / 2) - in Heaviside Lorentz units, this is p / (0.5 * 4pi * B^2)
         beta_field(k, j, i) = p / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));

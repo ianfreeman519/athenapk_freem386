@@ -125,7 +125,7 @@ void LinearBC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
       "LinearBC_point_slope", nv, domain, parthenon::TopologicalElement::CC, coarse, fine,
       KOKKOS_LAMBDA(const int &v, const int &k, const int &j, const int &i) {
         // Neighbor one cell deeper into the interior along the active direction
-        if constexpr (X1) {
+        if (X1) {
           const int nbr = ref + (INNER ? +1 : -1);
 
           const Real x_ref = coords.Xc<1>(ref);
@@ -140,7 +140,7 @@ void LinearBC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
           const Real x_g = coords.Xc<1>(i);
           cons(v, k, j, i) = m * (x_g - x_ref) + u_ref;
 
-        } else if constexpr (X2) {
+        } else if (X2) {
           const int nbr = ref + (INNER ? +1 : -1);
 
           const Real x_ref = coords.Xc<2>(ref);
