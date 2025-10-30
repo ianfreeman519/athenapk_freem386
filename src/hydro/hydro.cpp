@@ -676,14 +676,15 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         // Check for specified coulomb logarithm (eta depends on ln(Lambda))
         // Reasonable value for coulomb log is 10
         Real spitzer_log_lambda = pin->GetOrAddReal("diffusion", "spitzer_log_lambda", 10.0);
-        auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff, spitzer_log_lambda, 
-                                         pkg->Param<Real>("mbar"), units.electron_mass(), units.k_boltzmann());
+        auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff, spitzer_log_lambda,
+                                         pkg->Param<Real>("mbar"), units.electron_mass(),
+                                         units.k_boltzmann(), units.speed_of_light());
         pkg->AddParam<>("ohm_diff", ohm_diff);
       } else if (resistivity_coeff_str == "fixed") {
         resistivity_coeff = ResistivityCoeff::fixed;
         Real ohm_diff_coeff_code = pin->GetReal("diffusion", "ohm_diff_coeff_code");
-        auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff, ohm_diff_coeff_code, 
-                                         0.0, 0.0, 0.0);
+        auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff, ohm_diff_coeff_code,
+                                         0.0, 0.0, 0.0, 0.0);
         pkg->AddParam<>("ohm_diff", ohm_diff);
 
       } else {

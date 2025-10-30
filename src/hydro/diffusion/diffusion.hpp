@@ -138,13 +138,14 @@ struct OhmicDiffusivity {
   ResistivityCoeff resistivity_coeff_type_;
   // "free" coefficient/prefactor. Value depends on resistivity set in the constructor.
   Real coeff_;
+  Real c_;
 
  public:
   KOKKOS_INLINE_FUNCTION
   OhmicDiffusivity(Resistivity resistivity, ResistivityCoeff resistivity_coeff_type,
-                   Real coeff, Real mbar, Real me, Real kb)
+                   Real coeff, Real mbar, Real me, Real kb, Real c)
       : resistivity_(resistivity), resistivity_coeff_type_(resistivity_coeff_type),
-        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb) {}
+        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb), c_(c) {}
 
   KOKKOS_INLINE_FUNCTION
   Real Get(const Real pres, const Real rho) const {
@@ -153,8 +154,13 @@ struct OhmicDiffusivity {
     } else if (resistivity_coeff_type_ == ResistivityCoeff::spitzer) {
       Real T_cgs = mbar_ / kb_ * pres / rho;
       Real ln_Lambda = coeff_;
-      Real Z_bar_e_squared = 10 * std::pow(1.702691733e-9, 2);
-      Real coeff = Z_bar_e_squared * std::sqrt(me_) / (16 * M_PI) * std::pow(T_cgs * kb_, -1.5);
+      constexpr Real e_hl = 1.702691733e-9; // electron charge in Heaviside-Lorentz CGS
+      Real Z_e_sq = 10.0 * e_hl * e_hl;
+      Real kT = T_cgs * kb_;
+      // Spitzer magnetic diffusivity in HL-CGS:
+      //   eta = (sqrt(2) c^2 / (12 pi^{3/2})) * lnΛ * Z e^2 sqrt(m_e) / (kT)^{3/2}
+      Real coeff = std::sqrt(2.0) * c_ * c_ * ln_Lambda * Z_e_sq * std::sqrt(me_);
+      coeff /= 12.0 * std::pow(M_PI, 1.5) * std::pow(kT, 1.5);
       return coeff;
     }
     PARTHENON_FAIL("Unknown Resistivity coeff");

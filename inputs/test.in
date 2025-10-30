@@ -1,0 +1,82 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE");
+
+<comment>
+problem = Reconnection I made it up
+
+<job>
+problem_id = reconnection
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic          # none (disabled) or ohmic
+resistivity_coeff = spitzer     # If set to fixed, the initial temperature T0 is treated as the initial thermal pressure
+spitzer_log_lambda = 10
+
+# ohm_diff_coeff_code = 1e-5  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
+
+<units>
+code_length_cgs = 1.0 
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/reconnection>
+B0 = 1e5
+rho0 = 1e-4
+powRho = 3.0
+T0 = 1e5        # this is passed into internal energy as += rho*k*T/mbar
+powP = 3.0
+delta = 1e-10       # Small enough the loops turn off
+w = 1e-10           # Small enough the loops turn off
+v0 = 1e6
+powV = 3.0
+v_offset = 1.0
+
+<parthenon/mesh>
+refinement = static
+nghost = 2
+
+nx1 = 128
+x1min = -1.5
+x1max = 1.5
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2 = 128
+x2min = -0.5
+x2max = 0.5
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/meshblock>
+nx1 = 128
+nx2 = 128
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.45
+tlim = 0.01
+nlim = -1
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.001
+first_order_flux_correct = true
+
+mean_molecular_weight = 27
+Z = 13
+
+<parthenon/output0>
+file_type = hst
+dt = 0.001
