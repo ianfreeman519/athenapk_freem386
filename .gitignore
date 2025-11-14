@@ -3,6 +3,9 @@ build*/
 CMakeFiles/*
 test*/
 
+# Conversations
+codex*
+
 # Python env
 athenapk-env/
 

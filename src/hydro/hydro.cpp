@@ -487,7 +487,6 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   if (eos_str == "adiabatic") {
     Real gamma = pin->GetReal("hydro", "gamma");
     pkg->AddParam<>("AdiabaticIndex", gamma);
-    std::cout << pkg->AllParams().hasKey("units") << std::endl;
     if (pin->DoesParameterExist("hydro", "He_mass_fraction") &&
         pkg->AllParams().hasKey("units")) {
         auto units = pkg->Param<Units>("units");
