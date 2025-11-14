@@ -128,7 +128,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real v0   = pin->GetOrAddReal("problem/reconnection", "v0", 0.0);
   Real powRho = pin->GetOrAddReal("problem/reconnection", "powRho", 0.0);
   Real v_offset = pin->GetOrAddReal("problem/reconnection", "v_offset", 1.0); 
-  
+  Real loop_x1 = pin->GetOrAddReal("problem/reconnection", "loop_x1", -1.0);
+  Real loop_x2 = pin->GetOrAddReal("problem/reconnection", "loop_x2",  1.0);
   
   // Checking if spitzer or fixed ohmic resistivity is turned on:
   Real k_b, atomic_mass_unit, m_bar, P_thermal_central;
@@ -181,13 +182,13 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
         Real b1x, b2x, b1y, b2y;  // Helper variables for clarity
         // Gaussian Loop in x (clamping exponential terms to prevent infinitely small and large values)
-        Real exp1 = std::clamp(-std::pow(4*(x+1.0)/w, 2) - std::pow(4*y/delta, 2), -300.0, 300.0);
-        Real exp2 = std::clamp(-std::pow(4*(x-1.0)/w, 2) - std::pow(4*y/delta, 2), -300.0, 300.0);
+        Real exp1 = std::clamp(-std::pow(4*(x-loop_x1)/w, 2) - std::pow(4*y/delta, 2), -300.0, 300.0);
+        Real exp2 = std::clamp(-std::pow(4*(x-loop_x2)/w, 2) - std::pow(4*y/delta, 2), -300.0, 300.0);
         b1x = 2*M_PI*w*y/delta * std::exp(exp1);
         b2x = 2*M_PI*w*y/delta * std::exp(exp2);
         // Gaussian Loop in y
-        b1y = 2*M_PI*delta/w * (-1.0 - x) * std::exp(exp1);
-        b2y = 2*M_PI*delta/w * ( 1.0 - x) * std::exp(exp2);
+        b1y = 2*M_PI*delta/w * (loop_x1 - x) * std::exp(exp1);
+        b2y = 2*M_PI*delta/w * (loop_x2 - x) * std::exp(exp2);
         u(IB1, k, j, i) = B0*(b1x + b2x + std::tanh(y/delta));
         u(IB2, k, j, i) = B0*(b1y + b2y);
         u(IB3, k, j, i) = 0.0;
