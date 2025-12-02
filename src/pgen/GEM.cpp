@@ -123,8 +123,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real rho0   = pin->GetOrAddReal("problem/GEM", "rho0", 1.0);
   Real rhoinf = 0.2 * rho0;
   Real T0   = pin->GetOrAddReal("problem/GEM", "T0", 1.0);
-  Real psi0 = pin->GetOrAddReal("problem/GEM", "psi0", 0.1); // Assuming input is a fraction of B0
-  psi0 = psi0 * B0; // Scaling to actual units
+  // psi0 in the input is interpreted as a vector-potential amplitude (fraction of B0*lambda)
+  // so the resulting perturbation field is O(psi0 * B0).
+  Real psi0 = pin->GetOrAddReal("problem/GEM", "psi0", 0.1);
+  psi0 = psi0 * B0 * lambda; // convert to B*L units for A_z
   Real lambda=pin->GetOrAddReal("problem/GEM", "lambda", 0.5);
   Real Lx   = pin->GetReal("problem/GEM", "Lx");
   Real Ly   = pin->GetReal("problem/GEM", "Ly");
@@ -148,7 +150,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "rho0 [g] ... " << rho0 << std::endl;
     std::cout << "T0 [K] ..... " << T0 << std::endl;
     std::cout << "P_th [erg/cc]" << P_thermal_central << std::endl;
-    std::cout << "psi0 [G].... " << psi0 << std::endl;
+    std::cout << "psi0 [G*cm]. " << psi0 << std::endl;
     std::cout << "lambda ..... " << lambda << std::endl;
     std::cout << "Lx [cm] .... " << Lx << std::endl;
     std::cout << "Ly [cm] .... " << Ly << std::endl;
@@ -168,9 +170,11 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IM2, k, j, i) = 0.0;
         u(IM3, k, j, i) = 0.0;
 
-        Real bx, by;  // storing curl(psi)
-        bx = M_PI*psi0*std::cos(2*M_PI*x/Lx)*std::sin(M_PI*y/Ly)/Ly;
-        by = 2*M_PI*psi0*std::sin(2*M_PI*x/Lx)*std::cos(M_PI*y/Ly)/Lx;
+        // Perturbation from A_z = psi0 * cos(2pi x/Lx) * cos(pi y/Ly)
+        // (psi0 already has B*L units)
+        Real bx, by;  // storing curl(A_z)
+        bx = M_PI*psi0*std::cos(2*M_PI*x/Lx)*std::sin(M_PI*y/Ly)/(Ly);
+        by = 2*M_PI*psi0*std::sin(2*M_PI*x/Lx)*std::cos(M_PI*y/Ly)/(Lx);
   
         u(IB1, k, j, i) = B0*std::tanh(y/lambda) + bx;
         u(IB2, k, j, i) = by;
