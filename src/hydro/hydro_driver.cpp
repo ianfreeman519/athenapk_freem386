@@ -4,6 +4,7 @@
 // Licensed under the BSD 3-Clause License (the "LICENSE").
 //========================================================================================
 
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <string>
@@ -38,6 +39,51 @@ HydroDriver::HydroDriver(ParameterInput *pin, ApplicationInput *app_in, Mesh *pm
 
   // warn if these fields aren't specified in the input file
   pin->CheckDesired("parthenon/time", "cfl");
+}
+
+void HydroDriver::OutputCycleDiagnostics() {
+  const int dt_precision = std::numeric_limits<Real>::max_digits10 - 1;
+  if (tm.ncycle_out != 0) {
+    if (tm.ncycle % tm.ncycle_out == 0) {
+      std::uint64_t zonecycles =
+          (pmesh->mbcnt - mbcnt_prev) *
+          static_cast<std::uint64_t>(pmesh->GetNumberOfMeshBlockCells());
+      const auto time_cycle_all = timer_cycle.seconds();
+      const auto time_cycle_step = time_cycle_all - time_LBandAMR;
+      const auto wtime = timer_main.seconds();
+
+      std::string limiter_src = "unknown";
+      if (pmesh->packages.AllPackages().count("Hydro") > 0) {
+        auto hydro_pkg = pmesh->packages.Get("Hydro");
+        limiter_src = hydro_pkg->Param<std::string>("last_dt_source");
+      }
+
+      std::cout << "cycle=" << tm.ncycle << std::scientific
+                << std::setprecision(dt_precision) << " time=" << tm.time
+                << " dt=" << tm.dt << std::setprecision(2) << " zone-cycles/wsec_step="
+                << static_cast<double>(zonecycles) / time_cycle_step
+                << " wsec_total=" << wtime << " wsec_step=" << time_cycle_step
+                << " timestep dictated by " << limiter_src << std::endl;
+
+      // reset cycle related counters
+      timer_cycle.reset();
+      time_LBandAMR = 0.0;
+      // need to cache number of MeshBlocks as AMR/load balance change it
+      mbcnt_prev = pmesh->mbcnt;
+    }
+  }
+  if (tm.ncycle_out_mesh != 0) {
+    // output after mesh refinement (enabled by use of negative cycle number)
+    if (tm.ncycle_out_mesh < 0 && pmesh->modified) {
+      std::cout << "-------------- New Mesh structure after (de)refinement -------------";
+      pmesh->OutputMeshStructure(-1, false);
+    }
+    // output after every nth mesh refinement (enabled by use of positive cycle number)
+    if (tm.ncycle_out_mesh > 0 && tm.ncycle % tm.ncycle_out_mesh == 0) {
+      std::cout << "-------------- New Mesh structure after (de)refinement -------------";
+      pmesh->OutputMeshStructure(tm.ncycle, tm.ncycle > 0 ? true : false);
+    }
+  }
 }
 
 // Sets all fluxes to 0
