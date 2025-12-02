@@ -28,4 +28,5 @@ target_sources(athenaPK PRIVATE
     reconnection.cpp
     breakRefinementBoundaries.cpp
     periodic_reconnection.cpp
+    GEM.cpp
     )

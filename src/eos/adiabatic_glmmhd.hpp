@@ -131,7 +131,10 @@ class AdiabaticGLMMHDEOS : public EquationOfState {
       u_e -= e_k - e_k_new;
       e_k = e_k_new;
     }
-
+    // Letting me know where things are going negative, if they are at all...
+    if (w_p < 0) {
+      std::cout << "Got negative pressure at " << i << "," << j << "," << k << ": " << w_p << std::endl;
+    }
     // Let's apply floors explicitly, i.e., by default floor will be disabled (<=0)
     // and the code will fail if a negative pressure is encountered.
     PARTHENON_REQUIRE(w_p > 0.0 || pressure_floor_ > 0.0 || e_floor_ > 0.0,

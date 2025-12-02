@@ -1,0 +1,85 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE");
+
+<comment>
+problem = GEM - Birn 2001
+
+<job>
+problem_id = GEM
+
+<diffusion>
+integrator = unsplit
+resistivity = ohmic          # none (disabled) or ohmic
+resistivity_coeff = fixed
+ohm_diff_coeff_code = 1
+
+<units>
+code_length_cgs = 1.0 
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/GEM>
+B0 = 1e4
+rho0 = 3.2e-3
+T0 = 4.6e5
+psi0 = 0.1
+lambda = 1.2125e-7
+Lx = 6.208e-6
+Ly = 3.104e-6
+
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+
+nx1 = 128
+x1min = -3.104e-6
+x1max = 3.104e-6
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2 = 128
+x2min = -1.552e-6
+x2max = 1.552e-6
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3 = 1
+x3min = -1
+x3max = 1
+ix3_bc = periodic
+ox3_bc = periodic
+
+
+<parthenon/meshblock>
+nx1 = 128
+nx2 = 128
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.45
+tlim = 1e-16
+nlim = -1
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.66666666 # gamma = C_p/C_v
+first_order_flux_correct = true
+
+mean_molecular_weight = 27
+Z = 13
+
+<parthenon/output0>
+file_type = hdf5
+dt = 1e-19
+id = out0
+variables = prim, curlBx, curlBy, curlBz, beta, T, eta
+
+<parthenon/output1>
+file_type = hst
+ncycle = 1

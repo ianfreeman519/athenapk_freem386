@@ -89,6 +89,10 @@ int main(int argc, char *argv[]) {
     pman.app_input->ProblemGenerator = reconnection::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput = reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = reconnection::ProblemInitPackageData;
+  } else if (problem == "GEM") {
+    pman.app_input->ProblemGenerator = GEM::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput = GEM::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = GEM::ProblemInitPackageData;
   } else if (problem == "periodic_reconnection") {
     pman.app_input->ProblemGenerator = periodic_reconnection::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput = periodic_reconnection::UserWorkBeforeOutput;
