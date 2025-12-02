@@ -12,7 +12,7 @@ problem_id = GEM
 integrator = unsplit
 resistivity = ohmic          # none (disabled) or ohmic
 resistivity_coeff = fixed
-ohm_diff_coeff_code = 1
+ohm_diff_coeff_code = 6.37e-8 # Normalized value
 
 <units>
 code_length_cgs = 1.0 
@@ -20,9 +20,9 @@ code_mass_cgs = 1.0
 code_time_cgs = 1.0
 
 <problem/GEM>
-B0 = 1e4
+B0 = 1e5
 rho0 = 3.2e-3
-T0 = 4.6e5
+T0 = 4e2        # normalized GEM ICs - 100x cooler than MAGPIE experiments
 psi0 = 0.1
 lambda = 1.2125e-7
 Lx = 6.208e-6
@@ -30,16 +30,16 @@ Ly = 3.104e-6
 
 
 <parthenon/mesh>
-refinement = none
+refinement = static
 nghost = 2
 
-nx1 = 128
+nx1 = 512
 x1min = -3.104e-6
 x1max = 3.104e-6
 ix1_bc = periodic
 ox1_bc = periodic
 
-nx2 = 128
+nx2 = 512
 x2min = -1.552e-6
 x2max = 1.552e-6
 ix2_bc = outflow
@@ -51,16 +51,24 @@ x3max = 1
 ix3_bc = periodic
 ox3_bc = periodic
 
+<parthenon/static_refinement0>
+x1min = -3.104e-6
+x1max =  3.104e-6
+x2min = -1.552e-7
+x2max =  1.552e-7
+x3min = -0.0
+x3max =  0.0
+level =  2
 
 <parthenon/meshblock>
-nx1 = 128
-nx2 = 128
+nx1 = 64
+nx2 = 64
 nx3 = 1
 
 <parthenon/time>
 integrator = vl2
 cfl = 0.45
-tlim = 1e-16
+tlim = 1e-10
 nlim = -1
 
 <hydro>
@@ -76,7 +84,7 @@ Z = 13
 
 <parthenon/output0>
 file_type = hdf5
-dt = 1e-19
+dt = 1e-18
 id = out0
 variables = prim, curlBx, curlBy, curlBz, beta, T, eta
 

@@ -193,9 +193,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
         // Getting negative pressures : checking that here:
         if ((i + j + k)%63 == 0) {
-          std::cout << "Thermal Pressure at (" << i << "," << j << "," << k <<") = " << P << std::endl;
-          std::cout << "Kinetic Energy Dens (" << i << "," << j << "," << k <<") = " << 0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) / u(IDN, k, j, i) << std::endl;
-          std::cout << "Magnetic E. Density (" << i << "," << j << "," << k <<") = " << 0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i))) << std::endl;
+          std::cout << "Thermal Pressure at (" << x << ", " << y << ") = " << P << std::endl;
+          std::cout << "Kinetic Energy Dens (" << x << ", " << y << ") = " << 0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) / u(IDN, k, j, i) << std::endl;
+          std::cout << "Magnetic E. Density (" << x << ", " << y << ") = " << 0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i))) << std::endl;
         }
       });
 }
