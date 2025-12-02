@@ -312,6 +312,18 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   // hyperbolic timestep constraint
   pkg->AddParam<Real>("dt_hyp", std::numeric_limits<Real>::max(),
                       Params::Mutability::Mutable);
+  // Bookkeeping for reporting timestep limiters
+  pkg->AddParam<Real>("last_dt_hyp", std::numeric_limits<Real>::max(),
+                      Params::Mutability::Mutable);
+  pkg->AddParam<Real>("last_dt_diff", std::numeric_limits<Real>::max(),
+                      Params::Mutability::Mutable);
+  pkg->AddParam<Real>("last_dt_cool", std::numeric_limits<Real>::max(),
+                      Params::Mutability::Mutable);
+  pkg->AddParam<Real>("last_dt_prob", std::numeric_limits<Real>::max(),
+                      Params::Mutability::Mutable);
+  pkg->AddParam<Real>("last_dt_limiter", std::numeric_limits<Real>::max(),
+                      Params::Mutability::Mutable);
+  pkg->AddParam<std::string>("last_dt_source", "none", Params::Mutability::Mutable);
 
   const auto recon_str = pin->GetString("hydro", "reconstruction");
   int recon_need_nghost = 3; // largest number for the choices below
@@ -935,25 +947,17 @@ Real EstimateTimestep(MeshData<Real> *md) {
   const auto calc_dt_hyp = hydro_pkg->Param<bool>("calc_dt_hyp");
   if (calc_dt_hyp) {
     dt_hyp = EstimateHyperbolicTimestep<fluid>(md);
-    if (my_rank == 0) {
-      std::cout << "Estimated hyperbolic timestep: " << dt_hyp;
-    }
     min_dt = std::min(min_dt, dt_hyp);
   }
 
   const auto &enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
-
   if (enable_cooling == Cooling::tabular) {
     const TabularCooling &tabular_cooling =
         hydro_pkg->Param<TabularCooling>("tabular_cooling");
-    if (my_rank == 0) {
-      std::cout << "\tEstimated cooling timestep: "
-                << tabular_cooling.EstimateTimeStep(md);
-    }
-    min_dt = std::min(min_dt, tabular_cooling.EstimateTimeStep(md));
+    dt_cool = tabular_cooling.EstimateTimeStep(md);
+    min_dt = std::min(min_dt, dt_cool);
   }
 
-  auto dt_diff = std::numeric_limits<Real>::max();
   if (hydro_pkg->Param<DiffInt>("diffint") != DiffInt::none) {
     if (hydro_pkg->Param<Conduction>("conduction") != Conduction::none) {
       dt_diff = std::min(dt_diff, EstimateConductionTimestep(md));
@@ -963,9 +967,6 @@ Real EstimateTimestep(MeshData<Real> *md) {
     }
     if (hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none) {
       dt_diff = std::min(dt_diff, EstimateResistivityTimestep(md));
-    }
-    if (my_rank == 0) {
-      std::cout << "\tEstimated diffusive timestep: " << dt_diff;
     }
     // For unsplit ingegration use strict limit
     if (hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
@@ -986,23 +987,51 @@ Real EstimateTimestep(MeshData<Real> *md) {
   }
 
   if (ProblemEstimateTimestep != nullptr) {
-    min_dt = std::min(min_dt, ProblemEstimateTimestep(md));
-    if (my_rank == 0) {
-      std::cout << "\tEstimated problem timestep: " << min_dt;
-    }
+    dt_prob = ProblemEstimateTimestep(md);
+    min_dt = std::min(min_dt, dt_prob);
+  }
+
+#ifdef MPI_PARALLEL
+  // Reduce timestep estimates across ranks so reporting uses the true global limiter.
+  Real dt_candidates[4] = {dt_hyp, dt_diff, dt_cool, dt_prob};
+  PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, dt_candidates, 4, MPI_PARTHENON_REAL,
+                                    MPI_MIN, MPI_COMM_WORLD));
+  dt_hyp = dt_candidates[0];
+  dt_diff = dt_candidates[1];
+  dt_cool = dt_candidates[2];
+  dt_prob = dt_candidates[3];
+#endif
+
+  Real limiter_dt = std::min(std::min(dt_hyp, dt_diff), std::min(dt_cool, dt_prob));
+  std::string limiter_src = "none";
+  // Determine which physics set the limiter (use ordering to break ties deterministically)
+  if (limiter_dt == dt_hyp) {
+    limiter_src = "hyperbolic";
+  } else if (limiter_dt == dt_diff) {
+    limiter_src = "diffusion";
+  } else if (limiter_dt == dt_cool) {
+    limiter_src = "cooling";
+  } else if (limiter_dt == dt_prob) {
+    limiter_src = "problem";
   }
 
   // maximum user dt
   const auto max_dt = hydro_pkg->Param<Real>("max_dt");
   if (max_dt > 0.0) {
-    if (my_rank == 0) {
-      std::cout << "\tMaximum user timestep: " << max_dt;
+    if (max_dt < min_dt) {
+      limiter_dt = max_dt;
+      limiter_src = "user_max";
     }
     min_dt = std::min(min_dt, max_dt);
   }
-  if (my_rank == 0) {
-    std::cout << "\tUsing timestep: " << min_dt << std::endl;
-  }
+
+  hydro_pkg->UpdateParam("last_dt_hyp", dt_hyp);
+  hydro_pkg->UpdateParam("last_dt_diff", dt_diff);
+  hydro_pkg->UpdateParam("last_dt_cool", dt_cool);
+  hydro_pkg->UpdateParam("last_dt_prob", dt_prob);
+  hydro_pkg->UpdateParam("last_dt_limiter", limiter_dt);
+  hydro_pkg->UpdateParam("last_dt_source", limiter_src);
+
   return min_dt;
 }
 
