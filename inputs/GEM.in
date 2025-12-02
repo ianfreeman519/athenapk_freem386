@@ -12,7 +12,7 @@ problem_id = GEM
 integrator = unsplit
 resistivity = ohmic          # none (disabled) or ohmic
 resistivity_coeff = fixed
-ohm_diff_coeff_code = 6.37e-8 # Normalized value
+ohm_diff_coeff_code = 1
 
 <units>
 code_length_cgs = 1.0 
