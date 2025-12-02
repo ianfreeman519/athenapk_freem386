@@ -47,6 +47,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &coords = pmb->coords;
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
+  auto &w = mbd->Get("prim").data;
   auto &data = pmb->meshblock_data.Get(); // This is for grabbing the meshblocks defined above
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
   const bool has_ohm_diff = hydro_pkg->AllParams().hasKey("ohm_diff");
@@ -91,8 +92,9 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         term2 = (u(IB1,k,j+1,i) - u(IB1,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1));
         curlBz(k, j, i) = term1 - term2;
         // Calculating 
-        Real rho = u(IDN, k, j, i);
-        Real p = u(IPR, k, j, i);
+        // Use primitive pressure for temperature; conserved array doesn't store p.
+        Real rho = w(IDN, k, j, i);
+        Real p = w(IPR, k, j, i);
         Real mbar = hydro_pkg->Param<Real>("mbar");
         Real kb = units.k_boltzmann();
         T_field(k, j, i) = mbar / kb * p / rho;
@@ -191,12 +193,6 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
                    (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) /
                        u(IDN, k, j, i));
 
-        // Getting negative pressures : checking that here:
-        if ((i + j + k)%63 == 0) {
-          std::cout << "Thermal Pressure at (" << x << ", " << y << ") = " << P << std::endl;
-          std::cout << "Kinetic Energy Dens (" << x << ", " << y << ") = " << 0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) / u(IDN, k, j, i) << std::endl;
-          std::cout << "Magnetic E. Density (" << x << ", " << y << ") = " << 0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i))) << std::endl;
-        }
       });
 }
 } // namespace GEM
