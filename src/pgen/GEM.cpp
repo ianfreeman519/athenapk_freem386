@@ -126,8 +126,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   // psi0 in the input is interpreted as a vector-potential amplitude (fraction of B0*lambda)
   // so the resulting perturbation field is O(psi0 * B0).
   Real psi0 = pin->GetOrAddReal("problem/GEM", "psi0", 0.1);
-  psi0 = psi0 * B0 * lambda; // convert to B*L units for A_z
   Real lambda=pin->GetOrAddReal("problem/GEM", "lambda", 0.5);
+  psi0 = psi0 * B0 * lambda; // convert to B*L units for A_z
   Real Lx   = pin->GetReal("problem/GEM", "Lx");
   Real Ly   = pin->GetReal("problem/GEM", "Ly");
 
