@@ -120,7 +120,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto detected_resistivity_type = pin->GetOrAddString("diffusion", "resistivity_coeff", "none");
 
   Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
-  Real B0   = pin->GetOrAddReal("problem/GEM", "B0", 1.0) / SQRT(4 * M_PI);  // Assuming input is in Gauss
+  Real B0   = pin->GetOrAddReal("problem/GEM", "B0", 1.0) / std::sqrt(4 * M_PI);  // Assuming input is in Gauss
   Real Z    = pin->GetOrAddReal("hydro", "Z", 1.0);
   Real rho0   = pin->GetOrAddReal("problem/GEM", "rho0", 1.0);
   Real rhoinf = 0.2 * rho0;
