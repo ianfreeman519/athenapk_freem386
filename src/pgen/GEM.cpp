@@ -173,7 +173,28 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         Real x, y;
         x = coords.Xc<1>(i);
         y = coords.Xc<2>(j);
-        u(IDN, k, j, i) = rho0 / std::pow(std::cosh(y/lambda), 2) + rhoinf; // Density
+        // Base Harris sheet plus ambient
+        Real rho_base = rho0 / std::pow(std::cosh(y/lambda), 2) + rhoinf;
+
+        // Optional dense wires at y = +/- Ly/2 with Gaussian profile (sigma = wire_w0)
+        Real rho_wire = 0.0;
+        Real Twire = 0.0;
+        if (wire_w0 > 0.0) {
+          const Real sig2 = wire_w0 * wire_w0;
+          const Real dy_pos = y - 0.5 * Ly;
+          const Real dy_neg = y + 0.5 * Ly;
+          // Clamp exponent to avoid overflow/underflow
+          Real exp_pos = -0.5 * dy_pos * dy_pos / sig2;
+          exp_pos = fmax(fmin(exp_pos, 300.0), -300.0);
+          Real exp_neg = -0.5 * dy_neg * dy_neg / sig2;
+          exp_neg = fmax(fmin(exp_neg, 300.0), -300.0);
+          Real g_pos = std::exp(exp_pos);
+          Real g_neg = std::exp(exp_neg);
+          rho_wire = wire_m0 * (g_pos + g_neg);
+          Twire = wire_T0 * (g_pos + g_neg);
+        }
+
+        u(IDN, k, j, i) = rho_base + rho_wire; // Density
 
         u(IM1, k, j, i) = 0.0;  // Initial Momentum is zero
         u(IM2, k, j, i) = 0.0;
@@ -184,13 +205,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         Real bx, by;  // storing curl(A_z)
         bx = M_PI*psi0*std::cos(2*M_PI*x/Lx)*std::sin(M_PI*y/Ly)/(Ly);
         by = 2*M_PI*psi0*std::sin(2*M_PI*x/Lx)*std::cos(M_PI*y/Ly)/(Lx);
-  
+
         u(IB1, k, j, i) = B0*std::tanh(y/lambda) + bx;
         u(IB2, k, j, i) = by;
         u(IB3, k, j, i) = 0.0;
 
         // if spitzer turned on, use units, otherwise treat T0 as an initial P_thermal
-        Real P_thermal = T0 * k_b * u(IDN, k, j, i) / m_bar;
+        Real local_T = T0 + Twire;
+        Real P_thermal = local_T * k_b * u(IDN, k, j, i) / m_bar;
 
         Real P = P_thermal;
 
