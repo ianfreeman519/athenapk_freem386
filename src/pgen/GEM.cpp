@@ -146,9 +146,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
   P_thermal_central = T0 * k_b * rho0 / m_bar;
 
-  // Printing out input values for slurm records ONLY on first block and first rank
-  if (parthenon::Globals::my_rank == 0 && pmb->loc.lx1 == 0 && pmb->loc.lx2 == 0 &&
-      pmb->loc.lx3 == 0) {
+  // Printing out input values for slurm records ONLY on the first block of rank 0
+  if (parthenon::Globals::my_rank == 0 && pmb->gid == 0) {
     std::cout << "========================================" << std::endl;
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ...... " << pin->GetReal("hydro", "gamma") << std::endl;
