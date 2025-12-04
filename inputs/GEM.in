@@ -12,7 +12,7 @@ problem_id = GEM
 integrator = unsplit
 resistivity = ohmic          # none (disabled) or ohmic
 resistivity_coeff = fixed
-ohm_diff_coeff_code = .36   # Normalized value
+ohm_diff_coeff_code = 8.3e2   # Normalized value
 
 <units>
 code_length_cgs = 1.0 
@@ -20,13 +20,13 @@ code_mass_cgs = 1.0
 code_time_cgs = 1.0
 
 <problem/GEM>
-B0 = 1e5
-rho0 = 3.2e-3
-T0 = 4e2        # normalized GEM ICs - 100x cooler than MAGPIE experiments
-psi0 = 0.1
-lambda = 1.2125e-7
-Lx = 6.208e-6
-Ly = 3.104e-6
+B0 = 3.0e4           # Gauss 
+rho0 = 3.16e-3       # g/cm^3 (from aluminum with ~3 electrons stripped)
+T0 = 4.6e5           # Kelvin (40 eV, at this temperature n_e ~ 3n_i)
+psi0 = 0.1           # dimensionless; code scales to A_z amplitude psi0 * B0 * lambda
+lambda = 3.4e-2      # cm; 0.5 d_i with d_i ≈ 6.8e-2 cm at n_i ≈ 3e17 cm^-3, Z≈3
+Lx = 1.74            # cm; 25.6 d_i
+Ly = 0.87            # cm; 12.8 d_i
 
 
 <parthenon/mesh>
@@ -34,14 +34,14 @@ refinement = static
 nghost = 2
 
 nx1 = 512
-x1min = -3.104e-6
-x1max = 3.104e-6
+x1min = -0.87
+x1max = 0.87
 ix1_bc = periodic
 ox1_bc = periodic
 
-nx2 = 512
-x2min = -1.552e-6
-x2max = 1.552e-6
+nx2 = 256
+x2min = -0.435
+x2max = 0.435
 ix2_bc = outflow
 ox2_bc = outflow
 
@@ -52,10 +52,10 @@ ix3_bc = periodic
 ox3_bc = periodic
 
 <parthenon/static_refinement0>
-x1min = -3.104e-6
-x1max =  3.104e-6
-x2min = -1.552e-7
-x2max =  1.552e-7
+x1min = -0.87
+x1max =  0.87
+x2min = -0.1
+x2max =  0.1
 x3min = -0.0
 x3max =  0.0
 level =  2
@@ -68,7 +68,8 @@ nx3 = 1
 <parthenon/time>
 integrator = vl2
 cfl = 0.45
-tlim = 1e-10
+tlim = 1e-6
+dt_max = 1e-9
 nlim = -1
 
 <hydro>
@@ -80,11 +81,11 @@ gamma = 1.66666666 # gamma = C_p/C_v
 first_order_flux_correct = true
 
 mean_molecular_weight = 27
-Z = 13
+Z =13
 
 <parthenon/output0>
 file_type = hdf5
-dt = 1e-18
+dt = 1e-9
 id = out0
 variables = prim, curlBx, curlBy, curlBz, beta, T, eta
 

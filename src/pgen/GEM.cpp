@@ -132,6 +132,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   psi0 = psi0 * B0 * lambda; // convert to B*L units for A_z
   Real Lx   = pin->GetReal("problem/GEM", "Lx");
   Real Ly   = pin->GetReal("problem/GEM", "Ly");
+  Real wire_w0   = pin->GetOrAddReal("problem/GEM", "wire_w0", 0.0);
+  Real wire_m0   = pin->GetOrAddReal("problem/GEM", "wire_m0", 0.0);
+  Real wire_T0   = pin->GetOrAddReal("problem/GEM", "wire_T0", 0.0);
 
   // Checking if spitzer or fixed ohmic resistivity is turned on:
   Real k_b, atomic_mass_unit, m_bar, P_thermal_central;
@@ -143,8 +146,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
   P_thermal_central = T0 * k_b * rho0 / m_bar;
 
-  // Printing out input values for slurm records
-  if (parthenon::Globals::my_rank == 0) {
+  // Printing out input values for slurm records ONLY on first block and first rank
+  if (parthenon::Globals::my_rank == 0 && pmb->loc.lx1 == 0 && pmb->loc.lx2 == 0 &&
+      pmb->loc.lx3 == 0) {
     std::cout << "========================================" << std::endl;
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ...... " << pin->GetReal("hydro", "gamma") << std::endl;
@@ -156,6 +160,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "lambda ..... " << lambda << std::endl;
     std::cout << "Lx [cm] .... " << Lx << std::endl;
     std::cout << "Ly [cm] .... " << Ly << std::endl;
+    std::cout << "wire_w0 ... " << wire_w0 << std::endl;
+    std::cout << "wire_m0 ... " << wire_m0 << std::endl;
+    std::cout << "wire_T0 ... " << wire_T0 << std::endl;
+    std::cout << "=========================================" << std::endl;
   }
 
   auto &coords = pmb->coords;
