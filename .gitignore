@@ -3,6 +3,9 @@ build*/
 CMakeFiles/*
 test*/
 
+# Cloudy
+cloudy/
+
 # Conversations
 codex*
 
