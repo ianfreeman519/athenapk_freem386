@@ -92,11 +92,13 @@ viscosity_coeff = fixed
 mom_diff_coeff_code = 0.25  # fixed coefficent of the kinetmatic viscosity in code units (code_length^2/code_time)
 
 resistivity = none          # none (disabled) or ohmic
-resistivity_coeff = fixed
+resistivity_coeff = fixed   # fixed or spitzer
 ohm_diff_coeff_code = 0.25  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
+#spitzer_log_lambda = 10.0  # Coulomb logarithm for Spitzer resistivity
+#spitzer_eta_max = -1.0     # cap on Spitzer resistivity (<=0 disables cap)
 ```
-(An)isotropic thermal conduction (with fixed or Spitzer coefficient), and isotropic viscosity and
-resistivity with fixed coefficient are currently implemented.
+(An)isotropic thermal conduction (with fixed or Spitzer coefficient), isotropic viscosity, and
+resistivity with fixed or Spitzer coefficients are currently implemented.
 They can be integrated in an unsplit manner or operator split using a second-order accurate RKL2
 supertimestepping algorithm.
 More details are described in the following.

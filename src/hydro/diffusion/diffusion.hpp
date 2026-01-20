@@ -139,13 +139,14 @@ struct OhmicDiffusivity {
   // "free" coefficient/prefactor. Value depends on resistivity set in the constructor.
   Real coeff_;
   Real c_;
+  Real eta_max_;
 
  public:
   KOKKOS_INLINE_FUNCTION
   OhmicDiffusivity(Resistivity resistivity, ResistivityCoeff resistivity_coeff_type,
-                   Real coeff, Real mbar, Real me, Real kb, Real c)
+                   Real coeff, Real mbar, Real me, Real kb, Real c, Real eta_max)
       : resistivity_(resistivity), resistivity_coeff_type_(resistivity_coeff_type),
-        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb), c_(c) {}
+        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb), c_(c), eta_max_(eta_max) {}
 
   KOKKOS_INLINE_FUNCTION
   Real Get(const Real pres, const Real rho) const {
@@ -161,6 +162,9 @@ struct OhmicDiffusivity {
       //   eta = (sqrt(2) c^2 / (12 pi^{3/2})) * lnΛ * Z e^2 sqrt(m_e) / (kT)^{3/2}
       Real coeff = std::sqrt(2.0) * c_ * c_ * ln_Lambda * Z_e_sq * std::sqrt(me_);
       coeff /= 12.0 * std::pow(M_PI, 1.5) * std::pow(kT, 1.5);
+      if (eta_max_ > 0.0) {
+        coeff = std::min(coeff, eta_max_);
+      }
       return coeff;
     }
     PARTHENON_FAIL("Unknown Resistivity coeff");

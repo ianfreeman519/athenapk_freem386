@@ -52,7 +52,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
   const bool has_ohm_diff = hydro_pkg->AllParams().hasKey("ohm_diff");
   OhmicDiffusivity ohm_diff_dev(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0, 0.0,
-                                0.0, 0.0); // Dummy init
+                                0.0, 0.0, -1.0); // Dummy init
   if (has_ohm_diff) {
     ohm_diff_dev = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   }
