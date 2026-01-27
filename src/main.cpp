@@ -89,7 +89,11 @@ int main(int argc, char *argv[]) {
     pman.app_input->ProblemGenerator = reconnection::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput = reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = reconnection::ProblemInitPackageData;
-  } else if (problem == "GEM") {
+  } else if (problem == "harris") {
+    pman.app_input->ProblemGenerator = harris::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput = harris::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = harris::ProblemInitPackageData;
+  }else if (problem == "GEM") {
     pman.app_input->ProblemGenerator = GEM::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput = GEM::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = GEM::ProblemInitPackageData;

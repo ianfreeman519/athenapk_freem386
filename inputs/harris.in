@@ -1,0 +1,96 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE");
+
+<comment>
+problem = harris - freeman 2001
+
+<job>
+problem_id = harris
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic          # none (disabled) or ohmic
+resistivity_coeff = fixed
+ohm_diff_coeff_code = 1.37e7 # Spitz diff for background below
+
+<units>
+code_length_cgs = 1.0 
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/harris>
+B0 = 3.0e4           # Gauss 
+rho0 = 3.16e-4       # g/cm^3 (from aluminum with numb dens 3e18)
+background_rho_frac = 0.2
+T0 = 5e5             # Kelvin (40 eV, at this temperature n_e ~ 3n_i)
+lambda = 3e-3        # cm;
+Lx = 2               # cm;
+Ly = 1               # cm;
+v0 = 1e6            # cm/s -> 1e5 is km/s;
+v_w = 0.5
+
+<parthenon/mesh>
+refinement = static
+nghost = 2
+
+nx1 = 256
+x1min = -1
+x1max = 1
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2 = 128
+x2min = -0.5
+x2max = 0.5
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3 = 1
+x3min = -1
+x3max = 1
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/static_refinement0>
+x1min = -0.87
+x1max =  0.87
+x2min = -0.1
+x2max =  0.1
+x3min = -0.0
+x3max =  0.0
+level =  2
+
+<parthenon/meshblock>
+nx1 = 32
+nx2 = 32
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.45
+tlim = 2e-6
+dt_max = 1e1
+nlim = -1
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.66666666 # gamma = C_p/C_v
+first_order_flux_correct = true
+pfloor = 1e-10
+
+mean_molecular_weight = 27
+Z = 13
+
+<parthenon/output0>
+file_type = hdf5
+dt = 1e-9
+id = out0
+variables = prim, curlBx, curlBy, curlBz, beta, T, eta
+
+<parthenon/output1>
+file_type = rst
+dt = 1e-7
