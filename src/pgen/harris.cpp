@@ -168,7 +168,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         Real x, y;
         x = coords.Xc<1>(i);
         y = coords.Xc<2>(j);
-        u(IDN, k, j, i) = rho0 * 1.0 / (SQR(std::cosh(y/lambda))) + rho_inf; // Density
+        u(IDN, k, j, i) = rho0; // * 1.0 / (SQR(std::cosh(y/lambda))) + rho_inf; // Density
 
         u(IM1, k, j, i) = 0.0;  // Initial Momentum is zero
         u(IM2, k, j, i) = -1.0 * y / Ly * u(IDN, k, j, i) * v0 / SQR(std::cosh(x/v_w)); // Inflow profile
