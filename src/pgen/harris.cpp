@@ -47,6 +47,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &coords = pmb->coords;
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
+  auto &w = mbd->Get("prim").data;
   auto &data = pmb->meshblock_data.Get(); // This is for grabbing the meshblocks defined above
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
   const bool has_ohm_diff = hydro_pkg->AllParams().hasKey("ohm_diff");
@@ -92,7 +93,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         curlBz(k, j, i) = term1 - term2;
         // Calculating 
         Real rho = u(IDN, k, j, i);
-        Real p = u(IPR, k, j, i);
+        Real p = w(IPR, k, j, i);
         Real mbar = hydro_pkg->Param<Real>("mbar");
         Real kb = units.k_boltzmann();
         T_field(k, j, i) = mbar / kb * p / rho;
