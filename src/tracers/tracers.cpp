@@ -57,6 +57,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   Metadata swarm_metadata({Metadata::Provides, Metadata::None, Metadata::Restart});
   tracer_pkg->AddSwarm(swarm_name, swarm_metadata);
   Metadata real_swarmvalue_metadata({Metadata::Real});
+  Metadata int_swarmvalue_metadata({Metadata::Integer});
 
   // TODO(pgrete) Add CheckDesired/required for vars
   // thermo variables
@@ -66,6 +67,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   tracer_pkg->AddSwarmValue("vel_y", swarm_name, real_swarmvalue_metadata);
   // TODO(pgrete) check proper handling of <3D sims
   tracer_pkg->AddSwarmValue("vel_z", swarm_name, real_swarmvalue_metadata);
+  tracer_pkg->AddSwarmValue("id", swarm_name, int_swarmvalue_metadata);
   PARTHENON_REQUIRE_THROWS(pin->GetInteger("parthenon/mesh", "nx3") > 1,
                            "Tracers/swarms currently only supported/tested in 3D.");
 
@@ -147,9 +149,7 @@ void SeedInitialTracers(Mesh *pmesh, ParameterInput *pin, parthenon::SimTime &tm
       auto &x = swarm->Get<Real>(swarm_position::x::name()).Get();
       auto &y = swarm->Get<Real>(swarm_position::y::name()).Get();
       auto &z = swarm->Get<Real>(swarm_position::z::name()).Get();
-      // auto &id = swarm->Get<std::uint64_t>(swarm_position::id::name()).Get();
-      std::cout << "IAN FREEMAN CHANGED THIS FILE (src/tracers/tracers.cpp: 150) TO FIX COMPILE ISSUES - DO NOT TRUST" << std::endl;
-      auto &id = swarm->Get<std::uint64_t>("id").Get();   // CHANGED TO FIX COMPILE ISSUES - TODO REMOVE AND FIX COMPILE ISSUE
+      auto &id = swarm->Get<int>("id").Get();
 
 
       auto swarm_d = swarm->GetDeviceContext();
