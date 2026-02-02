@@ -306,9 +306,10 @@ void ProblemInitTracerData(ParameterInput *pin, parthenon::StateDescriptor *trac
   if (pin->DoesParameterExist("tracers", "n_lookback")) {
     n_lookback = pin->GetInteger("tracers", "n_lookback");
   } else if (pin->DoesParameterExist("turbulence", "n_lookback")) {
-    n_lookback = pin->GetInteger("turbulence", "n_lookback",
-                                 "Number of time bins for particle's s=ln(rho) "
-                                 "history in turbulence simulations.");
+    n_lookback = pin->GetInteger("turbulence", "n_lookback");
+                                 // "Number of time bins for particle's s=ln(rho) " // IAN FREEMAN CHANGED THIS TO FIX COMPILE ISSUES
+                                 // "history in turbulence simulations.");          // THIS ONE TOO
+    std::cout << "IAN FREEMAN CHANGED THIS FILE (src/pgen/turbulence.cpp: 310) TO FIX COMPILE ISSUES - DO NOT TRUST!!!" << std::endl;
     //  tracer density history tracking disabled
   } else {
     return;

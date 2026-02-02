@@ -147,7 +147,10 @@ void SeedInitialTracers(Mesh *pmesh, ParameterInput *pin, parthenon::SimTime &tm
       auto &x = swarm->Get<Real>(swarm_position::x::name()).Get();
       auto &y = swarm->Get<Real>(swarm_position::y::name()).Get();
       auto &z = swarm->Get<Real>(swarm_position::z::name()).Get();
-      auto &id = swarm->Get<std::uint64_t>(swarm_position::id::name()).Get();
+      // auto &id = swarm->Get<std::uint64_t>(swarm_position::id::name()).Get();
+      std::cout << "IAN FREEMAN CHANGED THIS FILE (src/tracers/tracers.cpp: 150) TO FIX COMPILE ISSUES - DO NOT TRUST" << std::endl;
+      auto &id = swarm->Get<std::uint64_t>("id").Get();   // CHANGED TO FIX COMPILE ISSUES - TODO REMOVE AND FIX COMPILE ISSUE
+
 
       auto swarm_d = swarm->GetDeviceContext();
 
