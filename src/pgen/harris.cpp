@@ -66,7 +66,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &T_field      = data->Get("T").data;
   Real mbar = hydro_pkg->Param<Real>("mbar");
   const auto units = hydro_pkg->Param<Units>("units");
-  Real kb = units.k_boltzmann();
+  Real k_B = units.k_boltzmann();
 
   // Getting indices
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
@@ -96,7 +96,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         // Calculating 
         Real rho = u(IDN, k, j, i);
         Real p = w(IPR, k, j, i);
-        T_field(k, j, i) = mbar / kb * p / rho;
+        T_field(k, j, i) = mbar / k_B * p / rho;
 
         // beta = p / (B^2 / 2) - in Heaviside Lorentz units, this is p / (0.5 * 4pi * B^2)
         beta_field(k, j, i) = p / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
