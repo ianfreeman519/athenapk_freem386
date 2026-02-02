@@ -391,7 +391,7 @@ tracers = data.GetSwarm("tracers")
 xs = tracers.x
 ys = tracers.y
 zs = tracers.z
-ids = tracers.Get("id")
+ids = tracers.id
 
 fig = plt.figure()
 ax = fig.add_subplot(projection='3d')
