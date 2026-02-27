@@ -141,7 +141,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   P_thermal_central = T0 * k_b * rho0 / m_bar;
 
   // Printing out input values for slurm records
-  if (parthenon::Globals::my_rank == 0) {
+  if (parthenon::Globals::my_rank == 0 && pmb->gid == 0) {
     std::cout << "========================================" << std::endl;
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ..... " << pin->GetReal("hydro", "gamma") << std::endl;
