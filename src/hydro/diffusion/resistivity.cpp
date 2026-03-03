@@ -280,9 +280,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-        const Real rho = prim(IDN, k, j, i);
-        const Real p = prim(IPR, k, j, i);
-        const Real eta = ohm_diff_val.Get(p, rho);
+        const Real rho_at_face = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j, i - 1));
+        const Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k, j, i - 1));
+        const Real eta = ohm_diff_val.Get(p_at_face, rho_at_face);
         // Face centered current densities
         // j2 = d3B1 - d1B3
         const auto d3B1 =
@@ -327,9 +327,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-        const Real rho = prim(IDN, k, j, i);
-        const Real p = prim(IPR, k, j, i);
-        const Real eta = ohm_diff_val.Get(p, rho);
+        const Real rho_at_face = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j - 1, i));
+        const Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k, j - 1, i));
+        const Real eta = ohm_diff_val.Get(p_at_face, rho_at_face);
 
         // Face centered current densities
         // j3 = d1B2 - d2B1
@@ -373,9 +373,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-        const Real rho = prim(IDN, k, j, i);
-        const Real p = prim(IPR, k, j, i);
-        const Real eta = ohm_diff_val.Get(p, rho);
+        const Real rho_at_face = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k - 1, j, i));
+        const Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k - 1, j, i));
+        const Real eta = ohm_diff_val.Get(p_at_face, rho_at_face);
 
         // Face centered current densities
         // j1 = d2B3 - d3B2
