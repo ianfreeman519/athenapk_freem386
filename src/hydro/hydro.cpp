@@ -725,6 +725,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       // By default it is equal to the hyperbolic cfl.
       auto cfl_diff = pin->GetOrAddReal("diffusion", "cfl", pkg->Param<Real>("cfl"));
       pkg->AddParam<>("cfl_diff", cfl_diff);
+      auto cfl_diff_heat = pin->GetOrAddReal("diffusion", "cfl_diff_heat", 1.0);
+      pkg->AddParam<>("cfl_diff_heat", cfl_diff_heat);
     }
     pkg->AddParam<Real>("dt_diff", std::numeric_limits<Real>::max(),
                         Params::Mutability::Mutable); // diffusive timestep constraint
@@ -947,6 +949,7 @@ Real EstimateTimestep(MeshData<Real> *md) {
   auto dt_hyp = std::numeric_limits<Real>::max();
   auto dt_diff = std::numeric_limits<Real>::max();
   auto dt_cool = std::numeric_limits<Real>::max();
+  auto dt_heat = std::numeric_limits<Real>::max();
   auto dt_prob = std::numeric_limits<Real>::max();
 
   const auto calc_dt_hyp = hydro_pkg->Param<bool>("calc_dt_hyp");
@@ -972,10 +975,11 @@ Real EstimateTimestep(MeshData<Real> *md) {
     }
     if (hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none) {
       dt_diff = std::min(dt_diff, EstimateResistivityTimestep(md));
+      dt_heat = std::min(dt_heat, EstimateOhmicHeatingTimestep(md));
     }
-    // For unsplit ingegration use strict limit
+    // For unsplit integration use strict limit
     if (hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
-      min_dt = std::min(min_dt, dt_diff);
+      min_dt = std::min(min_dt, std::min(dt_diff, dt_heat));
       // and for RKL2 integration use limit taking into account the maxium ratio
       // or not constrain limit further (which is why RKL2 is there in first place)
     } else if (hydro_pkg->Param<DiffInt>("diffint") == DiffInt::rkl2) {
@@ -983,6 +987,7 @@ Real EstimateTimestep(MeshData<Real> *md) {
       if (max_dt_ratio > 0.0 && dt_hyp / dt_diff > max_dt_ratio) {
         min_dt = std::min(min_dt, max_dt_ratio * dt_diff);
       }
+      min_dt = std::min(min_dt, dt_heat);
     } else {
       PARTHENON_THROW("Looks like a a new diffusion integrator was implemented without "
                       "taking into accout timestep contstraints yet.");
@@ -998,16 +1003,18 @@ Real EstimateTimestep(MeshData<Real> *md) {
 
 #ifdef MPI_PARALLEL
   // Reduce timestep estimates across ranks so reporting uses the true global limiter.
-  Real dt_candidates[4] = {dt_hyp, dt_diff, dt_cool, dt_prob};
-  PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, dt_candidates, 4, MPI_PARTHENON_REAL,
+  Real dt_candidates[5] = {dt_hyp, dt_diff, dt_cool, dt_heat, dt_prob};
+  PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, dt_candidates, 5, MPI_PARTHENON_REAL,
                                     MPI_MIN, MPI_COMM_WORLD));
   dt_hyp = dt_candidates[0];
   dt_diff = dt_candidates[1];
   dt_cool = dt_candidates[2];
-  dt_prob = dt_candidates[3];
+  dt_heat = dt_candidates[3];
+  dt_prob = dt_candidates[4];
 #endif
 
-  Real limiter_dt = std::min(std::min(dt_hyp, dt_diff), std::min(dt_cool, dt_prob));
+  Real limiter_dt =
+      std::min(std::min(dt_hyp, dt_diff), std::min(dt_cool, std::min(dt_heat, dt_prob)));
   std::string limiter_src = "none";
   // Determine which physics set the limiter (use ordering to break ties deterministically)
   if (limiter_dt == dt_hyp) {
@@ -1016,6 +1023,8 @@ Real EstimateTimestep(MeshData<Real> *md) {
     limiter_src = "diffusion";
   } else if (limiter_dt == dt_cool) {
     limiter_src = "cooling";
+  } else if (limiter_dt == dt_heat) {
+    limiter_src = "ohmic heating";
   } else if (limiter_dt == dt_prob) {
     limiter_src = "problem";
   }

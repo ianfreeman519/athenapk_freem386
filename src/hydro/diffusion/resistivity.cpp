@@ -19,6 +19,71 @@
 
 using namespace parthenon::package::prelude;
 
+Real EstimateOhmicHeatingTimestep(MeshData<Real> *md) {
+  // Mimicked from EstimateCoolingTimestep but to calculate timestep from heating term eta*j^2
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+
+  const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+
+  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+
+  // Grab some necessary variables
+  const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+
+  Real min_heating_time = std::numeric_limits<Real>::infinity();
+  Kokkos::Min<Real> reducer_min(min_heating_time);
+
+  Kokkos::parallel_reduce(
+      "OhmicHeating::Timestep",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+          {0, kb.s, jb.s, ib.s}, {prim_pack.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1},
+          {1, 1, 1, ib.e + 1 - ib.s}),
+      KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i,
+                    Real &thread_min_heating_time) {
+            auto &prim = prim_pack(b);
+            auto &coords = prim_pack.GetCoords(b);
+
+            const Real rho = prim(IDN, k, j, i);
+            const Real pres = prim(IPR, k, j, i);
+
+            const Real internal_e_dens = pres / gm1;
+            const Real eta = ohm_diff.Get(pres, rho);
+
+            const auto ndim = prim_pack.GetNdim();
+
+            // Computing cell-centered current density squared j^2 = j1^2 + j2^2 + j3^2
+            Real dBzdy, dBydz, dBxdz, dBzdx, dBydx, dBxdy;
+            // In 1D, only dBdx exists. In 2D, dBdy is added. In 3D, dBdz is added.
+            // curlBx = dBzdy - dBydz)
+            dBzdy = ndim > 1 ? (prim(IB3,k,j+1,i) - prim(IB3,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1)) : 0.0;
+            dBydz = ndim > 2 ? (prim(IB2,k+1,j,i) - prim(IB2,k-1,j,i))/(coords.Xc<3>(k+1)-coords.Xc<3>(k-1)) : 0.0;
+            // curlBy = dBxdz - dBzdx
+            dBxdz = ndim > 2 ? (prim(IB1,k+1,j,i) - prim(IB1,k-1,j,i))/(coords.Xc<3>(k+1)-coords.Xc<3>(k-1)) : 0.0;
+            dBzdx = (prim(IB3,k,j,i+1) - prim(IB3,k,j,i-1))/(coords.Xc<1>(i+1)-coords.Xc<1>(i-1));
+            // curlBz = dBydx - dBxdy
+            dBydx = (prim(IB2,k,j,i+1) - prim(IB2,k,j,i-1))/(coords.Xc<1>(i+1)-coords.Xc<1>(i-1));
+            dBxdy = ndim > 1 ? (prim(IB1,k,j+1,i) - prim(IB1,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1)) : 0.0;
+            
+            // Following definitions are for clarity below
+            Real jx = dBzdy - dBydz;
+            Real jy = dBxdz - dBzdx;
+            Real jz = dBydx - dBxdy;
+
+            // Actually calculating heating time from eta*j^2
+            const Real j_squared = SQR(jx) + SQR(jy) + SQR(jz);
+            const Real de_dt = eta * j_squared; // heating rate
+            const Real cooling_time = fabs(internal_e_dens / de_dt);
+
+            thread_min_heating_time = std::min(cooling_time, thread_min_heating_time);
+          },
+          reducer_min);
+      
+      return hydro_pkg->Param<Real>("cfl_diff_heat") * min_heating_time;      
+}
+
 Real EstimateResistivityTimestep(MeshData<Real> *md) {
   // get to package via first block in Meshdata (which exists by construction)
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
