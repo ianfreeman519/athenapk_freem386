@@ -96,9 +96,9 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         term2 = (u(IB1,k,j+1,i) - u(IB1,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1));
         curlBz(k, j, i) = term1 - term2;
         // divv = dvx/dx + dvy/dy + dvz/dz
-        Real dvx_dx = (u(IM1, k, j, i+1) - u(IM1, k, j, i-1)) / (coords.Xc<1>(i+1) - coords.Xc<1>(i-1));
-        Real dvy_dy = (u(IM2, k, j+1, i) - u(IM2, k, j-1, i)) / (coords.Xc<2>(j+1) - coords.Xc<2>(j-1));
-        Real dvz_dz = (u(IM3, k+1, j, i) - u(IM3, k-1, j, i)) / (coords.Xc<3>(k+1) - coords.Xc<3>(k-1));
+        Real dvx_dx = (w(IV1, k, j, i+1) - w(IV1, k, j, i-1)) / (coords.Xc<1>(i+1) - coords.Xc<1>(i-1));
+        Real dvy_dy = (w(IV2, k, j+1, i) - w(IV2, k, j-1, i)) / (coords.Xc<2>(j+1) - coords.Xc<2>(j-1));
+        Real dvz_dz = (w(IV3, k+1, j, i) - w(IV3, k-1, j, i)) / (coords.Xc<3>(k+1) - coords.Xc<3>(k-1));
         divv(k, j, i) = dvx_dx + dvy_dy + dvz_dz;
 
         // Calculating temperature 
