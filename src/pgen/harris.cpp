@@ -36,6 +36,7 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   hydro_pkg->AddField("curlBx", m);
   hydro_pkg->AddField("curlBy", m);
   hydro_pkg->AddField("curlBz", m);
+  hydro_pkg->AddField("divv", m);
   hydro_pkg->AddField("beta", m);
   hydro_pkg->AddField("eta", m);
   hydro_pkg->AddField("T", m);
@@ -61,6 +62,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &curlBx = data->Get("curlBx").data;
   auto &curlBy = data->Get("curlBy").data;
   auto &curlBz = data->Get("curlBz").data;
+  auto &divv = data->Get("divv").data;
   auto &eta_field    = data->Get("eta").data;
   auto &beta_field   = data->Get("beta").data;
   auto &T_field      = data->Get("T").data;
@@ -93,7 +95,13 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         term1 = (u(IB2,k,j,i+1) - u(IB2,k,j,i-1))/(coords.Xc<1>(i+1)-coords.Xc<1>(i-1));
         term2 = (u(IB1,k,j+1,i) - u(IB1,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1));
         curlBz(k, j, i) = term1 - term2;
-        // Calculating 
+        // divv = dvx/dx + dvy/dy + dvz/dz
+        Real dvx_dx = (u(IM1, k, j, i+1) - u(IM1, k, j, i-1)) / (coords.Xc<1>(i+1) - coords.Xc<1>(i-1));
+        Real dvy_dy = (u(IM2, k, j+1, i) - u(IM2, k, j-1, i)) / (coords.Xc<2>(j+1) - coords.Xc<2>(j-1));
+        Real dvz_dz = (u(IM3, k+1, j, i) - u(IM3, k-1, j, i)) / (coords.Xc<3>(k+1) - coords.Xc<3>(k-1));
+        divv(k, j, i) = dvx_dx + dvy_dy + dvz_dz;
+
+        // Calculating temperature 
         Real rho = u(IDN, k, j, i);
         Real p = w(IPR, k, j, i);
         T_field(k, j, i) = mbar / k_B * p / rho;
