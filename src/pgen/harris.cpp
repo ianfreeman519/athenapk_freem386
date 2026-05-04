@@ -22,7 +22,9 @@
 // AthenaPK headers
 #include "../main.hpp"
 #include "../units.hpp"
+#include "../eos/adiabatic_glmmhd.hpp"
 #include "../hydro/diffusion/diffusion.hpp" // For storing eta later
+#include "../hydro/srcterms/tabular_cooling.hpp"
 
 namespace harris {
 using namespace parthenon::driver::prelude;
@@ -40,6 +42,11 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   hydro_pkg->AddField("beta", m);
   hydro_pkg->AddField("eta", m);
   hydro_pkg->AddField("T", m);
+  hydro_pkg->AddField("dt_diff_local", m);
+  hydro_pkg->AddField("dt_heat_local", m);
+  hydro_pkg->AddField("dt_cool_local", m);
+  hydro_pkg->AddField("dt_hyp_fms", m);
+  hydro_pkg->AddField("dt_hyp_cs", m);
 }
 
 // storing the curls just before output
@@ -66,9 +73,35 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto &eta_field    = data->Get("eta").data;
   auto &beta_field   = data->Get("beta").data;
   auto &T_field      = data->Get("T").data;
+  auto &dt_diff_local = data->Get("dt_diff_local").data;
+  auto &dt_heat_local = data->Get("dt_heat_local").data;
+  auto &dt_cool_local = data->Get("dt_cool_local").data;
+  auto &dt_hyp_fms = data->Get("dt_hyp_fms").data;
+  auto &dt_hyp_cs = data->Get("dt_hyp_cs").data;
   Real mbar = hydro_pkg->Param<Real>("mbar");
   const auto units = hydro_pkg->Param<Units>("units");
   Real k_B = units.k_boltzmann();
+  const auto cfl_hyp = hydro_pkg->Param<Real>("cfl");
+  const auto cfl_diff = hydro_pkg->Param<Real>("cfl_diff");
+  const auto cfl_diff_heat = hydro_pkg->Param<Real>("cfl_diff_heat");
+  const auto cfl_cool = pin->GetOrAddReal("cooling", "cfl", 0.1);
+  const auto eos = hydro_pkg->Param<AdiabaticGLMMHDEOS>("eos");
+  const auto gm1 = hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
+  const auto ndim = pmb->pmy_mesh->ndim;
+  const auto resistivity = hydro_pkg->Param<Resistivity>("resistivity");
+  const auto enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
+  cooling::CoolingTableObj cooling_table_obj;
+  if (enable_cooling == Cooling::tabular) {
+    cooling_table_obj =
+        hydro_pkg->Param<cooling::TabularCooling>("tabular_cooling").GetCoolingTableObj();
+  }
+
+  Real fac = 0.5;
+  if (ndim == 2) {
+    fac = 0.25;
+  } else if (ndim == 3) {
+    fac = 1.0 / 6.0;
+  }
 
   // Getting indices
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
@@ -82,6 +115,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   pmb->par_for(
       "harris::UserWorkBeforeOutput", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int k, const int j, const int i) {
+        const Real inf = std::numeric_limits<Real>::infinity();
         Real term1, term2;
         // curlBx = dBzdy - dBydz
         term1 = (u(IB3,k,j+1,i) - u(IB3,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1));
@@ -113,6 +147,90 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
           eta_val = ohm_diff_dev.Get(p, rho);
         }
         eta_field(k, j, i) = eta_val;
+
+        // Resistive diffusion timestep: cfl * fac * min(dx^2 / eta)
+        Real dt_diff_val = inf;
+        if (resistivity != Resistivity::none && eta_val > 0.0) {
+          dt_diff_val = SQR(coords.Dxc<1>(k, j, i)) / eta_val;
+          if (ndim >= 2) {
+            dt_diff_val = fmin(dt_diff_val, SQR(coords.Dxc<2>(k, j, i)) / eta_val);
+          }
+          if (ndim >= 3) {
+            dt_diff_val = fmin(dt_diff_val, SQR(coords.Dxc<3>(k, j, i)) / eta_val);
+          }
+          dt_diff_val = cfl_diff * fac * dt_diff_val;
+        }
+        dt_diff_local(k, j, i) = dt_diff_val;
+
+        // Ohmic heating timestep: cfl * e_int / (eta j^2)
+        Real dBzdy = ndim > 1 ? (u(IB3, k, j + 1, i) - u(IB3, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        Real dBydz = ndim > 2 ? (u(IB2, k + 1, j, i) - u(IB2, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBxdz = ndim > 2 ? (u(IB1, k + 1, j, i) - u(IB1, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBzdx = (u(IB3, k, j, i + 1) - u(IB3, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBydx = (u(IB2, k, j, i + 1) - u(IB2, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBxdy = ndim > 1 ? (u(IB1, k, j + 1, i) - u(IB1, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        Real jx = dBzdy - dBydz;
+        Real jy = dBxdz - dBzdx;
+        Real jz = dBydx - dBxdy;
+        Real j_squared = SQR(jx) + SQR(jy) + SQR(jz);
+        Real internal_e_dens = p / gm1;
+        Real dt_heat_val =
+            (resistivity != Resistivity::none && eta_val > 0.0 && j_squared > 0.0)
+                ? cfl_diff_heat * fabs(internal_e_dens / (eta_val * j_squared))
+                : inf;
+        dt_heat_local(k, j, i) = dt_heat_val;
+
+        // Cooling timestep: cfl * |e / de_dt|
+        Real internal_e_spec = p / (rho * gm1);
+        Real de_dt_cool = enable_cooling == Cooling::tabular
+                              ? cooling_table_obj.DeDt(internal_e_spec, rho)
+                              : 0.0;
+        Real dt_cool_val = (enable_cooling == Cooling::tabular && de_dt_cool != 0.0 &&
+                            internal_e_spec >= eos.GetInternalEFloor())
+                               ? fabs(cfl_cool * internal_e_spec / de_dt_cool)
+                               : inf;
+        dt_cool_local(k, j, i) = dt_cool_val;
+
+        // Hyperbolic timestep estimates using fast magnetosonic and sound speeds
+        Real prim_local[(NHYDRO)];
+        prim_local[IDN] = rho;
+        prim_local[IV1] = w(IV1, k, j, i);
+        prim_local[IV2] = w(IV2, k, j, i);
+        prim_local[IV3] = w(IV3, k, j, i);
+        prim_local[IPR] = p;
+        Real cs = eos.SoundSpeed(prim_local);
+        Real lambda_fms_x =
+            eos.FastMagnetosonicSpeed(rho, p, u(IB1, k, j, i), u(IB2, k, j, i), u(IB3, k, j, i));
+        Real dt_hyp_fms_val = coords.Dxc<1>(k, j, i) / (fabs(prim_local[IV1]) + lambda_fms_x);
+        Real dt_hyp_cs_val = coords.Dxc<1>(k, j, i) / (fabs(prim_local[IV1]) + cs);
+        if (ndim > 1) {
+          Real lambda_fms_y =
+              eos.FastMagnetosonicSpeed(rho, p, u(IB2, k, j, i), u(IB3, k, j, i), u(IB1, k, j, i));
+          dt_hyp_fms_val =
+              fmin(dt_hyp_fms_val, coords.Dxc<2>(k, j, i) / (fabs(prim_local[IV2]) + lambda_fms_y));
+          dt_hyp_cs_val =
+              fmin(dt_hyp_cs_val, coords.Dxc<2>(k, j, i) / (fabs(prim_local[IV2]) + cs));
+        }
+        if (ndim > 2) {
+          Real lambda_fms_z =
+              eos.FastMagnetosonicSpeed(rho, p, u(IB3, k, j, i), u(IB1, k, j, i), u(IB2, k, j, i));
+          dt_hyp_fms_val =
+              fmin(dt_hyp_fms_val, coords.Dxc<3>(k, j, i) / (fabs(prim_local[IV3]) + lambda_fms_z));
+          dt_hyp_cs_val =
+              fmin(dt_hyp_cs_val, coords.Dxc<3>(k, j, i) / (fabs(prim_local[IV3]) + cs));
+        }
+        dt_hyp_fms(k, j, i) = cfl_hyp * dt_hyp_fms_val;
+        dt_hyp_cs(k, j, i) = cfl_hyp * dt_hyp_cs_val;
       }
   );
 }
