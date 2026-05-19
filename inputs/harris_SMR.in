@@ -1,0 +1,110 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE");
+
+<comment>
+problem = harris - freeman 2001
+
+<job>
+problem_id = harris
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic          # none (disabled) or ohmic
+resistivity_coeff = fixed
+ohm_diff_coeff_code = 1e4
+cfl_diff_heat = 0.5
+# resistivity_coeff = spitzer
+# spitzer_log_lambda = 10.0
+# spitzer_eta_max = 1.3e6           # 30x the value of the initial temp - should be hottest in the layer
+
+<cooling>
+enable_cooling = tabular                # To disable, set to `none`
+table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling    # Path to the cooling table (in a text file)
+lambda_units_cgs = 1                    # Conversion factor of the cooling rate relative to CGS units
+
+integrator = townsend              # Other possible options are `rk12` and `rk45` for error bound subcycling
+max_iter = 1000                    # Max number of iteration for subcycling. Unsued for Townsend integrator
+cfl = 0.45                          # Restrict global timestep to `cfl*e / dedt`, i.e., some fraction of change per cycle in the specific internal energy (i.e., temperature)
+d_log_temp_tol = 1e-8              # Tolerance in cooling table between subsequent entries. Both subcycling integrators and cfl restriction rely on a table lookup that assumes equally spaced (in log space) temperature values.
+d_e_tol = 1e-8                    # Tolerance for the relative error in the change of internal energy for the error bound subcyling integrators (rk12 and rk45). Unused for Townsend integrator.
+
+<units>
+code_length_cgs = 1.0 
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/harris>
+B0 = 3.0e4           # Gauss 
+rho0 = 3.16e-5       # g/cm^3 (from aluminum with numb dens 3e17)
+background_rho_frac = 0.2
+T0 = 1e7             # Kelvin (80 eV, at this temperature n_e ~ 3n_i)
+lambda = 3e-3        # cm;
+Lx = 2               # cm;
+Ly = 1               # cm;
+v0 = 1e7            # cm/s -> 1e5 is km/s;
+v_w = 1.0
+
+<parthenon/mesh>
+refinement = static
+nghost = 2
+
+nx1 = 512
+x1min = -2
+x1max = 2
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2 = 256
+x2min = -1.0
+x2max = 1.0
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3 = 1
+x3min = -1
+x3max = 1
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/static_refinement0>
+x1min = -2.0
+x1max =  2.0
+x2min = -0.001
+x2max =  0.001
+x3min = -0.0
+x3max =  0.0
+level =  4
+
+<parthenon/meshblock>
+nx1 = 64
+nx2 = 64
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.45
+nlim = 10000
+dt_max = 1e1
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.66666666 # gamma = C_p/C_v
+first_order_flux_correct = true
+Tfloor = 1e1
+
+mean_molecular_weight = 27
+Z = 13
+
+<parthenon/output0>
+file_type = hdf5
+dn = 1
+id = out0
+variables = prim, curlBx, curlBy, curlBz, beta, T, eta, divv
+
+<parthenon/output1>
+file_type = rst
+dt = 1e-9
