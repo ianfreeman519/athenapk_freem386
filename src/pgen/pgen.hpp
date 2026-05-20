@@ -36,6 +36,13 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm);
 }
+namespace pulsed_reconnection {
+using namespace parthenon::driver::prelude;
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+}
 namespace breakRefinementBoundaries {
 using namespace parthenon::driver::prelude;
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);

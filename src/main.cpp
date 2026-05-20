@@ -101,6 +101,11 @@ int main(int argc, char *argv[]) {
     pman.app_input->ProblemGenerator = periodic_reconnection::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput = periodic_reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = periodic_reconnection::ProblemInitPackageData;
+  } else if (problem == "pulsed_reconnection") {
+    pman.app_input->ProblemGenerator = pulsed_reconnection::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput =
+        pulsed_reconnection::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = pulsed_reconnection::ProblemInitPackageData;
   } else if (problem == "breakRefinementBoundaries") {
     pman.app_input->ProblemGenerator = breakRefinementBoundaries::ProblemGenerator;
   } else if (problem == "diffusion") {
