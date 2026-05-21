@@ -106,6 +106,8 @@ int main(int argc, char *argv[]) {
     pman.app_input->MeshBlockUserWorkBeforeOutput =
         pulsed_reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = pulsed_reconnection::ProblemInitPackageData;
+  } else if (problem == "refinement_temp_test") {
+    pman.app_input->ProblemGenerator = refinement_temp_test::ProblemGenerator;
   } else if (problem == "breakRefinementBoundaries") {
     pman.app_input->ProblemGenerator = breakRefinementBoundaries::ProblemGenerator;
   } else if (problem == "diffusion") {

@@ -43,6 +43,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm);
 }
+namespace refinement_temp_test {
+using namespace parthenon::driver::prelude;
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+}
 namespace breakRefinementBoundaries {
 using namespace parthenon::driver::prelude;
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
