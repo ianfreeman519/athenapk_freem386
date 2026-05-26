@@ -242,20 +242,20 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
-  auto detected_resistivity_type = pin->GetOrAddString("diffusion", "resistivity_coeff", "none");
 
   Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
-  Real current_amps = pin->GetOrAddReal("problem/pulsed_reconnection", "peak_current_amps", 1.0e6);  // Default 1MA - given in Amps (need to convert)
+  Real B0 = pin->GetOrAddReal("problem/pulsed_reconnection", "B0", 1.0);
   Real rho_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1.0);
-  Real rho_background = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-8);   // Background vacuum wire expands into
-  Real T_wire   =  pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4); // Temperature of the wire - given in K
-  Real T_background = pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 3e3); // Temperature of the background vacuum - given in K
-  Real v0  = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e7); // Peak inflow velocity - given in cm/s
-  Real array_separation = pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 6.0); // Separation between centers of arrays - given in cm
-  
-  // Checking if spitzer or fixed ohmic resistivity is turned on:
-  Real k_b, atomic_mass_unit, m_bar, P_thermal_central;
-  // Grabbing hydro pkg and units objects now...
+  Real rho_background = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-8);
+  Real T_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4);
+  Real T_background = pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 3e3);
+  Real v0 = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e7);
+  Real array_separation =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 6.0);
+  Real width = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  PARTHENON_REQUIRE(width > 0.0, "problem/pulsed_reconnection/w must be positive.");
+
+  Real k_b, atomic_mass_unit, m_bar;
   auto hydro_pkg = pmb->packages.Get("Hydro");
   const auto units = hydro_pkg->Param<Units>("units");
   k_b = units.k_boltzmann();
@@ -267,13 +267,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "========================================" << std::endl;
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ================== " << pin->GetReal("hydro", "gamma") << std::endl;
-    std::cout << "I0 [Amp] =============== " << current_amps << std::endl;
+    std::cout << "B0 ===================== " << B0 << std::endl;
     std::cout << "rho_wire [g/cm^3] ====== " << rho_wire << std::endl;
     std::cout << "rho_background [g/cm^3]= " << rho_background << std::endl;
     std::cout << "T_wire [K] ============= " << T_wire << std::endl;
     std::cout << "T_background [K] ======= " << T_background << std::endl;
     std::cout << "v0 [cm/s] ============== " << v0 << std::endl;
     std::cout << "array_separation [cm] == " << array_separation << std::endl;
+    std::cout << "w [cm^2] =============== " << width << std::endl;
   }
 
   auto &coords = pmb->coords;
@@ -293,50 +294,46 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IEN, k, j, i) = P_background / gm1;
         Real v1 = 0.0;
         Real v2 = 0.0;
+        Real x = coords.Xc<1>(i);
+        Real y = coords.Xc<2>(j);
+        Real d = array_separation / 2.0;
+        Real dphi_dx = 0.0;
+        Real dphi_dy = 0.0;
 
-        // Looping over the two sources - one placed at x,y,z = 0,-R,0 and the other at 0,R,0 with R = wire_sep/2
-        for (int A = -1; A <= 1; A+=2) {
-          // Shifting the y coordinate to be centered on each wire and calculating the distance from the center of each wire
-          Real y_center = A * array_separation/2.0;
-          Real y = coords.Xc<2>(j) - y_center;
-          Real x = coords.Xc<1>(i); // No shift needed in x - wire array is centered at x=0
-          Real r = sqrt(SQR(x)+SQR(y)); // Distance from center of each wire
-          Real R = array_separation/2.0;
-          Real phi = atan2(y, x); // Angle in cylindrical coordinates centered on each wire - needed for momentum initialization below
+        // Two Gaussian sources centered at x=0, y=+/-array_separation/2.
+        for (int A = -1; A <= 1; A += 2) {
+          Real y_center = A * d;
+          Real y_local = y - y_center;
+          Real exponent = -(SQR(x) + SQR(y_local)) / width;
+          exponent = fmax(-700.0, fmin(700.0, exponent));
+          Real profile = exp(exponent);
 
-          if (r < R) {
-            // Initializing density peaking at center of each wire and falling off as profile f(r)=exp(-2r/(R-r))
-            Real profile = exp(-2.0 * r / (array_separation/2.0 - r));
-            Real rho = rho_wire * profile;
-            u(IDN, k, j, i) += rho;
+          u(IDN, k, j, i) += rho_wire * profile;
+          v1 += v0 * (x / d) * profile;
+          v2 += v0 * (y_local / d) * profile;
 
-            // Build the bulk velocity field from both sources, then convert to conserved momentum once.
-            v1 += v0 * cos(phi) * profile;
-            v2 += v0 * sin(phi) * profile;
+          Real T = T_wire * profile;
+          Real P = T * k_b * (rho_wire * profile) / m_bar;
+          u(IEN, k, j, i) += P / gm1;
 
-            // Initializing initial temperature profile
-            // Temperature also has profile proportional to density - peaking at the center of each wire and falling off as f(r)
-            Real T = T_wire * profile;
-            Real P = T * k_b * rho/ m_bar;
-            u(IEN, k, j, i) += P / gm1;
+          dphi_dx += (-2.0 * x / width) * profile;
+          dphi_dy += (-2.0 * y_local / width) * profile;
+        }
 
-            } // end if r<R
+        // B = cross(z, B0 * grad(phi)) with phi equal to the summed Gaussian profile.
+        u(IB1, k, j, i) = -B0 * dphi_dy;
+        u(IB2, k, j, i) = B0 * dphi_dx;
 
-            // Initializing magnetic fields from each source over all space - there should not be a cutoff in the magnetic field like there is for density and momentum
-            // Initializing magnetic field with a profile that corresponds to the magnetic field from the wire at peak current
-            Real B_times_r = 0.2 * current_amps / sqrt(4*M_PI); // B*r for an infinite wire in cgs units - there is a 2c in this definition but A->statA is 0.1c, hence the leading 0.2
-            if (r > 0.0) {
-              u(IB1, k, j, i) += B_times_r/r * -1 * sin(phi);
-              u(IB2, k, j, i) += B_times_r/r * cos(phi);
-            }
-          } // End looping over sources
+        u(IM1, k, j, i) = u(IDN, k, j, i) * v1;
+        u(IM2, k, j, i) = u(IDN, k, j, i) * v2;
 
-          u(IM1, k, j, i) = u(IDN, k, j, i) * v1;
-          u(IM2, k, j, i) = u(IDN, k, j, i) * v2;
-
-          // Now finally adding internal energy from magnetic and kinetic:
-          u(IEN, k, j, i) += 0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i)) +
-                            (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) / u(IDN, k, j, i));
+        // Now finally adding internal energy from magnetic and kinetic.
+        u(IEN, k, j, i) +=
+            0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
+                   SQR(u(IB3, k, j, i)) +
+                   (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) +
+                    SQR(u(IM3, k, j, i))) /
+                       u(IDN, k, j, i));
       });
 }
  // namespace pulsed_reconnection
