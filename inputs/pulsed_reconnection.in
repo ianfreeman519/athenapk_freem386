@@ -34,25 +34,25 @@ code_mass_cgs = 1.0
 code_time_cgs = 1.0
 
 <problem/pulsed_reconnection>
-peak_current_amps = 1.0e6   # consistent with MARZ
-rho_wire = 2.7  # Aluminum at solid density - this is the peak density
-rho_background = 1e-4       # Near vacuum
+B0 = 5e5 # 5.0e5   # consistent with MARZ
+rho_wire = 2.7e-2  # 0.01 * Aluminum at solid density - this is the peak density
+rho_background = 1e-6       # Near vacuum
 T_wire = 1.1e4      # Inflow temperature
 T_background = 1e1  # Background temperature
-v0 = 1e7        # flow speed away from wires
+v0 = 0        # flow speed away from wires
 array_separation = 6
 
 <parthenon/mesh>
-refinement = static
+refinement = none
 nghost = 2
 
-nx1 = 512
-x1min = -2
-x1max = 2
+nx1 = 768
+x1min = -3
+x1max = 3
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 = 512
+nx2 = 512   
 x2min = -2.0
 x2max = 2.0
 ix2_bc = outflow
@@ -64,25 +64,25 @@ x3max = 1
 ix3_bc = periodic
 ox3_bc = periodic
 
-<parthenon/static_refinement0>
-x1min = -2.0
-x1max =  2.0
-x2min = -0.001
-x2max =  0.001
-x3min = -0.0
-x3max =  0.0
-level =  4
+# <parthenon/static_refinement0>
+# x1min = -2.0
+# x1max =  2.0
+# x2min = -0.001
+# x2max =  0.001
+# x3min = -0.0
+# x3max =  0.0
+# level =  3
 
 <parthenon/meshblock>
-nx1 = 64
-nx2 = 64
+nx1 = 128
+nx2 = 128
 nx3 = 1
 
 <parthenon/time>
 integrator = vl2
 cfl = 0.45
 tlim = 1e-6 # 1000ns
-dt_max = 1e-9
+# dt_max = 1e-9
 
 <hydro>
 fluid = glmmhd
@@ -91,7 +91,7 @@ riemann = hlld
 reconstruction = plm
 gamma = 1.66666666 # gamma = C_p/C_v
 first_order_flux_correct = true
-Tfloor = 1e1
+Tfloor = 1e-2
 
 mean_molecular_weight = 27
 Z = 13
@@ -100,7 +100,7 @@ Z = 13
 file_type = hdf5
 dt = 1e-9
 id = out0
-variables = prim, curlBx, curlBy, curlBz, beta, eta, divv, dt_hyp_fms, dt_hyp_cs, dt_cool_local, dt_heat_local
+variables = cons, prim, curlBx, curlBy, curlBz, beta, eta, divv, dt_hyp_fms, dt_hyp_cs, dt_cool_local, dt_heat_local
 
 <parthenon/output1>
 file_type = rst
