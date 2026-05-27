@@ -30,6 +30,31 @@ namespace pulsed_reconnection {
 using namespace parthenon::driver::prelude;
 using namespace parthenon::package::prelude;
 
+KOKKOS_INLINE_FUNCTION
+void WireProfileAndDerivative(const Real r, const Real w_core, const Real d_falloff,
+                              Real &profile, Real &dprofile_dr) {
+  if (r <= w_core) {
+    profile = 1.0;
+    dprofile_dr = 0.0;
+    return;
+  }
+
+  if (r >= w_core + d_falloff) {
+    profile = 0.0;
+    dprofile_dr = 0.0;
+    return;
+  }
+
+  const Real s = (r - w_core) / d_falloff;
+  const Real s2 = s * s;
+  const Real s3 = s2 * s;
+  const Real s4 = s3 * s;
+  const Real s5 = s4 * s;
+
+  profile = 1.0 - 10.0 * s3 + 15.0 * s4 - 6.0 * s5;
+  dprofile_dr = (-30.0 * s2 + 60.0 * s3 - 30.0 * s4) / d_falloff;
+}
+
 // Setting up derived fields:
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hydro_pkg) {
   // Defining m to pass to the field definition
@@ -252,8 +277,15 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real v0 = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e7);
   Real array_separation =
       pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 6.0);
-  Real width = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
-  PARTHENON_REQUIRE(width > 0.0, "problem/pulsed_reconnection/w must be positive.");
+  Real w_core = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  Real d_falloff = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "d_falloff",
+      pin->GetOrAddReal("problem/pulsed_reconnection", "d", 1.0));
+  PARTHENON_REQUIRE(w_core >= 0.0, "problem/pulsed_reconnection/w must be nonnegative.");
+  PARTHENON_REQUIRE(d_falloff > 0.0,
+                    "problem/pulsed_reconnection/d_falloff must be positive.");
+  PARTHENON_REQUIRE(array_separation > 0.0,
+                    "problem/pulsed_reconnection/array_separation must be positive.");
 
   Real k_b, atomic_mass_unit, m_bar;
   auto hydro_pkg = pmb->packages.Get("Hydro");
@@ -268,13 +300,18 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ================== " << pin->GetReal("hydro", "gamma") << std::endl;
     std::cout << "B0 ===================== " << B0 << std::endl;
-    std::cout << "rho_wire [g/cm^3] ====== " << rho_wire << std::endl;
+    std::cout << "rho_wire(core) [g/cm^3] " << rho_wire << std::endl;
     std::cout << "rho_background [g/cm^3]= " << rho_background << std::endl;
-    std::cout << "T_wire [K] ============= " << T_wire << std::endl;
+    std::cout << "T_wire(core) [K] ======= " << T_wire << std::endl;
     std::cout << "T_background [K] ======= " << T_background << std::endl;
-    std::cout << "v0 [cm/s] ============== " << v0 << std::endl;
+    std::cout << "v0(core) [cm/s] ======== " << v0 << std::endl;
     std::cout << "array_separation [cm] == " << array_separation << std::endl;
-    std::cout << "w [cm^2] =============== " << width << std::endl;
+    std::cout << "wire core width w [cm] = " << w_core << std::endl;
+    std::cout << "falloff d_falloff [cm] = " << d_falloff << std::endl;
+    std::cout << "profile = 1 inside core, quintic C2 taper in shell, 0 outside"
+              << std::endl;
+    std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the same profile"
+              << std::endl;
   }
 
   auto &coords = pmb->coords;
@@ -282,58 +319,57 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   pmb->par_for(
       "ProblemGenerator::pulsed_reconnection", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int k, const int j, const int i) {
-        // Starting with background: low density/temperature contribute and initialize all the fields
-        u(IDN, k, j, i) = rho_background;
-        u(IM1, k, j, i) = 0.0;
-        u(IM2, k, j, i) = 0.0;
-        u(IM3, k, j, i) = 0.0;
-        u(IB1, k, j, i) = 0.0;
-        u(IB2, k, j, i) = 0.0;
-        u(IB3, k, j, i) = 0.0;
-        Real P_background = T_background * k_b * rho_background / m_bar;
-        u(IEN, k, j, i) = P_background / gm1;
+        // Compact exploding-wire profile: flat core of width w, quintic C2 falloff over
+        // d_falloff, then zero. This removes the old singular wire field construction.
         Real v1 = 0.0;
         Real v2 = 0.0;
         Real x = coords.Xc<1>(i);
         Real y = coords.Xc<2>(j);
         Real d = array_separation / 2.0;
+        Real profile_sum = 0.0;
         Real dphi_dx = 0.0;
         Real dphi_dy = 0.0;
 
-        // Two Gaussian sources centered at x=0, y=+/-array_separation/2.
+        // Two wire arrays centered at x=0, y=+/-array_separation/2 with radial outflow.
         for (int A = -1; A <= 1; A += 2) {
           Real y_center = A * d;
           Real y_local = y - y_center;
-          Real exponent = -(SQR(x) + SQR(y_local)) / width;
-          exponent = fmax(-700.0, fmin(700.0, exponent));
-          Real profile = exp(exponent);
+          Real r = sqrt(SQR(x) + SQR(y_local));
+          Real profile = 0.0;
+          Real dprofile_dr = 0.0;
+          WireProfileAndDerivative(r, w_core, d_falloff, profile, dprofile_dr);
 
-          u(IDN, k, j, i) += rho_wire * profile;
-          v1 += v0 * (x / d) * profile;
-          v2 += v0 * (y_local / d) * profile;
+          profile_sum += profile;
 
-          Real T = T_wire * profile;
-          Real P = T * k_b * (rho_wire * profile) / m_bar;
-          u(IEN, k, j, i) += P / gm1;
-
-          dphi_dx += (-2.0 * x / width) * profile;
-          dphi_dy += (-2.0 * y_local / width) * profile;
+          if (r > 0.0) {
+            const Real inv_r = 1.0 / r;
+            const Real xhat = x * inv_r;
+            const Real yhat = y_local * inv_r;
+            v1 += v0 * xhat * profile;
+            v2 += v0 * yhat * profile;
+            dphi_dx += dprofile_dr * xhat;
+            dphi_dy += dprofile_dr * yhat;
+          }
         }
 
-        // B = cross(z, B0 * grad(phi)) with phi equal to the summed Gaussian profile.
+        Real rho = rho_background + rho_wire * profile_sum;
+        Real T = T_background + T_wire * profile_sum;
+        Real P = T * k_b * rho / m_bar;
+
+        u(IDN, k, j, i) = rho;
+        u(IM1, k, j, i) = rho * v1;
+        u(IM2, k, j, i) = rho * v2;
+        u(IM3, k, j, i) = 0.0;
         u(IB1, k, j, i) = -B0 * dphi_dy;
         u(IB2, k, j, i) = B0 * dphi_dx;
+        u(IB3, k, j, i) = 0.0;
 
-        u(IM1, k, j, i) = u(IDN, k, j, i) * v1;
-        u(IM2, k, j, i) = u(IDN, k, j, i) * v2;
-
-        // Now finally adding internal energy from magnetic and kinetic.
-        u(IEN, k, j, i) +=
-            0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
-                   SQR(u(IB3, k, j, i)) +
-                   (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) +
-                    SQR(u(IM3, k, j, i))) /
-                       u(IDN, k, j, i));
+        u(IEN, k, j, i) = P / gm1 +
+                          0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
+                                 SQR(u(IB3, k, j, i)) +
+                                 (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) +
+                                  SQR(u(IM3, k, j, i))) /
+                                     u(IDN, k, j, i));
       });
 }
  // namespace pulsed_reconnection
