@@ -31,28 +31,11 @@ using namespace parthenon::driver::prelude;
 using namespace parthenon::package::prelude;
 
 KOKKOS_INLINE_FUNCTION
-void WireProfileAndDerivative(const Real r, const Real w_core, const Real d_falloff,
-                              Real &profile, Real &dprofile_dr) {
-  if (r <= w_core) {
-    profile = 1.0;
-    dprofile_dr = 0.0;
-    return;
-  }
-
-  if (r >= w_core + d_falloff) {
-    profile = 0.0;
-    dprofile_dr = 0.0;
-    return;
-  }
-
-  const Real s = (r - w_core) / d_falloff;
-  const Real s2 = s * s;
-  const Real s3 = s2 * s;
-  const Real s4 = s3 * s;
-  const Real s5 = s4 * s;
-
-  profile = 1.0 - 10.0 * s3 + 15.0 * s4 - 6.0 * s5;
-  dprofile_dr = (-30.0 * s2 + 60.0 * s3 - 30.0 * s4) / d_falloff;
+void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
+                                  Real &dprofile_dr) {
+  const Real exponent = -SQR(r / width);
+  profile = exp(fmax(-700.0, exponent));
+  dprofile_dr = (-2.0 * r / SQR(width)) * profile;
 }
 
 // Setting up derived fields:
@@ -269,21 +252,16 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto &u = mbd->Get("cons").data;
 
   Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
-  Real B0 = pin->GetOrAddReal("problem/pulsed_reconnection", "B0", 1.0);
-  Real rho_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1.0);
-  Real rho_background = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-8);
+  Real B0 = pin->GetOrAddReal("problem/pulsed_reconnection", "B0", 5.0e5);
+  Real rho_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1e-3);
+  Real rho_background = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-6);
   Real T_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4);
-  Real T_background = pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 3e3);
-  Real v0 = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e7);
+  Real T_background = pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 1e2);
+  Real v0 = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
   Real array_separation =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 6.0);
-  Real w_core = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
-  Real d_falloff = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "d_falloff",
-      pin->GetOrAddReal("problem/pulsed_reconnection", "d", 1.0));
-  PARTHENON_REQUIRE(w_core >= 0.0, "problem/pulsed_reconnection/w must be nonnegative.");
-  PARTHENON_REQUIRE(d_falloff > 0.0,
-                    "problem/pulsed_reconnection/d_falloff must be positive.");
+      pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 4.0);
+  Real width = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  PARTHENON_REQUIRE(width > 0.0, "problem/pulsed_reconnection/w must be positive.");
   PARTHENON_REQUIRE(array_separation > 0.0,
                     "problem/pulsed_reconnection/array_separation must be positive.");
 
@@ -306,11 +284,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "T_background [K] ======= " << T_background << std::endl;
     std::cout << "v0(core) [cm/s] ======== " << v0 << std::endl;
     std::cout << "array_separation [cm] == " << array_separation << std::endl;
-    std::cout << "wire core width w [cm] = " << w_core << std::endl;
-    std::cout << "falloff d_falloff [cm] = " << d_falloff << std::endl;
-    std::cout << "profile = 1 inside core, quintic C2 taper in shell, 0 outside"
-              << std::endl;
-    std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the same profile"
+    std::cout << "gaussian width w [cm] == " << width << std::endl;
+    std::cout << "profile = exp(-(r / w)^2)" << std::endl;
+    std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the same Gaussian"
               << std::endl;
   }
 
@@ -319,8 +295,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   pmb->par_for(
       "ProblemGenerator::pulsed_reconnection", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int k, const int j, const int i) {
-        // Compact exploding-wire profile: flat core of width w, quintic C2 falloff over
-        // d_falloff, then zero. This removes the old singular wire field construction.
+        // Gaussian exploding-wire profile centered on each array element.
         Real v1 = 0.0;
         Real v2 = 0.0;
         Real x = coords.Xc<1>(i);
@@ -337,7 +312,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           Real r = sqrt(SQR(x) + SQR(y_local));
           Real profile = 0.0;
           Real dprofile_dr = 0.0;
-          WireProfileAndDerivative(r, w_core, d_falloff, profile, dprofile_dr);
+          GaussianProfileAndDerivative(r, width, profile, dprofile_dr);
 
           profile_sum += profile;
 

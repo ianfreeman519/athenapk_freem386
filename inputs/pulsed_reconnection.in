@@ -20,8 +20,7 @@ ohm_diff_coeff_code = 1e4
 <cooling>
 enable_cooling = tabular                # To disable, set to `none`
 table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling    # Path to the cooling table (in a text file)
-lambda_units_cgs = 1                    # Conversion factor of the cooling rate relative to CGS units
-
+lambda_units_cgs = 1                    # Conversion factor of the cooling rate relative to CGS units       
 integrator = townsend              # Other possible options are `rk12` and `rk45` for error bound subcycling
 max_iter = 1000                    # Max number of iteration for subcycling. Unsued for Townsend integrator
 cfl = 0.45                          # Restrict global timestep to `cfl*e / dedt`, i.e., some fraction of change per cycle in the specific internal energy (i.e., temperature)
@@ -34,29 +33,30 @@ code_mass_cgs = 1.0
 code_time_cgs = 1.0
 
 <problem/pulsed_reconnection>
-B0 = 5e5 # 5.0e5   # consistent with MARZ
-rho_wire = 2.7e-2  # 0.01 * Aluminum at solid density - this is the peak density
+B0 = 1e5 # 5.0e5   # consistent with MARZ
+rho_wire = 2.7e-3  # 0.01 * Aluminum at solid density - this is the peak density
 rho_background = 1e-6       # Near vacuum
-T_wire = 1.1e4      # Inflow temperature
-T_background = 1e1  # Background temperature
-v0 = 0        # flow speed away from wires
-array_separation = 6
+T_wire = 0.99e5      # Inflow temperature
+T_background = 1e2  # Background temperature
+v0 = 1e6        # flow speed away from wires
+w = 1.0     # Gaussian profile standard deviation
+array_separation = 4
 
 <parthenon/mesh>
-refinement = none
+refinement = static
 nghost = 2
 
-nx1 = 768
-x1min = -3
-x1max = 3
+nx1 = 640
+x1min = -4
+x1max = 4
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 = 512   
+nx2 =  320
 x2min = -2.0
 x2max = 2.0
-ix2_bc = outflow
-ox2_bc = outflow
+ix2_bc = periodic
+ox2_bc = periodic
 
 nx3 = 1
 x3min = -1
@@ -64,18 +64,18 @@ x3max = 1
 ix3_bc = periodic
 ox3_bc = periodic
 
-# <parthenon/static_refinement0>
-# x1min = -2.0
-# x1max =  2.0
-# x2min = -0.001
-# x2max =  0.001
-# x3min = -0.0
-# x3max =  0.0
-# level =  3
+<parthenon/static_refinement0>
+x1min = -4.0
+x1max =  4.0
+x2min = -0.001
+x2max =  0.001
+x3min = -0.0
+x3max =  0.0
+level =  3
 
 <parthenon/meshblock>
-nx1 = 128
-nx2 = 128
+nx1 = 64
+nx2 = 64
 nx3 = 1
 
 <parthenon/time>
@@ -98,7 +98,7 @@ Z = 13
 
 <parthenon/output0>
 file_type = hdf5
-dt = 1e-9
+dn = 1
 id = out0
 variables = cons, prim, curlBx, curlBy, curlBz, beta, eta, divv, dt_hyp_fms, dt_hyp_cs, dt_cool_local, dt_heat_local
 
