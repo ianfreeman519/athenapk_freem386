@@ -38,6 +38,13 @@ void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
   dprofile_dr = (-2.0 * r / SQR(width)) * profile;
 }
 
+KOKKOS_INLINE_FUNCTION
+Real AzimuthalThermoPerturbation(const Real theta, const int mode_number) {
+  const Real phase = 0.5 * static_cast<Real>(mode_number) * theta;
+  const Real cos_phase = cos(phase);
+  return 0.5 + 0.5 * SQR(cos_phase);
+}
+
 // Setting up derived fields:
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hydro_pkg) {
   // Defining m to pass to the field definition
@@ -261,9 +268,13 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real array_separation =
       pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 4.0);
   Real width = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  int azimuthal_mode_number =
+      pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
   PARTHENON_REQUIRE(width > 0.0, "problem/pulsed_reconnection/w must be positive.");
   PARTHENON_REQUIRE(array_separation > 0.0,
                     "problem/pulsed_reconnection/array_separation must be positive.");
+  PARTHENON_REQUIRE(azimuthal_mode_number >= 0,
+                    "problem/pulsed_reconnection/N must be nonnegative.");
 
   Real k_b, atomic_mass_unit, m_bar;
   auto hydro_pkg = pmb->packages.Get("Hydro");
@@ -285,7 +296,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "v0(core) [cm/s] ======== " << v0 << std::endl;
     std::cout << "array_separation [cm] == " << array_separation << std::endl;
     std::cout << "gaussian width w [cm] == " << width << std::endl;
+    std::cout << "azimuthal mode N ======= " << azimuthal_mode_number << std::endl;
     std::cout << "profile = exp(-(r / w)^2)" << std::endl;
+    std::cout << "thermo perturbation ==== 0.5 + 0.5*cos(N*theta/2)^2" << std::endl;
     std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the same Gaussian"
               << std::endl;
   }
@@ -301,7 +314,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         Real x = coords.Xc<1>(i);
         Real y = coords.Xc<2>(j);
         Real d = array_separation / 2.0;
-        Real profile_sum = 0.0;
+        Real thermo_profile_sum = 0.0;
         Real dphi_dx = 0.0;
         Real dphi_dy = 0.0;
 
@@ -310,11 +323,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           Real y_center = A * d;
           Real y_local = y - y_center;
           Real r = sqrt(SQR(x) + SQR(y_local));
+          Real theta = atan2(y_local, x);
           Real profile = 0.0;
           Real dprofile_dr = 0.0;
           GaussianProfileAndDerivative(r, width, profile, dprofile_dr);
+          Real thermo_perturbation =
+              AzimuthalThermoPerturbation(theta, azimuthal_mode_number);
 
-          profile_sum += profile;
+          thermo_profile_sum += profile * thermo_perturbation;
 
           if (r > 0.0) {
             const Real inv_r = 1.0 / r;
@@ -327,8 +343,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           }
         }
 
-        Real rho = rho_background + rho_wire * profile_sum;
-        Real T = T_background + T_wire * profile_sum;
+        Real rho = rho_background + rho_wire * thermo_profile_sum;
+        Real T = T_background + T_wire * thermo_profile_sum;
         Real P = T * k_b * rho / m_bar;
 
         u(IDN, k, j, i) = rho;
