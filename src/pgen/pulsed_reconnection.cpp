@@ -39,10 +39,10 @@ void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
 }
 
 KOKKOS_INLINE_FUNCTION
-Real AzimuthalThermoPerturbation(const Real theta, const int mode_number) {
-  const Real phase = 0.5 * static_cast<Real>(mode_number) * theta;
+Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number) {
+  const Real phase = static_cast<Real>(mode_number) * theta;
   const Real cos_phase = cos(phase);
-  return 0.5 + 0.5 * SQR(cos_phase);
+  return 1 + p * cos_phase;
 }
 
 // Setting up derived fields:
@@ -270,11 +270,13 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real width = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
   int azimuthal_mode_number =
       pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
+  Real perturb_amplitude = pin->GetOrAddReal("problem/pulsed_reconnection", "perturb_amplitude", 0.0);
   PARTHENON_REQUIRE(width > 0.0, "problem/pulsed_reconnection/w must be positive.");
   PARTHENON_REQUIRE(array_separation > 0.0,
                     "problem/pulsed_reconnection/array_separation must be positive.");
   PARTHENON_REQUIRE(azimuthal_mode_number >= 0,
                     "problem/pulsed_reconnection/N must be nonnegative.");
+  
 
   Real k_b, atomic_mass_unit, m_bar;
   auto hydro_pkg = pmb->packages.Get("Hydro");
@@ -297,9 +299,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "array_separation [cm] == " << array_separation << std::endl;
     std::cout << "gaussian width w [cm] == " << width << std::endl;
     std::cout << "azimuthal mode N ======= " << azimuthal_mode_number << std::endl;
+    std::cout << "perturb. amplitude ===== " << perturb_amplitude << std::endl;
     std::cout << "profile = exp(-(r / w)^2)" << std::endl;
-    std::cout << "thermo perturbation ==== 0.5 + 0.5*cos(N*theta/2)^2" << std::endl;
-    std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the same Gaussian"
+    std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
+    std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the profile Gaussian"
               << std::endl;
   }
 
@@ -328,7 +331,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           Real dprofile_dr = 0.0;
           GaussianProfileAndDerivative(r, width, profile, dprofile_dr);
           Real thermo_perturbation =
-              AzimuthalThermoPerturbation(theta, azimuthal_mode_number);
+              AzimuthalThermoPerturbation(theta, perturb_amplitude, azimuthal_mode_number);
 
           thermo_profile_sum += profile * thermo_perturbation;
 
