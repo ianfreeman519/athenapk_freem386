@@ -39,6 +39,17 @@ void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
 }
 
 KOKKOS_INLINE_FUNCTION
+Real GaussianProfile(const Real r, const Real width) {
+  const Real exponent = -SQR(r / width);
+  return exp(fmax(-700.0, exponent));
+}
+
+KOKKOS_INLINE_FUNCTION
+Real GaussianProfileDerivative(const Real r, const Real width) {
+  return (-2.0 * r / SQR(width)) * GaussianProfile(r, width);
+}
+
+KOKKOS_INLINE_FUNCTION
 Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number) {
   const Real phase = static_cast<Real>(mode_number) * theta;
   const Real cos_phase = cos(phase);
@@ -267,11 +278,16 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real v0 = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
   Real array_separation =
       pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 4.0);
-  Real width = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  Real width_thermo = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  Real width_magnetic = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "w_B",
+      pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic", width_thermo));
   int azimuthal_mode_number =
       pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
   Real perturb_amplitude = pin->GetOrAddReal("problem/pulsed_reconnection", "perturb_amplitude", 0.0);
-  PARTHENON_REQUIRE(width > 0.0, "problem/pulsed_reconnection/w must be positive.");
+  PARTHENON_REQUIRE(width_thermo > 0.0, "problem/pulsed_reconnection/w must be positive.");
+  PARTHENON_REQUIRE(width_magnetic > 0.0,
+                    "problem/pulsed_reconnection/w_B must be positive.");
   PARTHENON_REQUIRE(array_separation > 0.0,
                     "problem/pulsed_reconnection/array_separation must be positive.");
   PARTHENON_REQUIRE(azimuthal_mode_number >= 0,
@@ -297,12 +313,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "T_background [K] ======= " << T_background << std::endl;
     std::cout << "v0(core) [cm/s] ======== " << v0 << std::endl;
     std::cout << "array_separation [cm] == " << array_separation << std::endl;
-    std::cout << "gaussian width w [cm] == " << width << std::endl;
+    std::cout << "thermo width w [cm] ==== " << width_thermo << std::endl;
+    std::cout << "magnetic width w_B [cm]  " << width_magnetic << std::endl;
     std::cout << "azimuthal mode N ======= " << azimuthal_mode_number << std::endl;
     std::cout << "perturb. amplitude ===== " << perturb_amplitude << std::endl;
-    std::cout << "profile = exp(-(r / w)^2)" << std::endl;
+    std::cout << "thermo profile ========= exp(-(r / w)^2)" << std::endl;
     std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
-    std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the profile Gaussian"
+    std::cout << "magnetic profile ======= exp(-(r / w_B)^2)" << std::endl;
+    std::cout << "B = cross(zhat, B0 * grad(phi)) with phi built from the magnetic Gaussian"
               << std::endl;
   }
 
@@ -327,22 +345,21 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           Real y_local = y - y_center;
           Real r = sqrt(SQR(x) + SQR(y_local));
           Real theta = atan2(y_local, x);
-          Real profile = 0.0;
-          Real dprofile_dr = 0.0;
-          GaussianProfileAndDerivative(r, width, profile, dprofile_dr);
+          Real thermo_profile = GaussianProfile(r, width_thermo);
+          Real dmagnetic_profile_dr = GaussianProfileDerivative(r, width_magnetic);
           Real thermo_perturbation =
               AzimuthalThermoPerturbation(theta, perturb_amplitude, azimuthal_mode_number);
 
-          thermo_profile_sum += profile * thermo_perturbation;
+          thermo_profile_sum += thermo_profile * thermo_perturbation;
 
           if (r > 0.0) {
             const Real inv_r = 1.0 / r;
             const Real xhat = x * inv_r;
             const Real yhat = y_local * inv_r;
-            v1 += v0 * xhat * profile;
-            v2 += v0 * yhat * profile;
-            dphi_dx += dprofile_dr * xhat;
-            dphi_dy += dprofile_dr * yhat;
+            v1 += v0 * xhat * thermo_profile;
+            v2 += v0 * yhat * thermo_profile;
+            dphi_dx += dmagnetic_profile_dr * xhat;
+            dphi_dy += dmagnetic_profile_dr * yhat;
           }
         }
 

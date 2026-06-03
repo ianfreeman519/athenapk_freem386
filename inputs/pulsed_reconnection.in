@@ -12,10 +12,10 @@ problem_id = pulsed_reconnection
 integrator = rkl2
 resistivity = ohmic          # none (disabled) or ohmic
 cfl_diff_heat = 0.5
-resistivity_coeff = fixed
-ohm_diff_coeff_code = 1e4
-# spitzer_log_lambda = 10.0
-# spitzer_eta_max = 1e7           # 30x the value of the initial temp - should be hottest in the layer
+resistivity_coeff = spitzer
+# ohm_diff_coeff_code = 1e4
+spitzer_log_lambda = 10.0
+spitzer_eta_max = 5e6     
 
 <cooling>
 enable_cooling = tabular                # To disable, set to `none`
@@ -41,18 +41,20 @@ T_background = 1e2  # Background temperature
 v0 = 1e6        # flow speed away from wires
 w = 1.0     # Gaussian profile standard deviation
 array_separation = 4
+N = 100
+perturb_amplitude = 0.05
 
 <parthenon/mesh>
-refinement = static
+refinement = none
 nghost = 2
 
-nx1 = 640
+nx1 = 1280
 x1min = -4
 x1max = 4
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 =  320
+nx2 =  640
 x2min = -2.0
 x2max = 2.0
 ix2_bc = periodic
@@ -64,14 +66,14 @@ x3max = 1
 ix3_bc = periodic
 ox3_bc = periodic
 
-<parthenon/static_refinement0>
-x1min = -4.0
-x1max =  4.0
-x2min = -0.001
-x2max =  0.001
-x3min = -0.0
-x3max =  0.0
-level =  3
+# <parthenon/static_refinement0>
+# x1min = -4.0
+# x1max =  4.0
+# x2min = -0.001
+# x2max =  0.001
+# x3min = -0.0
+# x3max =  0.0
+# level =  3
 
 <parthenon/meshblock>
 nx1 = 64
@@ -98,7 +100,7 @@ Z = 13
 
 <parthenon/output0>
 file_type = hdf5
-dn = 1
+dt = 1e-9
 id = out0
 variables = cons, prim, curlBx, curlBy, curlBz, beta, eta, divv, dt_hyp_fms, dt_hyp_cs, dt_cool_local, dt_heat_local
 
