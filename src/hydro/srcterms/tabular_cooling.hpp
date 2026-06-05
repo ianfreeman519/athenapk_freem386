@@ -229,6 +229,8 @@ class TabularCooling {
                  std::shared_ptr<parthenon::StateDescriptor> hydro_pkg);
 
   void SrcTerm(parthenon::MeshData<parthenon::Real> *md, const parthenon::Real dt) const;
+  void CoupledSrcTerm(parthenon::MeshData<parthenon::Real> *md,
+                      const parthenon::Real dt) const;
 
   // Townsend 2009 exact integration scheme
   void TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
@@ -239,8 +241,13 @@ class TabularCooling {
   void SubcyclingFixedIntSrcTerm(parthenon::MeshData<parthenon::Real> *md,
                                  const parthenon::Real dt,
                                  const RKStepper rk_stepper) const;
+  template <typename RKStepper>
+  void CoupledSubcyclingFixedIntSrcTerm(parthenon::MeshData<parthenon::Real> *md,
+                                        const parthenon::Real dt,
+                                        const RKStepper rk_stepper) const;
 
   parthenon::Real EstimateTimeStep(parthenon::MeshData<parthenon::Real> *md) const;
+  parthenon::Real EstimateCoupledTimeStep(parthenon::MeshData<parthenon::Real> *md) const;
 
   // Get a lightweight object for computing cooling rate from the cooling table
   const CoolingTableObj GetCoolingTableObj() const { return cooling_table_obj_; }

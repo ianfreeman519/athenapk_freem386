@@ -37,6 +37,7 @@ enum class Reconstruction { undefined, dc, plm, ppm, wenoz, weno3, limo3 };
 enum class Integrator { undefined, rk1, rk2, vl2, rk3 };
 enum class Fluid { undefined, euler, glmmhd };
 enum class Cooling { none, tabular };
+enum class ThermalSourceCoupling { separate, combined_ohmic_cooling };
 enum class Conduction { none, isotropic, anisotropic };
 enum class ConductionCoeff { none, fixed, spitzer };
 enum class Viscosity { none, isotropic };

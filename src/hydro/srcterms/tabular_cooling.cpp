@@ -21,6 +21,7 @@
 
 // AthenaPK headers
 #include "../../units.hpp"
+#include "../diffusion/diffusion.hpp"
 #include "tabular_cooling.hpp"
 #include "utils/error_checking.hpp"
 
@@ -287,6 +288,19 @@ void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
   }
 }
 
+void TabularCooling::CoupledSrcTerm(MeshData<Real> *md, const Real dt) const {
+  if (integrator_ == CoolIntegrator::rk12) {
+    CoupledSubcyclingFixedIntSrcTerm<RK12Stepper>(md, dt, RK12Stepper());
+  } else if (integrator_ == CoolIntegrator::rk45) {
+    CoupledSubcyclingFixedIntSrcTerm<RK45Stepper>(md, dt, RK45Stepper());
+  } else if (integrator_ == CoolIntegrator::townsend) {
+    PARTHENON_FAIL("Combined ohmic-heating/tabular-cooling source does not support "
+                   "the Townsend integrator. Use cooling/integrator = rk12 or rk45.");
+  } else {
+    PARTHENON_FAIL("Unknown cooling integrator.");
+  }
+}
+
 template <typename RKStepper>
 void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt_,
                                                const RKStepper rk_stepper) const {
@@ -486,6 +500,156 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
       });
 }
 
+template <typename RKStepper>
+void TabularCooling::CoupledSubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt_,
+                                                      const RKStepper rk_stepper) const {
+
+  const auto dt = dt_;
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  PARTHENON_REQUIRE(mhd_enabled,
+                    "Combined ohmic-heating/tabular-cooling source requires MHD.");
+
+  const CoolingTableObj cooling_table_obj = cooling_table_obj_;
+  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const auto ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+
+  const unsigned int max_iter = max_iter_;
+  const Real min_sub_dt = dt / max_iter;
+  const Real d_e_tol = d_e_tol_;
+
+  const auto temp_cool_floor = std::pow(10.0, log_temp_start_);
+  const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
+  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb;
+
+  const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
+  const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  const auto ndim = prim_pack.GetNdim();
+
+  par_for(
+      DEFAULT_LOOP_PATTERN, "TabularCooling::CoupledSubcyclingSrcTerm", DevExecSpace(), 0,
+      cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i) {
+        auto &cons = cons_pack(b);
+        auto &prim = prim_pack(b);
+        const auto &coords = cons_pack.GetCoords(b);
+
+        const Real rho = cons(IDN, k, j, i);
+        Real internal_e =
+            cons(IEN, k, j, i) - 0.5 *
+                                     (SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
+                                      SQR(cons(IM3, k, j, i))) /
+                                     rho;
+        internal_e -= 0.5 * (SQR(cons(IB1, k, j, i)) + SQR(cons(IB2, k, j, i)) +
+                             SQR(cons(IB3, k, j, i)));
+        internal_e /= rho;
+        internal_e = fmax(internal_e, internal_e_floor);
+        const Real internal_e_initial = internal_e;
+
+        Real dBzdy = ndim > 1 ? (cons(IB3, k, j + 1, i) - cons(IB3, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        Real dBydz = ndim > 2 ? (cons(IB2, k + 1, j, i) - cons(IB2, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBxdz = ndim > 2 ? (cons(IB1, k + 1, j, i) - cons(IB1, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBzdx = (cons(IB3, k, j, i + 1) - cons(IB3, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBydx = (cons(IB2, k, j, i + 1) - cons(IB2, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBxdy = ndim > 1 ? (cons(IB1, k, j + 1, i) - cons(IB1, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        const Real j_squared =
+            SQR(dBzdy - dBydz) + SQR(dBxdz - dBzdx) + SQR(dBydx - dBxdy);
+
+        bool dedt_valid = true;
+        auto DeDt_wrapper = [&](const Real t, const Real e, bool &valid) {
+          const Real pres = rho * e * gm1;
+          const Real eta = ohm_diff.Get(pres, rho);
+          return eta * j_squared / rho + cooling_table_obj.DeDt(e, rho, valid);
+        };
+
+        Real sub_t = 0.0;
+        Real sub_dt = dt;
+        if (d_e_tol == 0.0) {
+          sub_dt = min_sub_dt;
+        }
+
+        unsigned int sub_iter = 0;
+        while (sub_t * (1 + KEpsilon_) < dt) {
+          if (sub_iter > max_iter) {
+            PARTHENON_FAIL(
+                "FATAL ERROR in [TabularCooling::CoupledSubcyclingFixedIntSrcTerm]: "
+                "Sub cycles exceed max_iter.");
+          }
+
+          Real internal_e_next_h = internal_e;
+          Real d_e_err = 0.0;
+          unsigned int sub_attempt = 0;
+          bool reattempt_sub = true;
+          do {
+            Real internal_e_next_l;
+            dedt_valid = true;
+            RKStepper::Step(sub_t, sub_dt, internal_e, DeDt_wrapper, internal_e_next_h,
+                            internal_e_next_l, dedt_valid);
+
+            sub_attempt++;
+            if (!dedt_valid) {
+              reattempt_sub = true;
+              sub_dt = min_sub_dt;
+            } else {
+              internal_e_next_h = fmax(internal_e_next_h, internal_e_floor);
+              internal_e_next_l = fmax(internal_e_next_l, internal_e_floor);
+              d_e_err =
+                  fabs((internal_e_next_h - internal_e_next_l) / fmax(internal_e_next_h,
+                                                                     internal_e_floor));
+              reattempt_sub = false;
+              if (std::isnan(d_e_err)) {
+                reattempt_sub = true;
+                sub_dt = min_sub_dt;
+              } else if (d_e_err >= d_e_tol && sub_dt > min_sub_dt) {
+                reattempt_sub = true;
+                if (d_e_tol == 0.0) {
+                  sub_dt = min_sub_dt;
+                } else {
+                  sub_dt = RKStepper::OptimalStep(sub_dt, d_e_err, d_e_tol);
+                }
+                if (sub_dt < min_sub_dt || sub_attempt >= max_iter) {
+                  sub_dt = min_sub_dt;
+                }
+              }
+            }
+          } while (reattempt_sub);
+
+          sub_t += sub_dt;
+          internal_e = fmax(internal_e_next_h, internal_e_floor);
+
+          if (d_e_err == 0.0) {
+            sub_dt = dt - sub_t;
+          } else {
+            sub_dt = RKStepper::OptimalStep(sub_dt, d_e_err, d_e_tol);
+          }
+          if (d_e_tol == 0.0) {
+            sub_dt = min_sub_dt;
+          }
+          sub_dt = std::max(sub_dt, min_sub_dt);
+          sub_dt = std::min(sub_dt, dt - sub_t);
+
+          sub_iter++;
+        }
+
+        cons(IEN, k, j, i) += rho * (internal_e - internal_e_initial);
+        prim(IPR, k, j, i) = rho * internal_e * gm1;
+      });
+}
+
 void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
                                      const parthenon::Real dt_) const {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
@@ -662,6 +826,82 @@ Real TabularCooling::EstimateTimeStep(MeshData<Real> *md) const {
       reducer_min);
 
   return cooling_time_cfl_ * min_cooling_time;
+}
+
+Real TabularCooling::EstimateCoupledTimeStep(MeshData<Real> *md) const {
+  if (cooling_time_cfl_ <= 0.0) {
+    return std::numeric_limits<Real>::max();
+  }
+
+  if (isnan(cooling_time_cfl_) || isinf(cooling_time_cfl_)) {
+    return std::numeric_limits<Real>::infinity();
+  }
+
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
+  const CoolingTableObj cooling_table_obj = cooling_table_obj_;
+  const auto ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+
+  const auto temp_cool_floor = std::pow(10.0, log_temp_start_);
+  const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
+  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb;
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  const auto ndim = prim_pack.GetNdim();
+
+  Real min_thermal_time = std::numeric_limits<Real>::infinity();
+  Kokkos::Min<Real> reducer_min(min_thermal_time);
+
+  Kokkos::parallel_reduce(
+      "TabularCooling::CoupledTimeStep",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+          {0, kb.s, jb.s, ib.s}, {prim_pack.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1},
+          {1, 1, 1, ib.e + 1 - ib.s}),
+      KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i,
+                    Real &thread_min_thermal_time) {
+        auto &prim = prim_pack(b);
+        const auto &coords = prim_pack.GetCoords(b);
+
+        const Real rho = prim(IDN, k, j, i);
+        const Real pres = prim(IPR, k, j, i);
+        const Real internal_e = pres / (rho * gm1);
+        const Real eta = ohm_diff.Get(pres, rho);
+
+        Real dBzdy = ndim > 1 ? (prim(IB3, k, j + 1, i) - prim(IB3, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        Real dBydz = ndim > 2 ? (prim(IB2, k + 1, j, i) - prim(IB2, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBxdz = ndim > 2 ? (prim(IB1, k + 1, j, i) - prim(IB1, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBzdx = (prim(IB3, k, j, i + 1) - prim(IB3, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBydx = (prim(IB2, k, j, i + 1) - prim(IB2, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBxdy = ndim > 1 ? (prim(IB1, k, j + 1, i) - prim(IB1, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        const Real j_squared =
+            SQR(dBzdy - dBydz) + SQR(dBxdz - dBzdx) + SQR(dBydx - dBxdy);
+
+        const Real de_dt =
+            eta * j_squared / rho + cooling_table_obj.DeDt(internal_e, rho);
+        const Real thermal_time =
+            ((de_dt == 0.0) || (internal_e < internal_e_floor))
+                ? std::numeric_limits<Real>::infinity()
+                : fabs(internal_e / de_dt);
+
+        thread_min_thermal_time = std::min(thermal_time, thread_min_thermal_time);
+      },
+      reducer_min);
+
+  return cooling_time_cfl_ * min_thermal_time;
 }
 
 void TabularCooling::TestCoolingTable(ParameterInput *pin) const {

@@ -189,6 +189,9 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
   // Using fixed and uniform coefficient so it's safe to get it outside the kernel.
   // Using 0.0 as parameters rho and p as they're not used anyway for a fixed coeff.
   const auto eta = ohm_diff.Get(0.0, 0.0);
+  const bool skip_energy_flux =
+      hydro_pkg->Param<ThermalSourceCoupling>("thermal_source_coupling") ==
+      ThermalSourceCoupling::combined_ohmic_cooling;
 
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "Resist. X1 fluxes (ohmic)", DevExecSpace(), 0,
@@ -225,10 +228,12 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 
         cons.flux(X1DIR, IB2, k, j, i) += -eta * j3;
         cons.flux(X1DIR, IB3, k, j, i) += eta * j2;
-        cons.flux(X1DIR, IEN, k, j, i) +=
-            0.5 * eta *
-            ((prim(IB3, k, j, i - 1) + prim(IB3, k, j, i)) * j2 -
-             (prim(IB2, k, j, i - 1) + prim(IB2, k, j, i)) * j3);
+        if (!skip_energy_flux) {
+          cons.flux(X1DIR, IEN, k, j, i) +=
+              0.5 * eta *
+              ((prim(IB3, k, j, i - 1) + prim(IB3, k, j, i)) * j2 -
+               (prim(IB2, k, j, i - 1) + prim(IB2, k, j, i)) * j3);
+        }
       });
 
   if (ndim < 2) {
@@ -268,10 +273,12 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 
         cons.flux(X2DIR, IB1, k, j, i) += eta * j3;
         cons.flux(X2DIR, IB3, k, j, i) += -eta * j1;
-        cons.flux(X2DIR, IEN, k, j, i) +=
-            0.5 * eta *
-            ((prim(IB1, k, j - 1, i) + prim(IB1, k, j, i)) * j3 -
-             (prim(IB3, k, j - 1, i) + prim(IB3, k, j, i)) * j1);
+        if (!skip_energy_flux) {
+          cons.flux(X2DIR, IEN, k, j, i) +=
+              0.5 * eta *
+              ((prim(IB1, k, j - 1, i) + prim(IB1, k, j, i)) * j3 -
+               (prim(IB3, k, j - 1, i) + prim(IB3, k, j, i)) * j1);
+        }
       });
 
   if (ndim < 3) {
@@ -309,10 +316,12 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 
         cons.flux(X3DIR, IB1, k, j, i) += -eta * j2;
         cons.flux(X3DIR, IB2, k, j, i) += eta * j1;
-        cons.flux(X3DIR, IEN, k, j, i) +=
-            0.5 * eta *
-            ((prim(IB2, k - 1, j, i) + prim(IB2, k, j, i)) * j1 -
-             (prim(IB1, k - 1, j, i) + prim(IB1, k, j, i)) * j2);
+        if (!skip_energy_flux) {
+          cons.flux(X3DIR, IEN, k, j, i) +=
+              0.5 * eta *
+              ((prim(IB2, k - 1, j, i) + prim(IB2, k, j, i)) * j1 -
+               (prim(IB1, k - 1, j, i) + prim(IB1, k, j, i)) * j2);
+        }
       });
 }
 
@@ -335,6 +344,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
   const int ndim = pmb->pmy_mesh->ndim;
 
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const bool skip_energy_flux =
+      hydro_pkg->Param<ThermalSourceCoupling>("thermal_source_coupling") ==
+      ThermalSourceCoupling::combined_ohmic_cooling;
 
   const auto ohm_diff_val = ohm_diff; // capture by value for the device kernel
 
@@ -375,10 +387,12 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
 
         cons.flux(X1DIR, IB2, k, j, i) += -eta * j3;
         cons.flux(X1DIR, IB3, k, j, i) += eta * j2;
-        cons.flux(X1DIR, IEN, k, j, i) +=
-            0.5 * eta *
-            ((prim(IB3, k, j, i - 1) + prim(IB3, k, j, i)) * j2 -
-             (prim(IB2, k, j, i - 1) + prim(IB2, k, j, i)) * j3);
+        if (!skip_energy_flux) {
+          cons.flux(X1DIR, IEN, k, j, i) +=
+              0.5 * eta *
+              ((prim(IB3, k, j, i - 1) + prim(IB3, k, j, i)) * j2 -
+               (prim(IB2, k, j, i - 1) + prim(IB2, k, j, i)) * j3);
+        }
       });
 
   if (ndim < 2) {
@@ -421,10 +435,12 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
 
         cons.flux(X2DIR, IB1, k, j, i) += eta * j3;
         cons.flux(X2DIR, IB3, k, j, i) += -eta * j1;
-        cons.flux(X2DIR, IEN, k, j, i) +=
-            0.5 * eta *
-            ((prim(IB1, k, j - 1, i) + prim(IB1, k, j, i)) * j3 -
-             (prim(IB3, k, j - 1, i) + prim(IB3, k, j, i)) * j1);
+        if (!skip_energy_flux) {
+          cons.flux(X2DIR, IEN, k, j, i) +=
+              0.5 * eta *
+              ((prim(IB1, k, j - 1, i) + prim(IB1, k, j, i)) * j3 -
+               (prim(IB3, k, j - 1, i) + prim(IB3, k, j, i)) * j1);
+        }
       });
 
   if (ndim < 3) {
@@ -465,9 +481,11 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
 
         cons.flux(X3DIR, IB1, k, j, i) += -eta * j2;
         cons.flux(X3DIR, IB2, k, j, i) += eta * j1;
-        cons.flux(X3DIR, IEN, k, j, i) +=
-            0.5 * eta *
-            ((prim(IB2, k - 1, j, i) + prim(IB2, k, j, i)) * j1 -
-             (prim(IB1, k - 1, j, i) + prim(IB1, k, j, i)) * j2);
+        if (!skip_energy_flux) {
+          cons.flux(X3DIR, IEN, k, j, i) +=
+              0.5 * eta *
+              ((prim(IB2, k - 1, j, i) + prim(IB2, k, j, i)) * j1 -
+               (prim(IB1, k - 1, j, i) + prim(IB1, k, j, i)) * j2);
+        }
       });
 }

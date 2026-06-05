@@ -231,12 +231,17 @@ TaskStatus AddUnsplitSources(MeshData<Real> *md, const SimTime &tm, const Real b
     hydro_pkg->Param<GLMMHD::SourceFun_t>("glmmhd_source")(md, beta_dt);
   }
   const auto &enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
+  const auto thermal_source_coupling =
+      hydro_pkg->Param<ThermalSourceCoupling>("thermal_source_coupling");
 
   if (enable_cooling == Cooling::tabular) {
     const TabularCooling &tabular_cooling =
         hydro_pkg->Param<TabularCooling>("tabular_cooling");
-
-    tabular_cooling.SrcTerm(md, beta_dt);
+    if (thermal_source_coupling == ThermalSourceCoupling::combined_ohmic_cooling) {
+      tabular_cooling.CoupledSrcTerm(md, beta_dt);
+    } else {
+      tabular_cooling.SrcTerm(md, beta_dt);
+    }
   }
   if (ProblemSourceUnsplit != nullptr) {
     ProblemSourceUnsplit(md, tm, beta_dt);
@@ -751,8 +756,9 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
    * Read Tabular Cooling
    ************************************************************/
 
-  const auto enable_cooling_str =
-      pin->GetOrAddString("cooling", "enable_cooling", "none");
+  const auto enable_cooling_str = pin->GetOrAddString("cooling", "enable_cooling", "none");
+  const auto couple_ohmic_heating =
+      pin->GetOrAddBoolean("cooling", "couple_ohmic_heating", false);
 
   auto cooling = Cooling::none;
   if (enable_cooling_str == "tabular") {
@@ -762,10 +768,25 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
                    "'none' and 'tabular'");
   }
   pkg->AddParam<>("enable_cooling", cooling);
+  pkg->AddParam<>("thermal_source_coupling",
+                  couple_ohmic_heating ? ThermalSourceCoupling::combined_ohmic_cooling
+                                        : ThermalSourceCoupling::separate);
 
   if (cooling == Cooling::tabular) {
+    PARTHENON_REQUIRE(
+        !(couple_ohmic_heating && pkg->Param<Resistivity>("resistivity") == Resistivity::none),
+        "cooling/couple_ohmic_heating requires diffusion/resistivity to be enabled.");
+    PARTHENON_REQUIRE(
+        !(couple_ohmic_heating && pkg->Param<DiffInt>("diffint") == DiffInt::none),
+        "cooling/couple_ohmic_heating requires diffusion/integrator to be enabled.");
+    PARTHENON_REQUIRE(
+        !(couple_ohmic_heating && pin->GetOrAddString("cooling", "integrator", "rk12") ==
+                                      "townsend"),
+        "cooling/couple_ohmic_heating is not compatible with cooling/integrator=townsend.");
     TabularCooling tabular_cooling(pin, pkg);
     pkg->AddParam<>("tabular_cooling", tabular_cooling);
+  } else if (couple_ohmic_heating) {
+    PARTHENON_FAIL("cooling/couple_ohmic_heating requires cooling/enable_cooling=tabular.");
   }
 
   auto scratch_level = pin->GetOrAddInteger("hydro", "scratch_level", 0);
@@ -959,10 +980,16 @@ Real EstimateTimestep(MeshData<Real> *md) {
   }
 
   const auto &enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
+  const auto thermal_source_coupling =
+      hydro_pkg->Param<ThermalSourceCoupling>("thermal_source_coupling");
   if (enable_cooling == Cooling::tabular) {
     const TabularCooling &tabular_cooling =
         hydro_pkg->Param<TabularCooling>("tabular_cooling");
-    dt_cool = tabular_cooling.EstimateTimeStep(md);
+    if (thermal_source_coupling == ThermalSourceCoupling::combined_ohmic_cooling) {
+      dt_cool = tabular_cooling.EstimateCoupledTimeStep(md);
+    } else {
+      dt_cool = tabular_cooling.EstimateTimeStep(md);
+    }
     min_dt = std::min(min_dt, dt_cool);
   }
 
@@ -975,7 +1002,9 @@ Real EstimateTimestep(MeshData<Real> *md) {
     }
     if (hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none) {
       dt_diff = std::min(dt_diff, EstimateResistivityTimestep(md));
-      dt_heat = std::min(dt_heat, EstimateOhmicHeatingTimestep(md));
+      if (thermal_source_coupling != ThermalSourceCoupling::combined_ohmic_cooling) {
+        dt_heat = std::min(dt_heat, EstimateOhmicHeatingTimestep(md));
+      }
     }
     // For unsplit integration use strict limit
     if (hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
@@ -1022,7 +1051,9 @@ Real EstimateTimestep(MeshData<Real> *md) {
   } else if (limiter_dt == dt_diff) {
     limiter_src = "diffusion";
   } else if (limiter_dt == dt_cool) {
-    limiter_src = "cooling";
+    limiter_src = thermal_source_coupling == ThermalSourceCoupling::combined_ohmic_cooling
+                      ? "coupled thermal source"
+                      : "cooling";
   } else if (limiter_dt == dt_heat) {
     limiter_src = "ohmic heating";
   } else if (limiter_dt == dt_prob) {

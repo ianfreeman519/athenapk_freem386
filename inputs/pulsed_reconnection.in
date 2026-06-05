@@ -19,6 +19,7 @@ spitzer_eta_max = 5e6
 
 <cooling>
 enable_cooling = tabular                # To disable, set to `none`
+couple_ohmic_heating = false            # When true, evolve +eta*j^2 and tabular cooling together with the cooling RK solver and disable the standalone ohmic IEN flux/heating timestep path
 table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling    # Path to the cooling table (in a text file)
 lambda_units_cgs = 1                    # Conversion factor of the cooling rate relative to CGS units       
 integrator = townsend              # Other possible options are `rk12` and `rk45` for error bound subcycling
@@ -43,6 +44,7 @@ w = 1.0     # Gaussian profile standard deviation
 array_separation = 4
 N = 100
 perturb_amplitude = 0.05
+w_B = 1.5
 
 <parthenon/mesh>
 refinement = none

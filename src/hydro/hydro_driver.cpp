@@ -582,7 +582,8 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
         mu1.get(), integrator->gam0[stage - 1], integrator->gam1[stage - 1],
         integrator->beta[stage - 1] * integrator->dt);
 
-    // Add non-operator split source terms.
+    // Add non-operator split source terms, including the optional coupled
+    // ohmic-heating/tabular-cooling thermal source handled inside AddUnsplitSources.
     // Note: Directly update the "cons" variables of mu0 based on the "prim" variables
     // of mu0 as the "cons" variables have already been updated in this stage from the
     // fluxes in the previous step.
