@@ -50,13 +50,13 @@ w_B = 1.5
 refinement = none
 nghost = 2
 
-nx1 = 1280
+nx1 = 640
 x1min = -4
 x1max = 4
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 =  640
+nx2 =  320
 x2min = -2.0
 x2max = 2.0
 ix2_bc = periodic
