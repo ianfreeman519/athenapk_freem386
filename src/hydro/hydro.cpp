@@ -736,6 +736,9 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     pkg->AddParam<Real>("dt_diff", std::numeric_limits<Real>::max(),
                         Params::Mutability::Mutable); // diffusive timestep constraint
     pkg->AddParam<>("diffint", diffint);
+    pkg->AddParam<>("skip_energy_flux_when_coupled",
+                    pin->GetOrAddBoolean("diffusion", "skip_energy_flux_when_coupled",
+                                         true));
 
     if (fluid == Fluid::euler) {
       AdiabaticHydroEOS eos(pfloor, dfloor, efloor, vceil, eceil, gamma);

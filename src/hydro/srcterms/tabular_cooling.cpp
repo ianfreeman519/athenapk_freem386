@@ -65,6 +65,8 @@ TabularCooling::TabularCooling(ParameterInput *pin,
   cooling_time_cfl_ = pin->GetOrAddReal("cooling", "cfl", 0.1);
   d_log_temp_tol_ = pin->GetOrAddReal("cooling", "d_log_temp_tol", 1e-8);
   d_e_tol_ = pin->GetOrAddReal("cooling", "d_e_tol", 1e-8);
+  coupled_ohmic_heating_source_ =
+      pin->GetOrAddBoolean("cooling", "coupled_ohmic_heating_source", true);
   // negative means disabled
   T_floor_ = pin->GetOrAddReal("hydro", "Tfloor", -1.0);
 
@@ -514,13 +516,13 @@ void TabularCooling::CoupledSubcyclingFixedIntSrcTerm(MeshData<Real> *md, const 
   const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
   const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
   const auto ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const auto coupled_ohmic_heating_source = coupled_ohmic_heating_source_;
 
   const unsigned int max_iter = max_iter_;
   const Real min_sub_dt = dt / max_iter;
   const Real d_e_tol = d_e_tol_;
 
-  const auto temp_cool_floor = std::pow(10.0, log_temp_start_);
-  const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
+  const Real temp_floor = (T_floor_ > 0.0) ? T_floor_ : 0.0;
   const Real internal_e_floor = temp_floor / mbar_gm1_over_kb;
 
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
@@ -547,8 +549,8 @@ void TabularCooling::CoupledSubcyclingFixedIntSrcTerm(MeshData<Real> *md, const 
         internal_e -= 0.5 * (SQR(cons(IB1, k, j, i)) + SQR(cons(IB2, k, j, i)) +
                              SQR(cons(IB3, k, j, i)));
         internal_e /= rho;
+        const Real internal_e_initial_spec = internal_e;
         internal_e = fmax(internal_e, internal_e_floor);
-        const Real internal_e_initial = internal_e;
 
         Real dBzdy = ndim > 1 ? (cons(IB3, k, j + 1, i) - cons(IB3, k, j - 1, i)) /
                                     (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
@@ -573,7 +575,9 @@ void TabularCooling::CoupledSubcyclingFixedIntSrcTerm(MeshData<Real> *md, const 
         auto DeDt_wrapper = [&](const Real t, const Real e, bool &valid) {
           const Real pres = rho * e * gm1;
           const Real eta = ohm_diff.Get(pres, rho);
-          return eta * j_squared / rho + cooling_table_obj.DeDt(e, rho, valid);
+          const Real ohmic_de_dt =
+              coupled_ohmic_heating_source ? eta * j_squared / rho : 0.0;
+          return ohmic_de_dt + cooling_table_obj.DeDt(e, rho, valid);
         };
 
         Real sub_t = 0.0;
@@ -645,7 +649,7 @@ void TabularCooling::CoupledSubcyclingFixedIntSrcTerm(MeshData<Real> *md, const 
           sub_iter++;
         }
 
-        cons(IEN, k, j, i) += rho * (internal_e - internal_e_initial);
+        cons(IEN, k, j, i) += rho * (internal_e - internal_e_initial_spec);
         prim(IPR, k, j, i) = rho * internal_e * gm1;
       });
 }
@@ -841,11 +845,13 @@ Real TabularCooling::EstimateCoupledTimeStep(MeshData<Real> *md) const {
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
   const CoolingTableObj cooling_table_obj = cooling_table_obj_;
   const auto ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const auto coupled_ohmic_heating_source = coupled_ohmic_heating_source_;
   const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
   const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const auto thermal_cfl =
+      std::min(cooling_time_cfl_, hydro_pkg->Param<Real>("cfl_diff_heat"));
 
-  const auto temp_cool_floor = std::pow(10.0, log_temp_start_);
-  const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
+  const Real temp_floor = (T_floor_ > 0.0) ? T_floor_ : 0.0;
   const Real internal_e_floor = temp_floor / mbar_gm1_over_kb;
 
   IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
@@ -869,7 +875,9 @@ Real TabularCooling::EstimateCoupledTimeStep(MeshData<Real> *md) const {
         const Real rho = prim(IDN, k, j, i);
         const Real pres = prim(IPR, k, j, i);
         const Real internal_e = pres / (rho * gm1);
-        const Real eta = ohm_diff.Get(pres, rho);
+        const Real source_internal_e = fmax(internal_e, internal_e_floor);
+        const Real source_pres = rho * source_internal_e * gm1;
+        const Real eta = ohm_diff.Get(source_pres, rho);
 
         Real dBzdy = ndim > 1 ? (prim(IB3, k, j + 1, i) - prim(IB3, k, j - 1, i)) /
                                     (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
@@ -890,18 +898,20 @@ Real TabularCooling::EstimateCoupledTimeStep(MeshData<Real> *md) const {
         const Real j_squared =
             SQR(dBzdy - dBydz) + SQR(dBxdz - dBzdx) + SQR(dBydx - dBxdy);
 
+        const Real ohmic_de_dt =
+            coupled_ohmic_heating_source ? eta * j_squared / rho : 0.0;
         const Real de_dt =
-            eta * j_squared / rho + cooling_table_obj.DeDt(internal_e, rho);
+            ohmic_de_dt + cooling_table_obj.DeDt(source_internal_e, rho);
         const Real thermal_time =
-            ((de_dt == 0.0) || (internal_e < internal_e_floor))
+            (de_dt == 0.0)
                 ? std::numeric_limits<Real>::infinity()
-                : fabs(internal_e / de_dt);
+                : fabs(source_internal_e / de_dt);
 
         thread_min_thermal_time = std::min(thermal_time, thread_min_thermal_time);
       },
       reducer_min);
 
-  return cooling_time_cfl_ * min_thermal_time;
+  return thermal_cfl * min_thermal_time;
 }
 
 void TabularCooling::TestCoolingTable(ParameterInput *pin) const {

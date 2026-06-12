@@ -190,8 +190,9 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
   // Using 0.0 as parameters rho and p as they're not used anyway for a fixed coeff.
   const auto eta = ohm_diff.Get(0.0, 0.0);
   const bool skip_energy_flux =
+      hydro_pkg->Param<bool>("skip_energy_flux_when_coupled") &&
       hydro_pkg->Param<ThermalSourceCoupling>("thermal_source_coupling") ==
-      ThermalSourceCoupling::combined_ohmic_cooling;
+          ThermalSourceCoupling::combined_ohmic_cooling;
 
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "Resist. X1 fluxes (ohmic)", DevExecSpace(), 0,
@@ -345,8 +346,9 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md) {
 
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   const bool skip_energy_flux =
+      hydro_pkg->Param<bool>("skip_energy_flux_when_coupled") &&
       hydro_pkg->Param<ThermalSourceCoupling>("thermal_source_coupling") ==
-      ThermalSourceCoupling::combined_ohmic_cooling;
+          ThermalSourceCoupling::combined_ohmic_cooling;
 
   const auto ohm_diff_val = ohm_diff; // capture by value for the device kernel
 

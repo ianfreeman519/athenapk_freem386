@@ -218,6 +218,7 @@ class TabularCooling {
 
   // Tolerances
   parthenon::Real d_log_temp_tol_, d_e_tol_;
+  bool coupled_ohmic_heating_source_;
 
   // Used for roundoff as subcycle approaches end of timestep
   static constexpr parthenon::Real KEpsilon_ = 1e-12;
