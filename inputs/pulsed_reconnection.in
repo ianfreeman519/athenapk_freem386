@@ -19,10 +19,10 @@ spitzer_eta_max = 5e6
 
 <cooling>
 enable_cooling = tabular                # To disable, set to `none`
-couple_ohmic_heating = true            # When true, evolve +eta*j^2 and tabular cooling together with the cooling RK solver and disable the standalone ohmic IEN flux/heating timestep path
+couple_ohmic_heating = false            # When true, evolve +eta*j^2 and tabular cooling together with the cooling RK solver and disable the standalone ohmic IEN flux/heating timestep path
 table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling    # Path to the cooling table (in a text file)
 lambda_units_cgs = 1                    # Conversion factor of the cooling rate relative to CGS units       
-integrator = rk12              # Other possible options are `rk12` and `rk45` for error bound subcycling
+integrator = townsend              # Other possible options are `rk12` and `rk45` for error bound subcycling
 max_iter = 1000                    # Max number of iteration for subcycling. Unsued for Townsend integrator
 cfl = 0.45                          # Restrict global timestep to `cfl*e / dedt`, i.e., some fraction of change per cycle in the specific internal energy (i.e., temperature)
 d_log_temp_tol = 1e-8              # Tolerance in cooling table between subsequent entries. Both subcycling integrators and cfl restriction rely on a table lookup that assumes equally spaced (in log space) temperature values.
