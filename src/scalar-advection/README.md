@@ -1,0 +1,1 @@
+I will solve the scalar advection equation in this file as a first step to help me get up to speed with c++ parthenon and kokkos
