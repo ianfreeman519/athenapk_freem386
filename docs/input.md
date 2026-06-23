@@ -95,7 +95,7 @@ resistivity = none          # none (disabled) or ohmic
 resistivity_coeff = fixed   # fixed or spitzer
 ohm_diff_coeff_code = 0.25  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
 #spitzer_log_lambda = 10.0  # Coulomb logarithm for Spitzer resistivity
-#spitzer_eta_max = -1.0     # cap on Spitzer resistivity (<=0 disables cap)
+#spitzer_eta_max = -1.0     # cap on Spitzer resistivity in cgs cm^2/s (<=0 disables cap)
 ```
 (An)isotropic thermal conduction (with fixed or Spitzer coefficient), isotropic viscosity, and
 resistivity with fixed or Spitzer coefficients are currently implemented.

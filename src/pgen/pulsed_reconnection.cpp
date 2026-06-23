@@ -86,7 +86,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
   const bool has_ohm_diff = hydro_pkg->AllParams().hasKey("ohm_diff");
   OhmicDiffusivity ohm_diff_dev(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0, 0.0,
-                                0.0, 0.0, -1.0); // Dummy init
+                                0.0, 0.0, -1.0, 0.0); // Dummy init
   if (has_ohm_diff) {
     ohm_diff_dev = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   }
@@ -270,25 +270,31 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto &u = mbd->Get("cons").data;
 
   Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
-  Real B0 = pin->GetOrAddReal("problem/pulsed_reconnection", "B0", 5.0e5);
-  Real rho_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1e-3);
-  Real rho_background = pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-6);
-  Real T_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4);
-  Real T_background = pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 1e2);
-  Real v0 = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
-  Real array_separation =
+  const Real B0_cgs = pin->GetOrAddReal("problem/pulsed_reconnection", "B0", 5.0e5);
+  const Real rho_wire_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1e-3);
+  const Real rho_background_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-6);
+  const Real T_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4);
+  const Real T_background =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 1e2);
+  const Real v0_cgs = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
+  const Real array_separation_cgs =
       pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 4.0);
-  Real width_thermo = pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
-  Real width_magnetic = pin->GetOrAddReal(
+  const Real width_thermo_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  const Real width_magnetic_cgs = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "w_B",
-      pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic", width_thermo));
+      pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic", width_thermo_cgs));
   int azimuthal_mode_number =
       pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
-  Real perturb_amplitude = pin->GetOrAddReal("problem/pulsed_reconnection", "perturb_amplitude", 0.0);
-  PARTHENON_REQUIRE(width_thermo > 0.0, "problem/pulsed_reconnection/w must be positive.");
-  PARTHENON_REQUIRE(width_magnetic > 0.0,
+  Real perturb_amplitude =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "perturb_amplitude", 0.0);
+  PARTHENON_REQUIRE(width_thermo_cgs > 0.0,
+                    "problem/pulsed_reconnection/w must be positive.");
+  PARTHENON_REQUIRE(width_magnetic_cgs > 0.0,
                     "problem/pulsed_reconnection/w_B must be positive.");
-  PARTHENON_REQUIRE(array_separation > 0.0,
+  PARTHENON_REQUIRE(array_separation_cgs > 0.0,
                     "problem/pulsed_reconnection/array_separation must be positive.");
   PARTHENON_REQUIRE(azimuthal_mode_number >= 0,
                     "problem/pulsed_reconnection/N must be nonnegative.");
@@ -300,23 +306,38 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   k_b = units.k_boltzmann();
   atomic_mass_unit = units.atomic_mass_unit();
   m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
+  const Real B0 = B0_cgs * units.gauss();
+  const Real rho_wire = rho_wire_cgs * units.g_cm3();
+  const Real rho_background = rho_background_cgs * units.g_cm3();
+  const Real v0 = v0_cgs * units.cm_s();
+  const Real array_separation = array_separation_cgs * units.cm();
+  const Real width_thermo = width_thermo_cgs * units.cm();
+  const Real width_magnetic = width_magnetic_cgs * units.cm();
 
   // Printing out input values for slurm records
   if (parthenon::Globals::my_rank == 0 && pmb->gid == 0) {
     std::cout << "========================================" << std::endl;
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ================== " << pin->GetReal("hydro", "gamma") << std::endl;
-    std::cout << "B0 ===================== " << B0 << std::endl;
-    std::cout << "rho_wire(core) [g/cm^3] " << rho_wire << std::endl;
-    std::cout << "rho_background [g/cm^3]= " << rho_background << std::endl;
+    std::cout << "B0 [Gauss] ============= " << B0_cgs << std::endl;
+    std::cout << "rho_wire(core) [g/cm^3] " << rho_wire_cgs << std::endl;
+    std::cout << "rho_background [g/cm^3]= " << rho_background_cgs << std::endl;
     std::cout << "T_wire(core) [K] ======= " << T_wire << std::endl;
     std::cout << "T_background [K] ======= " << T_background << std::endl;
-    std::cout << "v0(core) [cm/s] ======== " << v0 << std::endl;
-    std::cout << "array_separation [cm] == " << array_separation << std::endl;
-    std::cout << "thermo width w [cm] ==== " << width_thermo << std::endl;
-    std::cout << "magnetic width w_B [cm]  " << width_magnetic << std::endl;
+    std::cout << "v0(core) [cm/s] ======== " << v0_cgs << std::endl;
+    std::cout << "array_separation [cm] == " << array_separation_cgs << std::endl;
+    std::cout << "thermo width w [cm] ==== " << width_thermo_cgs << std::endl;
+    std::cout << "magnetic width w_B [cm]  " << width_magnetic_cgs << std::endl;
     std::cout << "azimuthal mode N ======= " << azimuthal_mode_number << std::endl;
     std::cout << "perturb. amplitude ===== " << perturb_amplitude << std::endl;
+    std::cout << "Converted code units:" << std::endl;
+    std::cout << "B0 [code] ============== " << B0 << std::endl;
+    std::cout << "rho_wire(core) [code] == " << rho_wire << std::endl;
+    std::cout << "rho_background [code] == " << rho_background << std::endl;
+    std::cout << "v0(core) [code] ======== " << v0 << std::endl;
+    std::cout << "array_separation [code]  " << array_separation << std::endl;
+    std::cout << "thermo width w [code] == " << width_thermo << std::endl;
+    std::cout << "magnetic width w_B [code]" << width_magnetic << std::endl;
     std::cout << "thermo profile ========= exp(-(r / w)^2)" << std::endl;
     std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
     std::cout << "magnetic profile ======= exp(-(r / w_B)^2)" << std::endl;

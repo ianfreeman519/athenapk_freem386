@@ -140,13 +140,16 @@ struct OhmicDiffusivity {
   Real coeff_;
   Real c_;
   Real eta_max_;
+  Real eta_unit_;
 
  public:
   KOKKOS_INLINE_FUNCTION
   OhmicDiffusivity(Resistivity resistivity, ResistivityCoeff resistivity_coeff_type,
-                   Real coeff, Real mbar, Real me, Real kb, Real c, Real eta_max)
+                   Real coeff, Real mbar, Real me, Real kb, Real c, Real eta_max,
+                   Real eta_unit)
       : resistivity_(resistivity), resistivity_coeff_type_(resistivity_coeff_type),
-        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb), c_(c), eta_max_(eta_max) {}
+        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb), c_(c), eta_max_(eta_max),
+        eta_unit_(eta_unit) {}
 
   KOKKOS_INLINE_FUNCTION
   Real Get(const Real pres, const Real rho) const {
@@ -156,8 +159,8 @@ struct OhmicDiffusivity {
       Real T_K = mbar_ / kb_ * pres / rho;
       Real ln_Lambda = coeff_;
       Real Z_bar = 3.0; // Hard setting this for now - TODO read somehow
-      // Spitzer magnetic diffusivity in HL-CGS:
-      Real coeff = 1.02688e12 * Z_bar * ln_Lambda / (std::pow(T_K, 1.5));
+      // Spitzer magnetic diffusivity in HL-CGS [cm^2/s], converted to code units.
+      Real coeff = 1.02688e12 * Z_bar * ln_Lambda / (std::pow(T_K, 1.5)) * eta_unit_;
       if (eta_max_ > 0.0) {
         coeff = std::min(coeff, eta_max_);
       }
