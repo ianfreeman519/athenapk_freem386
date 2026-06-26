@@ -288,8 +288,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
       pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic", width_thermo_cgs));
   int azimuthal_mode_number =
       pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
-  Real perturb_amplitude =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "perturb_amplitude", 0.0);
+  Real density_perturb_amplitude =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "density_perturb_amplitude", 0.0);
+  Real temperature_perturb_amplitude =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "temperature_perturb_amplitude", 0.0);
   PARTHENON_REQUIRE(width_thermo_cgs > 0.0,
                     "problem/pulsed_reconnection/w must be positive.");
   PARTHENON_REQUIRE(width_magnetic_cgs > 0.0,
@@ -320,7 +322,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ================== " << pin->GetReal("hydro", "gamma") << std::endl;
     std::cout << "B0 [Gauss] ============= " << B0_cgs << std::endl;
-    std::cout << "rho_wire(core) [g/cm^3] " << rho_wire_cgs << std::endl;
+    std::cout << "rho_wire(core) [g/cm^3]= " << rho_wire_cgs << std::endl;
     std::cout << "rho_background [g/cm^3]= " << rho_background_cgs << std::endl;
     std::cout << "T_wire(core) [K] ======= " << T_wire << std::endl;
     std::cout << "T_background [K] ======= " << T_background << std::endl;
@@ -329,7 +331,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "thermo width w [cm] ==== " << width_thermo_cgs << std::endl;
     std::cout << "magnetic width w_B [cm]  " << width_magnetic_cgs << std::endl;
     std::cout << "azimuthal mode N ======= " << azimuthal_mode_number << std::endl;
-    std::cout << "perturb. amplitude ===== " << perturb_amplitude << std::endl;
+    std::cout << "dens. perturb. amplitude=" << density_perturb_amplitude << std::endl;
+    std::cout << "temp perturb. amplitude =" << temperature_perturb_amplitude << std::endl;
     std::cout << "Converted code units:" << std::endl;
     std::cout << "B0 [code] ============== " << B0 << std::endl;
     std::cout << "rho_wire(core) [code] == " << rho_wire << std::endl;
@@ -357,6 +360,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         Real y = coords.Xc<2>(j);
         Real d = array_separation / 2.0;
         Real thermo_profile_sum = 0.0;
+        Real density_profile_sum = 0.0;
         Real dphi_dx = 0.0;
         Real dphi_dy = 0.0;
 
@@ -368,10 +372,12 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           Real theta = atan2(y_local, x);
           Real thermo_profile = GaussianProfile(r, width_thermo);
           Real dmagnetic_profile_dr = GaussianProfileDerivative(r, width_magnetic);
-          Real thermo_perturbation =
-              AzimuthalThermoPerturbation(theta, perturb_amplitude, azimuthal_mode_number);
-
-          thermo_profile_sum += thermo_profile * thermo_perturbation;
+          Real density_perturbation =
+              AzimuthalThermoPerturbation(theta, density_perturb_amplitude, azimuthal_mode_number);
+          Real temperature_perturbation =
+              AzimuthalThermoPerturbation(theta, temperature_perturb_amplitude, azimuthal_mode_number);
+          thermo_profile_sum += thermo_profile * temperature_perturbation;
+          density_profile_sum += thermo_profile * density_perturbation;
 
           if (r > 0.0) {
             const Real inv_r = 1.0 / r;
@@ -384,7 +390,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           }
         }
 
-        Real rho = rho_background + rho_wire * thermo_profile_sum;
+        Real rho = rho_background + rho_wire * density_profile_sum;
         Real T = T_background + T_wire * thermo_profile_sum;
         Real P = T * k_b * rho / m_bar;
 
