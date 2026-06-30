@@ -287,6 +287,146 @@ void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
   }
 }
 
+void TabularCooling::CoupledRK12Step(MeshData<Real> *md, const Real dt_) const {
+  const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+
+  const CoolingTableObj cooling_table_obj = cooling_table_obj_;
+  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const unsigned int max_iter = max_iter_;
+  const Real min_sub_dt = dt / max_iter;
+  const Real d_e_tol = d_e_tol_;
+
+  // Determine the cooling floor, whichever is higher of the cooling table floor
+  // or fluid solver floor.
+  const auto temp_cool_floor = std::pow(10.0, log_temp_start_);
+  const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
+  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb;
+
+  const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto &eint_iter_pack = md->PackVariables(std::vector<std::string>{"eint_iter"});
+  const auto &eint_next_pack = md->PackVariables(std::vector<std::string>{"eint_next"});
+  const auto &temp_next_pack = md->PackVariables(std::vector<std::string>{"temp_next"});
+  const auto &s_ohm_pack = md->PackVariables(std::vector<std::string>{"s_ohm_iter"});
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::entire);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::entire);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::entire);
+
+  par_for(
+      DEFAULT_LOOP_PATTERN, "TabularCooling::CoupledRK12Step", DevExecSpace(), 0,
+      cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i) {
+        const auto &cons = cons_pack(b);
+        auto &eint_next = eint_next_pack(b);
+        auto &temp_next = temp_next_pack(b);
+        const auto &eint_iter = eint_iter_pack(b);
+        const auto &s_ohm = s_ohm_pack(b);
+
+        const Real rho = cons(IDN, k, j, i);
+        const Real heating_rate = s_ohm(0, k, j, i) / rho;
+
+        Real internal_e = eint_iter(0, k, j, i);
+        const Real internal_e_initial = internal_e;
+
+        bool dedt_valid = true;
+        auto DeDt_wrapper = [&](const Real t, const Real e, bool &valid) {
+          return cooling_table_obj.DeDt(e, rho, valid) + heating_rate;
+        };
+
+        Real sub_t = 0.0;
+        Real sub_dt = dt;
+        const Real dedt_initial = DeDt_wrapper(0.0, internal_e, dedt_valid);
+
+        if (dedt_initial == 0.0) {
+          eint_next(0, k, j, i) = internal_e_initial;
+          temp_next(0, k, j, i) = mbar_gm1_over_kb * internal_e_initial;
+          return;
+        }
+
+        if (d_e_tol == 0.0) {
+          sub_dt = min_sub_dt;
+        }
+
+        unsigned int sub_iter = 0;
+        while (sub_t * (1 + KEpsilon_) < dt) {
+          if (sub_iter > max_iter) {
+            PARTHENON_FAIL(
+                "FATAL ERROR in [TabularCooling::CoupledRK12Step]: Sub cycles exceed "
+                "max_iter");
+          }
+
+          Real internal_e_next_h = internal_e;
+          Real d_e_err = 0.0;
+          unsigned int sub_attempt = 0;
+          bool reattempt_sub = true;
+
+          do {
+            Real internal_e_next_l = internal_e;
+            dedt_valid = true;
+            RK12Stepper::Step(sub_t, sub_dt, internal_e, DeDt_wrapper, internal_e_next_h,
+                              internal_e_next_l, dedt_valid);
+
+            sub_attempt++;
+
+            if (!dedt_valid) {
+              if (sub_dt == min_sub_dt) {
+                sub_dt = (dt - sub_t);
+                internal_e_next_h = internal_e_floor;
+                reattempt_sub = false;
+              } else {
+                reattempt_sub = true;
+                sub_dt = min_sub_dt;
+              }
+            } else {
+              d_e_err = fabs((internal_e_next_h - internal_e_next_l) / internal_e_next_h);
+              reattempt_sub = false;
+              if (std::isnan(d_e_err)) {
+                reattempt_sub = true;
+                sub_dt = min_sub_dt;
+              } else if (d_e_err >= d_e_tol && sub_dt > min_sub_dt) {
+                reattempt_sub = true;
+                if (d_e_tol == 0.0) {
+                  sub_dt = min_sub_dt;
+                } else {
+                  sub_dt = RK12Stepper::OptimalStep(sub_dt, d_e_err, d_e_tol);
+                }
+                if (sub_dt < min_sub_dt || sub_attempt >= max_iter) {
+                  sub_dt = min_sub_dt;
+                }
+              }
+            }
+          } while (reattempt_sub);
+
+          sub_t += sub_dt;
+          internal_e = internal_e_next_h;
+
+          if (d_e_err == 0.0) {
+            sub_dt = dt - sub_t;
+          } else {
+            sub_dt = RK12Stepper::OptimalStep(sub_dt, d_e_err, d_e_tol);
+          }
+
+          if (d_e_tol == 0.0) {
+            sub_dt = min_sub_dt;
+          }
+
+          sub_dt = std::max(sub_dt, min_sub_dt);
+          sub_dt = std::min(sub_dt, dt - sub_t);
+          sub_iter++;
+        }
+
+        // The cooling floor only limits cooling downward. It must not suppress
+        // positive heating or lift cells that started below the floor.
+        if (internal_e_initial > internal_e_floor && internal_e < internal_e_floor) {
+          internal_e = internal_e_floor;
+        }
+        eint_next(0, k, j, i) = internal_e;
+        temp_next(0, k, j, i) = mbar_gm1_over_kb * internal_e;
+      });
+}
+
 template <typename RKStepper>
 void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt_,
                                                const RKStepper rk_stepper) const {

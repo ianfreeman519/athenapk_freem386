@@ -18,6 +18,8 @@ add_executable(
         hydro/glmmhd/dedner_source.cpp
         hydro/prolongation/custom_ops.hpp
         hydro/srcterms/gravitational_field.hpp
+        hydro/srcterms/internal_energy_solver.hpp
+        hydro/srcterms/internal_energy_solver.cpp
         hydro/srcterms/tabular_cooling.hpp
         hydro/srcterms/tabular_cooling.cpp
         refinement/gradient.cpp

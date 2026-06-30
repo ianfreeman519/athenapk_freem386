@@ -186,6 +186,13 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md);
 //! Calculate resistivity (general case incl. Spitzer)
 void OhmicDiffFluxGeneral(MeshData<Real> *md);
 
+//! Calculate only the magnetic-field resistive flux contribution
+void OhmicDiffusionMagneticFlux(MeshData<Real> *md);
+
+//! Compute the cell-centered ohmic heating source from the divergence of the
+//! resistive energy flux using the iterate thermodynamic state
+void ComputeOhmicHeatingSourceFromFluxDivergence(MeshData<Real> *md);
+
 // Calculate all diffusion fluxes, i.e., update the .flux views in md
 TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md);
 

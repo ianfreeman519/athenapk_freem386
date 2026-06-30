@@ -35,6 +35,7 @@
 #include "outputs/outputs.hpp"
 #include "prolongation/custom_ops.hpp"
 #include "rsolvers/rsolvers.hpp"
+#include "srcterms/internal_energy_solver.hpp"
 #include "srcterms/tabular_cooling.hpp"
 #include "utils/error_checking.hpp"
 
@@ -231,8 +232,19 @@ TaskStatus AddUnsplitSources(MeshData<Real> *md, const SimTime &tm, const Real b
     hydro_pkg->Param<GLMMHD::SourceFun_t>("glmmhd_source")(md, beta_dt);
   }
   const auto &enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
+  const bool thermal_solver_enabled =
+      hydro_pkg->Param<bool>("thermal_source_solver_enabled");
+  const bool couple_cooling = hydro_pkg->Param<bool>("thermal_couple_cooling");
+  const bool couple_ohmic = hydro_pkg->Param<bool>("thermal_couple_ohmic");
+  const bool couple_conduction = hydro_pkg->Param<bool>("thermal_couple_conduction");
+  const bool couple_viscous = hydro_pkg->Param<bool>("thermal_couple_viscous");
+  const bool use_coupled_internal_energy =
+      thermal_solver_enabled &&
+      (couple_cooling || couple_ohmic || couple_conduction || couple_viscous);
 
-  if (enable_cooling == Cooling::tabular) {
+  if (use_coupled_internal_energy) {
+    AddCoupledInternalEnergySources(md, tm, beta_dt);
+  } else if (enable_cooling == Cooling::tabular) {
     const TabularCooling &tabular_cooling =
         hydro_pkg->Param<TabularCooling>("tabular_cooling");
 
@@ -772,6 +784,67 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     pkg->AddParam<>("tabular_cooling", tabular_cooling);
   }
 
+  const bool thermal_solver_enabled =
+      pin->GetOrAddBoolean("thermal_source_solver", "enabled", false);
+  const auto thermal_integrator =
+      pin->GetOrAddString("thermal_source_solver", "integrator", "rk12");
+  const int thermal_max_iter = pin->GetOrAddInteger("thermal_source_solver", "max_iter", 8);
+  const Real thermal_temp_rtol =
+      pin->GetOrAddReal("thermal_source_solver", "temp_rtol", 1e-3);
+  const Real thermal_e_rtol =
+      pin->GetOrAddReal("thermal_source_solver", "e_rtol", 1e-6);
+  const Real thermal_under_relaxation =
+      pin->GetOrAddReal("thermal_source_solver", "under_relaxation", 1.0);
+  const bool thermal_couple_cooling =
+      pin->GetOrAddBoolean("thermal_source_solver", "couple_cooling", true);
+  const bool thermal_couple_ohmic =
+      pin->GetOrAddBoolean("thermal_source_solver", "couple_ohmic_heating", true);
+  const bool thermal_couple_conduction =
+      pin->GetOrAddBoolean("thermal_source_solver", "couple_conduction", false);
+  const bool thermal_couple_viscous =
+      pin->GetOrAddBoolean("thermal_source_solver", "couple_viscous_heating", false);
+
+  pkg->AddParam<>("thermal_source_solver_enabled", thermal_solver_enabled);
+  pkg->AddParam<>("thermal_source_integrator", thermal_integrator);
+  pkg->AddParam<>("thermal_source_max_iter", thermal_max_iter);
+  pkg->AddParam<>("thermal_source_temp_rtol", thermal_temp_rtol);
+  pkg->AddParam<>("thermal_source_e_rtol", thermal_e_rtol);
+  pkg->AddParam<>("thermal_source_under_relaxation", thermal_under_relaxation);
+  pkg->AddParam<>("thermal_couple_cooling", thermal_couple_cooling);
+  pkg->AddParam<>("thermal_couple_ohmic", thermal_couple_ohmic);
+  pkg->AddParam<>("thermal_couple_conduction", thermal_couple_conduction);
+  pkg->AddParam<>("thermal_couple_viscous", thermal_couple_viscous);
+
+  if (thermal_solver_enabled) {
+    PARTHENON_REQUIRE(thermal_integrator == "rk12",
+                      "thermal_source_solver/integrator currently only supports 'rk12'.");
+    PARTHENON_REQUIRE(thermal_couple_cooling || thermal_couple_ohmic ||
+                          thermal_couple_conduction || thermal_couple_viscous,
+                      "thermal_source_solver/enabled requires at least one "
+                      "thermal_source_solver/couple_* flag.");
+    PARTHENON_REQUIRE(!thermal_couple_conduction,
+                      "Coupled conduction is not implemented yet. Set "
+                      "thermal_source_solver/couple_conduction = false.");
+    PARTHENON_REQUIRE(!thermal_couple_viscous,
+                      "Coupled viscous heating is not implemented yet. Set "
+                      "thermal_source_solver/couple_viscous_heating = false.");
+    if (thermal_couple_cooling) {
+      PARTHENON_REQUIRE(cooling == Cooling::tabular,
+                        "Coupled cooling requires cooling/enable_cooling = tabular.");
+    }
+    if (thermal_couple_ohmic) {
+      PARTHENON_REQUIRE(pkg->Param<Resistivity>("resistivity") == Resistivity::ohmic,
+                        "Coupled ohmic heating requires diffusion/resistivity = ohmic.");
+      const auto &ohm_diff = pkg->Param<OhmicDiffusivity>("ohm_diff");
+      PARTHENON_REQUIRE(
+          ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer,
+          "Coupled ohmic heating requires diffusion/resistivity_coeff = spitzer.");
+      PARTHENON_REQUIRE(pkg->Param<DiffInt>("diffint") == DiffInt::unsplit,
+                        "Coupled ohmic heating currently requires "
+                        "diffusion/integrator = unsplit.");
+    }
+  }
+
   auto scratch_level = pin->GetOrAddInteger("hydro", "scratch_level", 0);
   pkg->AddParam("scratch_level", scratch_level);
 
@@ -819,6 +892,18 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   m = Metadata({Metadata::Cell, Metadata::Derived}, std::vector<int>({nhydro + nscalars}),
                prim_labels);
   pkg->AddField("prim", m);
+
+  Metadata thermal_m({Metadata::Cell, Metadata::OneCopy}, std::vector<int>({1}));
+  pkg->AddField("eint_init", thermal_m);
+  pkg->AddField("eint_iter", thermal_m);
+  pkg->AddField("eint_next", thermal_m);
+  pkg->AddField("temp_iter", thermal_m);
+  pkg->AddField("temp_next", thermal_m);
+  pkg->AddField("s_ohm_iter", thermal_m);
+  pkg->AddField("s_ohm_prev", thermal_m);
+  pkg->AddField("coupled_iter_count", thermal_m);
+  pkg->AddField("coupled_temp_err", thermal_m);
+  pkg->AddField("coupled_e_err", thermal_m);
 
   const auto refine_str = pin->GetOrAddString("refinement", "type", "unset");
   if (refine_str == "pressure_gradient") {

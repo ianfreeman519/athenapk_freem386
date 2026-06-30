@@ -230,6 +230,11 @@ class TabularCooling {
 
   void SrcTerm(parthenon::MeshData<parthenon::Real> *md, const parthenon::Real dt) const;
 
+  // RK12 predictor for the coupled internal-energy solver. Reads the scratch fields
+  // `eint_iter` and `s_ohm_iter`, and writes `eint_next` and `temp_next`.
+  void CoupledRK12Step(parthenon::MeshData<parthenon::Real> *md,
+                       const parthenon::Real dt) const;
+
   // Townsend 2009 exact integration scheme
   void TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
                        const parthenon::Real dt) const;

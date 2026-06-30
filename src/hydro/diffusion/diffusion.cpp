@@ -16,6 +16,9 @@
 using namespace parthenon::package::prelude;
 
 TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md) {
+  const bool coupled_ohmic =
+      hydro_pkg->Param<bool>("thermal_source_solver_enabled") &&
+      hydro_pkg->Param<bool>("thermal_couple_ohmic");
   const auto &conduction = hydro_pkg->Param<Conduction>("conduction");
   if (conduction != Conduction::none) {
     const auto &thermal_diff = hydro_pkg->Param<ThermalDiffusivity>("thermal_diff");
@@ -42,6 +45,11 @@ TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md) {
   if (resistivity != Resistivity::none) {
     const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
 
+    if (coupled_ohmic) {
+      // The coupled internal-energy solver owns both the lagged ohmic source
+      // iteration and the final magnetic-only resistive commit. Skip the
+      // standard resistive diffusion path here to avoid double-applying B.
+    } else
     if (resistivity == Resistivity::ohmic &&
         ohm_diff.GetCoeffType() == ResistivityCoeff::fixed) {
       OhmicDiffFluxIsoFixed(md);
