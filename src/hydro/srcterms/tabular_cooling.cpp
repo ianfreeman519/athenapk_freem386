@@ -287,7 +287,12 @@ void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
   }
 }
 
-void TabularCooling::CoupledRK12Step(MeshData<Real> *md, const Real dt_) const {
+void TabularCooling::IntegrateThermalODEWithSource(MeshData<Real> *md,
+                                                   const std::string &eint_in,
+                                                   const std::string &thermal_src,
+                                                   const std::string &eint_out,
+                                                   const std::string &temp_out,
+                                                   const Real dt_) const {
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
 
@@ -305,29 +310,30 @@ void TabularCooling::CoupledRK12Step(MeshData<Real> *md, const Real dt_) const {
   const Real internal_e_floor = temp_floor / mbar_gm1_over_kb;
 
   const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
-  const auto &eint_iter_pack = md->PackVariables(std::vector<std::string>{"eint_iter"});
-  const auto &eint_next_pack = md->PackVariables(std::vector<std::string>{"eint_next"});
-  const auto &temp_next_pack = md->PackVariables(std::vector<std::string>{"temp_next"});
-  const auto &s_ohm_pack = md->PackVariables(std::vector<std::string>{"s_ohm_iter"});
+  const auto &eint_in_pack = md->PackVariables(std::vector<std::string>{eint_in});
+  const auto &eint_out_pack = md->PackVariables(std::vector<std::string>{eint_out});
+  const auto &temp_out_pack = md->PackVariables(std::vector<std::string>{temp_out});
+  const auto &thermal_src_pack = md->PackVariables(std::vector<std::string>{thermal_src});
 
   IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::entire);
   IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::entire);
   IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::entire);
 
   par_for(
-      DEFAULT_LOOP_PATTERN, "TabularCooling::CoupledRK12Step", DevExecSpace(), 0,
+      DEFAULT_LOOP_PATTERN, "TabularCooling::IntegrateThermalODEWithSource",
+      DevExecSpace(), 0,
       cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i) {
         const auto &cons = cons_pack(b);
-        auto &eint_next = eint_next_pack(b);
-        auto &temp_next = temp_next_pack(b);
-        const auto &eint_iter = eint_iter_pack(b);
-        const auto &s_ohm = s_ohm_pack(b);
+        auto &eint_out_acc = eint_out_pack(b);
+        auto &temp_out_acc = temp_out_pack(b);
+        const auto &eint_in_acc = eint_in_pack(b);
+        const auto &thermal_src_acc = thermal_src_pack(b);
 
         const Real rho = cons(IDN, k, j, i);
-        const Real heating_rate = s_ohm(0, k, j, i) / rho;
+        const Real heating_rate = thermal_src_acc(0, k, j, i) / rho;
 
-        Real internal_e = eint_iter(0, k, j, i);
+        Real internal_e = eint_in_acc(0, k, j, i);
         const Real internal_e_initial = internal_e;
 
         bool dedt_valid = true;
@@ -340,8 +346,8 @@ void TabularCooling::CoupledRK12Step(MeshData<Real> *md, const Real dt_) const {
         const Real dedt_initial = DeDt_wrapper(0.0, internal_e, dedt_valid);
 
         if (dedt_initial == 0.0) {
-          eint_next(0, k, j, i) = internal_e_initial;
-          temp_next(0, k, j, i) = mbar_gm1_over_kb * internal_e_initial;
+          eint_out_acc(0, k, j, i) = internal_e_initial;
+          temp_out_acc(0, k, j, i) = mbar_gm1_over_kb * internal_e_initial;
           return;
         }
 
@@ -353,8 +359,8 @@ void TabularCooling::CoupledRK12Step(MeshData<Real> *md, const Real dt_) const {
         while (sub_t * (1 + KEpsilon_) < dt) {
           if (sub_iter > max_iter) {
             PARTHENON_FAIL(
-                "FATAL ERROR in [TabularCooling::CoupledRK12Step]: Sub cycles exceed "
-                "max_iter");
+                "FATAL ERROR in [TabularCooling::IntegrateThermalODEWithSource]: "
+                "Sub cycles exceed max_iter");
           }
 
           Real internal_e_next_h = internal_e;
@@ -422,8 +428,45 @@ void TabularCooling::CoupledRK12Step(MeshData<Real> *md, const Real dt_) const {
         if (internal_e_initial > internal_e_floor && internal_e < internal_e_floor) {
           internal_e = internal_e_floor;
         }
-        eint_next(0, k, j, i) = internal_e;
-        temp_next(0, k, j, i) = mbar_gm1_over_kb * internal_e;
+        eint_out_acc(0, k, j, i) = internal_e;
+        temp_out_acc(0, k, j, i) = mbar_gm1_over_kb * internal_e;
+      });
+}
+
+void TabularCooling::BuildCoolingThermalSource(MeshData<Real> *md,
+                                               const std::string &eint_in,
+                                               const std::string &source_out) const {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const CoolingTableObj cooling_table_obj = cooling_table_obj_;
+  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const auto temp_cool_floor = std::pow(10.0, log_temp_start_);
+  const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
+  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb;
+
+  const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto &eint_in_pack = md->PackVariables(std::vector<std::string>{eint_in});
+  const auto &source_out_pack = md->PackVariables(std::vector<std::string>{source_out});
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::entire);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::entire);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::entire);
+
+  par_for(
+      DEFAULT_LOOP_PATTERN, "TabularCooling::BuildCoolingThermalSource", DevExecSpace(),
+      0, cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i) {
+        const auto &cons = cons_pack(b);
+        const auto &eint_in_acc = eint_in_pack(b);
+        auto &source_out_acc = source_out_pack(b);
+
+        const Real rho = cons(IDN, k, j, i);
+        const Real internal_e = eint_in_acc(0, k, j, i);
+        Real cooling_rate = 0.0;
+        if (internal_e > internal_e_floor) {
+          cooling_rate = rho * cooling_table_obj.DeDt(internal_e, rho);
+        }
+        source_out_acc(0, k, j, i) = cooling_rate;
       });
 }
 

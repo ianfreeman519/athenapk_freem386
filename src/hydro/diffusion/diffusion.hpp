@@ -9,6 +9,9 @@
 #ifndef HYDRO_DIFFUSION_DIFFUSION_HPP_
 #define HYDRO_DIFFUSION_DIFFUSION_HPP_
 
+// C++ headers
+#include <string>
+
 // Parthenon headers
 #include <parthenon/package.hpp>
 
@@ -189,9 +192,11 @@ void OhmicDiffFluxGeneral(MeshData<Real> *md);
 //! Calculate only the magnetic-field resistive flux contribution
 void OhmicDiffusionMagneticFlux(MeshData<Real> *md);
 
-//! Compute the cell-centered ohmic heating source from the divergence of the
-//! resistive energy flux using the iterate thermodynamic state
-void ComputeOhmicHeatingSourceFromFluxDivergence(MeshData<Real> *md);
+//! Build a cell-centered ohmic thermal source from the divergence of the resistive
+//! energy flux using the supplied thermodynamic state and source field names.
+void BuildOhmicThermalSourceFromFluxDivergence(MeshData<Real> *md,
+                                               const std::string &eint_field,
+                                               const std::string &source_field);
 
 // Calculate all diffusion fluxes, i.e., update the .flux views in md
 TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md);

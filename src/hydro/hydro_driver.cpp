@@ -543,19 +543,39 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
   // note that task within this region that contains one tasklist per pack
   // could still be executed in parallel
   TaskRegion &single_tasklist_per_pack_region = tc.AddRegion(num_partitions);
+  const bool use_pre_flux_thermal_predictor =
+      hydro_pkg->Param<bool>("thermal_source_solver_enabled") &&
+      hydro_pkg->Param<std::string>("thermal_source_predictor") ==
+          "end_of_interface_state";
   for (int i = 0; i < num_partitions; i++) {
     auto &tl = single_tasklist_per_pack_region[i];
     auto &mu0 = pmesh->mesh_data.GetOrAdd("base", i);
     auto &mu1 = pmesh->mesh_data.GetOrAdd("u1", i);
 
     const auto any = parthenon::BoundaryType::any;
-    auto start_bnd = tl.AddTask(none, parthenon::StartReceiveBoundBufs<any>, mu0);
+    auto start_bnd_post = tl.AddTask(none, parthenon::StartReceiveBoundBufs<any>, mu0);
     auto start_flxcor_recv =
         tl.AddTask(none, parthenon::StartReceiveFluxCorrections, mu0);
 
     const auto flux_str = (stage == 1) ? "flux_first_stage" : "flux_other_stage";
     FluxFun_t *calc_flux_fun = hydro_pkg->Param<FluxFun_t *>(flux_str);
-    auto calc_flux = tl.AddTask(none, calc_flux_fun, mu0);
+    auto save_stage_start = tl.AddTask(none, SaveStageStartInternalEnergy, mu0.get());
+    TaskID calc_flux_input = save_stage_start;
+    if (use_pre_flux_thermal_predictor) {
+      // Simplified-SDC needs the lagged thermal source reflected in the state used for
+      // reconstruction, so refresh boundaries and derived variables before fluxes.
+      auto start_bnd_pre = tl.AddTask(none, parthenon::StartReceiveBoundBufs<any>, mu0);
+      auto initialize_stage_lagged_thermal_source =
+          tl.AddTask(save_stage_start, InitializeStageLaggedThermalSource, mu0.get());
+      auto apply_pre_flux_thermal_source = tl.AddTask(
+          initialize_stage_lagged_thermal_source, ApplyPreFluxThermalSource, mu0.get(),
+          integrator->beta[stage - 1] * integrator->dt);
+      auto pre_flux_bounds = parthenon::AddBoundaryExchangeTasks(
+          apply_pre_flux_thermal_source | start_bnd_pre, tl, mu0, pmesh->multilevel);
+      calc_flux_input = tl.AddTask(
+          pre_flux_bounds, parthenon::Update::FillDerived<MeshData<Real>>, mu0.get());
+    }
+    auto calc_flux = tl.AddTask(calc_flux_input, calc_flux_fun, mu0);
 
     // TODO(pgrete) figure out what to do about the sources from the first stage
     // that are potentially disregarded when the (m)hd fluxes are corrected in the second
@@ -582,12 +602,17 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
         mu1.get(), integrator->gam0[stage - 1], integrator->gam1[stage - 1],
         integrator->beta[stage - 1] * integrator->dt);
 
+    auto record_stage_advective_energy = tl.AddTask(
+        update, UpdateStageAdvectiveInternalEnergy, mu0.get(),
+        integrator->beta[stage - 1] * integrator->dt);
+
     // Add non-operator split source terms.
     // Note: Directly update the "cons" variables of mu0 based on the "prim" variables
     // of mu0 as the "cons" variables have already been updated in this stage from the
     // fluxes in the previous step.
-    auto source_unsplit = tl.AddTask(update, AddUnsplitSources, mu0.get(), tm,
-                                     integrator->beta[stage - 1] * integrator->dt);
+    auto source_unsplit =
+        tl.AddTask(record_stage_advective_energy, AddUnsplitSources, mu0.get(), tm,
+                   integrator->beta[stage - 1] * integrator->dt);
 
     auto source_split_first_order = source_unsplit;
 
@@ -610,8 +635,8 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     // TODO(someone) experiment with split (local/nonlocal) comms with respect to
     // performance for various tests (static, amr, block sizes) and then decide on the
     // best impl. Go with default call (split local/nonlocal) for now.
-    parthenon::AddBoundaryExchangeTasks(source_split_first_order | start_bnd, tl, mu0,
-                                        pmesh->multilevel);
+    parthenon::AddBoundaryExchangeTasks(source_split_first_order | start_bnd_post, tl,
+                                        mu0, pmesh->multilevel);
   }
 
   TaskRegion &single_tasklist_per_pack_region_3 = tc.AddRegion(num_partitions);

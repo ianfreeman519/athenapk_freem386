@@ -148,7 +148,7 @@ void OhmicDiffFluxIsoFixedImpl(MeshData<Real> *md) {
       });
 }
 
-template <bool include_energy, bool use_iterate_thermo>
+template <bool include_energy>
 void OhmicDiffFluxGeneralImpl(MeshData<Real> *md) {
   auto pmb = md->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
@@ -159,12 +159,9 @@ void OhmicDiffFluxGeneralImpl(MeshData<Real> *md) {
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
   auto hydro_pkg = pmb->packages.Get("Hydro");
   auto const &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
-  const auto &eint_pack = md->PackVariables(std::vector<std::string>{"eint_iter"});
-
   const int ndim = pmb->pmy_mesh->ndim;
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   const auto ohm_diff_val = ohm_diff;
-  const Real gm1 = hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
 
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "Resist. X1 fluxes (ohmic)", DevExecSpace(), 0,
@@ -174,11 +171,7 @@ void OhmicDiffFluxGeneralImpl(MeshData<Real> *md) {
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
         const Real rho_at_face = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j, i - 1));
-        Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k, j, i - 1));
-        if constexpr (use_iterate_thermo) {
-          p_at_face = 0.5 * (prim(IDN, k, j, i) * eint_pack(b, 0, k, j, i) * gm1 +
-                             prim(IDN, k, j, i - 1) * eint_pack(b, 0, k, j, i - 1) * gm1);
-        }
+        const Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k, j, i - 1));
         const Real eta = ohm_diff_val.Get(p_at_face, rho_at_face);
 
         const auto d3B1 =
@@ -221,11 +214,7 @@ void OhmicDiffFluxGeneralImpl(MeshData<Real> *md) {
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
         const Real rho_at_face = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j - 1, i));
-        Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k, j - 1, i));
-        if constexpr (use_iterate_thermo) {
-          p_at_face = 0.5 * (prim(IDN, k, j, i) * eint_pack(b, 0, k, j, i) * gm1 +
-                             prim(IDN, k, j - 1, i) * eint_pack(b, 0, k, j - 1, i) * gm1);
-        }
+        const Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k, j - 1, i));
         const Real eta = ohm_diff_val.Get(p_at_face, rho_at_face);
 
         const auto d1B2 = (0.5 * (prim(IB2, k, j - 1, i + 1) + prim(IB2, k, j, i + 1)) -
@@ -266,11 +255,7 @@ void OhmicDiffFluxGeneralImpl(MeshData<Real> *md) {
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
         const Real rho_at_face = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k - 1, j, i));
-        Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k - 1, j, i));
-        if constexpr (use_iterate_thermo) {
-          p_at_face = 0.5 * (prim(IDN, k, j, i) * eint_pack(b, 0, k, j, i) * gm1 +
-                             prim(IDN, k - 1, j, i) * eint_pack(b, 0, k - 1, j, i) * gm1);
-        }
+        const Real p_at_face = 0.5 * (prim(IPR, k, j, i) + prim(IPR, k - 1, j, i));
         const Real eta = ohm_diff_val.Get(p_at_face, rho_at_face);
 
         const auto d2B3 = (0.5 * (prim(IB3, k - 1, j + 1, i) + prim(IB3, k, j + 1, i)) -
@@ -461,7 +446,7 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 //! coefficient
 
 void OhmicDiffFluxGeneral(MeshData<Real> *md) {
-  OhmicDiffFluxGeneralImpl<true, false>(md);
+  OhmicDiffFluxGeneralImpl<true>(md);
 }
 
 void OhmicDiffusionMagneticFlux(MeshData<Real> *md) {
@@ -471,13 +456,15 @@ void OhmicDiffusionMagneticFlux(MeshData<Real> *md) {
   if (ohm_diff.GetCoeffType() == ResistivityCoeff::fixed) {
     OhmicDiffFluxIsoFixedImpl<false>(md);
   } else if (ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer) {
-    OhmicDiffFluxGeneralImpl<false, false>(md);
+    OhmicDiffFluxGeneralImpl<false>(md);
   } else {
     PARTHENON_FAIL("Unknown Resistivity Type");
   }
 }
 
-void ComputeOhmicHeatingSourceFromFluxDivergence(MeshData<Real> *md) {
+void BuildOhmicThermalSourceFromFluxDivergence(MeshData<Real> *md,
+                                               const std::string &eint_field,
+                                               const std::string &source_field) {
   auto pmb = md->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
@@ -485,8 +472,8 @@ void ComputeOhmicHeatingSourceFromFluxDivergence(MeshData<Real> *md) {
 
   auto hydro_pkg = pmb->packages.Get("Hydro");
   auto const &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
-  auto const &eint_pack = md->PackVariables(std::vector<std::string>{"eint_iter"});
-  auto const &s_ohm_pack = md->PackVariables(std::vector<std::string>{"s_ohm_iter"});
+  auto const &eint_pack = md->PackVariables(std::vector<std::string>{eint_field});
+  auto const &source_pack = md->PackVariables(std::vector<std::string>{source_field});
 
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
   const auto ohm_diff_val = ohm_diff;
@@ -624,7 +611,7 @@ void ComputeOhmicHeatingSourceFromFluxDivergence(MeshData<Real> *md) {
       prim_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
         const auto &coords = prim_pack.GetCoords(b);
-        auto &s_ohm = s_ohm_pack(b);
+        auto &ohmic_source = source_pack(b);
         Real du = coords.FaceArea<X1DIR>(k, j, i + 1) *
                       flux_x1(b, k - kb.s, j - jb.s, i + 1 - ib.s) -
                   coords.FaceArea<X1DIR>(k, j, i) *
@@ -641,6 +628,6 @@ void ComputeOhmicHeatingSourceFromFluxDivergence(MeshData<Real> *md) {
                 coords.FaceArea<X3DIR>(k, j, i) *
                     flux_x3(b, k - kb.s, j - jb.s, i - ib.s);
         }
-        s_ohm(0, k, j, i) = -du / coords.CellVolume(k, j, i);
+        ohmic_source(0, k, j, i) = -du / coords.CellVolume(k, j, i);
       });
 }

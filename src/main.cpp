@@ -106,6 +106,11 @@ int main(int argc, char *argv[]) {
     pman.app_input->MeshBlockUserWorkBeforeOutput =
         pulsed_reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = pulsed_reconnection::ProblemInitPackageData;
+  } else if (problem == "current_sheet_thermal") {
+    pman.app_input->ProblemGenerator = current_sheet_thermal::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput =
+        current_sheet_thermal::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = current_sheet_thermal::ProblemInitPackageData;
   } else if (problem == "refinement_temp_test") {
     pman.app_input->ProblemGenerator = refinement_temp_test::ProblemGenerator;
   } else if (problem == "breakRefinementBoundaries") {

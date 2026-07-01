@@ -43,6 +43,13 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm);
 }
+namespace current_sheet_thermal {
+using namespace parthenon::driver::prelude;
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+}
 namespace refinement_temp_test {
 using namespace parthenon::driver::prelude;
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);

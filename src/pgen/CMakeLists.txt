@@ -29,6 +29,7 @@ target_sources(athenaPK PRIVATE
     breakRefinementBoundaries.cpp
     periodic_reconnection.cpp
     pulsed_reconnection.cpp
+    current_sheet_thermal.cpp
     refinement_temp_test.cpp
     GEM.cpp
     harris.cpp

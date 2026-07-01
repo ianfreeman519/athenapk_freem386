@@ -18,12 +18,10 @@ using namespace parthenon::package::prelude;
 namespace Hydro {
 
 struct InternalEnergySolverConfig {
-  int max_iter;
-  Real temp_rtol;
-  Real e_rtol;
-  Real under_relaxation;
+  int iterations;
 };
 
+TaskStatus InitializeStageLaggedThermalSource(MeshData<Real> *md);
 TaskStatus AddCoupledInternalEnergySources(MeshData<Real> *md, const SimTime &tm,
                                            const Real dt);
 

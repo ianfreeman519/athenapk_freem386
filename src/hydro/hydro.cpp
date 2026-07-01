@@ -218,6 +218,136 @@ void ConsToPrim(MeshData<Real> *md) {
   eos.ConservedToPrimitive(md);
 }
 
+namespace {
+
+KOKKOS_INLINE_FUNCTION Real SpecificInternalEnergyFromCons(
+    const VariablePack<Real> &cons, const bool mhd_enabled, const int k, const int j,
+    const int i) {
+  const Real rho = cons(IDN, k, j, i);
+  Real internal_e =
+      cons(IEN, k, j, i) -
+      0.5 * (SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) + SQR(cons(IM3, k, j, i))) /
+          rho;
+  if (mhd_enabled) {
+    internal_e -=
+        0.5 * (SQR(cons(IB1, k, j, i)) + SQR(cons(IB2, k, j, i)) + SQR(cons(IB3, k, j, i)));
+  }
+  return internal_e / rho;
+}
+
+bool ShouldStoreThermalStageBookkeeping(StateDescriptor *hydro_pkg) {
+  return hydro_pkg->Param<bool>("thermal_source_solver_enabled") ||
+         hydro_pkg->Param<bool>("thermal_source_store_diagnostics");
+}
+
+bool UsePreFluxThermalSourcePredictor(StateDescriptor *hydro_pkg) {
+  return hydro_pkg->Param<bool>("thermal_source_solver_enabled") &&
+         hydro_pkg->Param<std::string>("thermal_source_predictor") ==
+             "end_of_interface_state";
+}
+
+} // namespace
+
+TaskStatus SaveStageStartInternalEnergy(MeshData<Real> *md) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  if (!ShouldStoreThermalStageBookkeeping(hydro_pkg.get())) {
+    return TaskStatus::complete;
+  }
+
+  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto &eint_stage_start_pack =
+      md->PackVariables(std::vector<std::string>{"eint_stage_start"});
+  const auto &eint_adv_pack = md->PackVariables(std::vector<std::string>{"eint_adv"});
+  const auto &thermal_ae_pack = md->PackVariables(std::vector<std::string>{"thermal_ae"});
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::entire);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::entire);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::entire);
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "SaveStageStartInternalEnergy", DevExecSpace(), 0,
+      cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        const auto &cons = cons_pack(b);
+        auto &eint_stage_start = eint_stage_start_pack(b);
+        auto &eint_adv = eint_adv_pack(b);
+        auto &thermal_ae = thermal_ae_pack(b);
+        const Real internal_e =
+            SpecificInternalEnergyFromCons(cons, mhd_enabled, k, j, i);
+        eint_stage_start(0, k, j, i) = internal_e;
+        eint_adv(0, k, j, i) = internal_e;
+        thermal_ae(0, k, j, i) = 0.0;
+      });
+
+  return TaskStatus::complete;
+}
+
+TaskStatus UpdateStageAdvectiveInternalEnergy(MeshData<Real> *md, const Real dt) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  if (!ShouldStoreThermalStageBookkeeping(hydro_pkg.get())) {
+    return TaskStatus::complete;
+  }
+
+  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto &eint_stage_start_pack =
+      md->PackVariables(std::vector<std::string>{"eint_stage_start"});
+  const auto &eint_adv_pack = md->PackVariables(std::vector<std::string>{"eint_adv"});
+  const auto &thermal_ae_pack = md->PackVariables(std::vector<std::string>{"thermal_ae"});
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "UpdateStageAdvectiveInternalEnergy", DevExecSpace(), 0,
+      cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        const auto &cons = cons_pack(b);
+        const auto &eint_stage_start = eint_stage_start_pack(b);
+        auto &eint_adv = eint_adv_pack(b);
+        auto &thermal_ae = thermal_ae_pack(b);
+        const Real internal_e =
+            SpecificInternalEnergyFromCons(cons, mhd_enabled, k, j, i);
+        eint_adv(0, k, j, i) = internal_e;
+        thermal_ae(0, k, j, i) =
+            (internal_e - eint_stage_start(0, k, j, i)) / dt;
+      });
+
+  return TaskStatus::complete;
+}
+
+TaskStatus ApplyPreFluxThermalSource(MeshData<Real> *md, const Real dt) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  if (!UsePreFluxThermalSourcePredictor(hydro_pkg.get())) {
+    return TaskStatus::complete;
+  }
+
+  const Real gm1 = hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
+  const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
+  const auto &thermal_src_pack =
+      md->PackVariables(std::vector<std::string>{"thermal_src_lagged"});
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "ApplyPreFluxThermalSource", DevExecSpace(), 0,
+      cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        auto &cons = cons_pack(b);
+        auto &prim = prim_pack(b);
+        const Real delta_e = dt * thermal_src_pack(b, 0, k, j, i);
+        cons(IEN, k, j, i) += delta_e;
+        prim(IPR, k, j, i) += gm1 * delta_e;
+      });
+
+  return TaskStatus::complete;
+}
+
 // Add unsplit sources, i.e., source that are integrated in all stages of the
 // explicit integration scheme.
 // Note 1: Given that the sources are integrated in an unsplit manner, ensure
@@ -786,15 +916,12 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
 
   const bool thermal_solver_enabled =
       pin->GetOrAddBoolean("thermal_source_solver", "enabled", false);
-  const auto thermal_integrator =
-      pin->GetOrAddString("thermal_source_solver", "integrator", "rk12");
-  const int thermal_max_iter = pin->GetOrAddInteger("thermal_source_solver", "max_iter", 8);
-  const Real thermal_temp_rtol =
-      pin->GetOrAddReal("thermal_source_solver", "temp_rtol", 1e-3);
-  const Real thermal_e_rtol =
-      pin->GetOrAddReal("thermal_source_solver", "e_rtol", 1e-6);
-  const Real thermal_under_relaxation =
-      pin->GetOrAddReal("thermal_source_solver", "under_relaxation", 1.0);
+  const int thermal_iterations =
+      pin->GetOrAddInteger("thermal_source_solver", "iterations", 2);
+  const auto thermal_source_predictor = pin->GetOrAddString(
+      "thermal_source_solver", "source_predictor", "end_of_interface_state");
+  const bool thermal_store_diagnostics =
+      pin->GetOrAddBoolean("thermal_source_solver", "store_diagnostics", false);
   const bool thermal_couple_cooling =
       pin->GetOrAddBoolean("thermal_source_solver", "couple_cooling", true);
   const bool thermal_couple_ohmic =
@@ -805,19 +932,15 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       pin->GetOrAddBoolean("thermal_source_solver", "couple_viscous_heating", false);
 
   pkg->AddParam<>("thermal_source_solver_enabled", thermal_solver_enabled);
-  pkg->AddParam<>("thermal_source_integrator", thermal_integrator);
-  pkg->AddParam<>("thermal_source_max_iter", thermal_max_iter);
-  pkg->AddParam<>("thermal_source_temp_rtol", thermal_temp_rtol);
-  pkg->AddParam<>("thermal_source_e_rtol", thermal_e_rtol);
-  pkg->AddParam<>("thermal_source_under_relaxation", thermal_under_relaxation);
+  pkg->AddParam<>("thermal_source_iterations", thermal_iterations);
+  pkg->AddParam<>("thermal_source_predictor", thermal_source_predictor);
+  pkg->AddParam<>("thermal_source_store_diagnostics", thermal_store_diagnostics);
   pkg->AddParam<>("thermal_couple_cooling", thermal_couple_cooling);
   pkg->AddParam<>("thermal_couple_ohmic", thermal_couple_ohmic);
   pkg->AddParam<>("thermal_couple_conduction", thermal_couple_conduction);
   pkg->AddParam<>("thermal_couple_viscous", thermal_couple_viscous);
 
   if (thermal_solver_enabled) {
-    PARTHENON_REQUIRE(thermal_integrator == "rk12",
-                      "thermal_source_solver/integrator currently only supports 'rk12'.");
     PARTHENON_REQUIRE(thermal_couple_cooling || thermal_couple_ohmic ||
                           thermal_couple_conduction || thermal_couple_viscous,
                       "thermal_source_solver/enabled requires at least one "
@@ -828,6 +951,12 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     PARTHENON_REQUIRE(!thermal_couple_viscous,
                       "Coupled viscous heating is not implemented yet. Set "
                       "thermal_source_solver/couple_viscous_heating = false.");
+    PARTHENON_REQUIRE(thermal_iterations > 0,
+                      "thermal_source_solver/iterations must be >= 1.");
+    PARTHENON_REQUIRE(
+        thermal_source_predictor == "end_of_interface_state",
+        "thermal_source_solver/source_predictor currently only supports "
+        "'end_of_interface_state'.");
     if (thermal_couple_cooling) {
       PARTHENON_REQUIRE(cooling == Cooling::tabular,
                         "Coupled cooling requires cooling/enable_cooling = tabular.");
@@ -894,16 +1023,24 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   pkg->AddField("prim", m);
 
   Metadata thermal_m({Metadata::Cell, Metadata::OneCopy}, std::vector<int>({1}));
-  pkg->AddField("eint_init", thermal_m);
-  pkg->AddField("eint_iter", thermal_m);
+  // Stage-local simplified-SDC bookkeeping. This remains the accepted architecture:
+  // one hydro build per stage with a thermal corrector wrapped around the stage source.
   pkg->AddField("eint_next", thermal_m);
-  pkg->AddField("temp_iter", thermal_m);
   pkg->AddField("temp_next", thermal_m);
-  pkg->AddField("s_ohm_iter", thermal_m);
-  pkg->AddField("s_ohm_prev", thermal_m);
-  pkg->AddField("coupled_iter_count", thermal_m);
-  pkg->AddField("coupled_temp_err", thermal_m);
-  pkg->AddField("coupled_e_err", thermal_m);
+  pkg->AddField("eint_stage_start", thermal_m);
+  pkg->AddField("eint_adv", thermal_m);
+  pkg->AddField("eint_sdc", thermal_m);
+  // `thermal_ae` is still the scalar approximation
+  // A_e = (eint_adv - eint_stage_start) / dt_stage.
+  // Keep it and the surrounding snapshots until the pre-flux structural mismatch is
+  // resolved or intentionally deferred.
+  pkg->AddField("thermal_ae", thermal_m);
+  pkg->AddField("thermal_src_lagged", thermal_m);
+  pkg->AddField("thermal_src_pre_flux", thermal_m);
+  pkg->AddField("thermal_src_ohmic_pre_flux", thermal_m);
+  pkg->AddField("thermal_src_ohmic", thermal_m);
+  pkg->AddField("thermal_src_total", thermal_m);
+  pkg->AddField("thermal_sdc_iter_count", thermal_m);
 
   const auto refine_str = pin->GetOrAddString("refinement", "type", "unset");
   if (refine_str == "pressure_gradient") {

@@ -230,10 +230,18 @@ class TabularCooling {
 
   void SrcTerm(parthenon::MeshData<parthenon::Real> *md, const parthenon::Real dt) const;
 
-  // RK12 predictor for the coupled internal-energy solver. Reads the scratch fields
-  // `eint_iter` and `s_ohm_iter`, and writes `eint_next` and `temp_next`.
-  void CoupledRK12Step(parthenon::MeshData<parthenon::Real> *md,
-                       const parthenon::Real dt) const;
+  // RK12 predictor for a coupled thermal ODE solve using explicit field names for the
+  // thermodynamic input, lagged thermal source, and thermodynamic outputs.
+  void IntegrateThermalODEWithSource(parthenon::MeshData<parthenon::Real> *md,
+                                     const std::string &eint_in,
+                                     const std::string &thermal_src,
+                                     const std::string &eint_out,
+                                     const std::string &temp_out,
+                                     const parthenon::Real dt) const;
+
+  void BuildCoolingThermalSource(parthenon::MeshData<parthenon::Real> *md,
+                                 const std::string &eint_in,
+                                 const std::string &source_out) const;
 
   // Townsend 2009 exact integration scheme
   void TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
