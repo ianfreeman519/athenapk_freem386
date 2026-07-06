@@ -29,6 +29,34 @@ bool ThermalSourceSolverEnabled(StateDescriptor *hydro_pkg) {
   return hydro_pkg->Param<bool>("thermal_source_solver_enabled");
 }
 
+bool UseRKL2MidpointThermalSolve(StateDescriptor *hydro_pkg) {
+  return ThermalSourceSolverEnabled(hydro_pkg) &&
+         hydro_pkg->Param<bool>("thermal_couple_ohmic") &&
+         hydro_pkg->Param<DiffInt>("diffint") == DiffInt::rkl2;
+}
+
+void SubtractFields(MeshData<Real> *md, const std::string &minuend_field,
+                    const std::string &subtrahend_field,
+                    const std::string &difference_field);
+
+void CombineThermalSources(MeshData<Real> *md, const std::string &source_a,
+                           const std::string &source_b, const std::string &source_out);
+
+KOKKOS_INLINE_FUNCTION Real SpecificInternalEnergyFromConsForBookkeeping(
+    const VariablePack<Real> &cons, const bool mhd_enabled, const int k, const int j,
+    const int i) {
+  const Real rho = cons(IDN, k, j, i);
+  Real internal_e =
+      cons(IEN, k, j, i) -
+      0.5 * (SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) + SQR(cons(IM3, k, j, i))) /
+          rho;
+  if (mhd_enabled) {
+    internal_e -=
+        0.5 * (SQR(cons(IB1, k, j, i)) + SQR(cons(IB2, k, j, i)) + SQR(cons(IB3, k, j, i)));
+  }
+  return internal_e / rho;
+}
+
 void ResetFluxesLocal(MeshData<Real> *md) {
   auto pmb = md->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
@@ -77,7 +105,7 @@ void ApplyMagneticOnlyResistiveUpdate(MeshData<Real> *md, const Real dt) {
   }
 
   ResetFluxesLocal(md);
-  OhmicDiffusionMagneticFlux(md);
+  AddMagneticOnlyResistiveFlux(md);
 
   std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
@@ -141,6 +169,66 @@ void CopyField(MeshData<Real> *md, const std::string &src_field,
       });
 }
 
+void SaveCurrentSpecificInternalEnergy(MeshData<Real> *md, const std::string &dst_field) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto &dst_pack = md->PackVariables(std::vector<std::string>{dst_field});
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::entire);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::entire);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::entire);
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "SaveCurrentSpecificInternalEnergy", DevExecSpace(), 0,
+      cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        const auto &cons = cons_pack(b);
+        auto &dst = dst_pack(b);
+        dst(0, k, j, i) =
+            SpecificInternalEnergyFromConsForBookkeeping(cons, mhd_enabled, k, j, i);
+      });
+}
+
+void BuildStageStartOhmicThermalSource(MeshData<Real> *md,
+                                       const std::string &eint_field,
+                                       const std::string &stage_ohmic_field,
+                                       const std::string &pre_hydro_ohmic_field) {
+  BuildOhmicThermalSource(md, eint_field, stage_ohmic_field);
+  CopyField(md, stage_ohmic_field, pre_hydro_ohmic_field);
+}
+
+void BuildMidpointThermalSourceBookkeeping(MeshData<Real> *md) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const bool couple_cooling = hydro_pkg->Param<bool>("thermal_couple_cooling");
+  const bool couple_ohmic = hydro_pkg->Param<bool>("thermal_couple_ohmic");
+  const auto &tabular_cooling = hydro_pkg->Param<cooling::TabularCooling>("tabular_cooling");
+
+  ZeroField(md, "thermal_src_lagged");
+  ZeroField(md, "thermal_src_pre_flux");
+  ZeroField(md, "thermal_src_ohmic_pre_flux");
+  ZeroField(md, "thermal_src_ohmic_post_hydro_sts");
+  ZeroField(md, "thermal_src_ohmic_sts_delta");
+  ZeroField(md, "thermal_src_ohmic");
+  ZeroField(md, "thermal_src_total");
+
+  // Capture the accepted state immediately after the pre-hydro STS half-step.
+  SaveCurrentSpecificInternalEnergy(md, "eint_stage_start");
+  CopyField(md, "eint_stage_start", "eint_sdc");
+  CopyField(md, "eint_stage_start", "eint_adv");
+
+  if (couple_cooling) {
+    tabular_cooling.BuildCoolingThermalSource(md, "eint_stage_start", "thermal_src_total");
+  }
+  if (couple_ohmic) {
+    BuildStageStartOhmicThermalSource(md, "eint_stage_start", "thermal_src_ohmic",
+                                      "thermal_src_ohmic_pre_flux");
+  }
+
+  CombineThermalSources(md, "thermal_src_total", "thermal_src_ohmic", "thermal_src_lagged");
+  CopyField(md, "thermal_src_lagged", "thermal_src_pre_flux");
+}
+
 void BuildAdvectivePlusOhmicThermalSource(MeshData<Real> *md, const std::string &ohmic_field,
                                           const std::string &total_field) {
   const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
@@ -183,6 +271,30 @@ void CombineThermalSources(MeshData<Real> *md, const std::string &source_a,
         const auto &src_b = source_b_pack(b);
         auto &src_out = source_out_pack(b);
         src_out(0, k, j, i) = src_a(0, k, j, i) + src_b(0, k, j, i);
+      });
+}
+
+void SubtractFields(MeshData<Real> *md, const std::string &minuend_field,
+                    const std::string &subtrahend_field,
+                    const std::string &difference_field) {
+  const auto &minuend_pack = md->PackVariables(std::vector<std::string>{minuend_field});
+  const auto &subtrahend_pack =
+      md->PackVariables(std::vector<std::string>{subtrahend_field});
+  const auto &difference_pack =
+      md->PackVariables(std::vector<std::string>{difference_field});
+
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::entire);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::entire);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::entire);
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "SubtractFields", DevExecSpace(), 0,
+      minuend_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        const auto &minuend = minuend_pack(b);
+        const auto &subtrahend = subtrahend_pack(b);
+        auto &difference = difference_pack(b);
+        difference(0, k, j, i) = minuend(0, k, j, i) - subtrahend(0, k, j, i);
       });
 }
 
@@ -254,7 +366,7 @@ TaskStatus RunSimplifiedSDCThermalCoupling(MeshData<Real> *md, const Real dt) {
 
   for (int iter = 0; iter < cfg.iterations; ++iter) {
     if (couple_ohmic) {
-      BuildOhmicThermalSourceFromFluxDivergence(md, "eint_sdc", "thermal_src_ohmic");
+      BuildOhmicThermalSource(md, "eint_sdc", "thermal_src_ohmic");
     } else {
       ZeroField(md, "thermal_src_ohmic");
     }
@@ -267,7 +379,7 @@ TaskStatus RunSimplifiedSDCThermalCoupling(MeshData<Real> *md, const Real dt) {
   }
 
   if (couple_ohmic) {
-    BuildOhmicThermalSourceFromFluxDivergence(md, "eint_sdc", "thermal_src_ohmic");
+    BuildOhmicThermalSource(md, "eint_sdc", "thermal_src_ohmic");
   } else {
     ZeroField(md, "thermal_src_ohmic");
   }
@@ -279,7 +391,56 @@ TaskStatus RunSimplifiedSDCThermalCoupling(MeshData<Real> *md, const Real dt) {
 
   RecordSDCIterationDiagnostics(md, cfg.iterations);
   CommitSimplifiedSDCInternalEnergyUpdate(md);
-  ApplyMagneticOnlyResistiveUpdate(md, dt);
+  if (hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
+    ApplyMagneticOnlyResistiveUpdate(md, dt);
+  }
+
+  return TaskStatus::complete;
+}
+
+TaskStatus RunRKL2MidpointThermalCoupling(MeshData<Real> *md, const Real dt) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const bool couple_cooling = hydro_pkg->Param<bool>("thermal_couple_cooling");
+  const bool couple_ohmic = hydro_pkg->Param<bool>("thermal_couple_ohmic");
+  const bool couple_conduction = hydro_pkg->Param<bool>("thermal_couple_conduction");
+  const bool couple_viscous = hydro_pkg->Param<bool>("thermal_couple_viscous");
+
+  if (couple_conduction || couple_viscous) {
+    PARTHENON_FAIL("Coupled conduction/viscous heating is not implemented yet.");
+  }
+  if (!couple_cooling) {
+    PARTHENON_FAIL("The simplified-SDC thermal coupling path currently requires "
+                   "thermal_source_solver/couple_cooling = true.");
+  }
+  if (!couple_ohmic) {
+    PARTHENON_FAIL("The coupled rkl2 midpoint thermal path requires "
+                   "thermal_source_solver/couple_ohmic_heating = true.");
+  }
+
+  const auto cfg = GetInternalEnergySolverConfig(hydro_pkg.get());
+  const auto &tabular_cooling = hydro_pkg->Param<cooling::TabularCooling>("tabular_cooling");
+
+  BuildMidpointThermalSourceBookkeeping(md);
+
+  // First-pass rkl2 midpoint coupling keeps the accepted pre-hydro STS Ohmic source
+  // frozen for the whole thermal solve. The later post-hydro STS source is not yet
+  // available and remains bookkeeping-only in thermal_src_ohmic_post_hydro_sts.
+  for (int iter = 0; iter < cfg.iterations; ++iter) {
+    tabular_cooling.BuildCoolingThermalSource(md, "eint_sdc", "thermal_src_total");
+    CombineThermalSources(md, "thermal_src_total", "thermal_src_ohmic_pre_flux",
+                          "thermal_src_lagged");
+    tabular_cooling.IntegrateThermalODEWithSource(md, "eint_stage_start",
+                                                  "thermal_src_lagged", "eint_next",
+                                                  "temp_next", dt);
+    CopyField(md, "eint_next", "eint_sdc");
+  }
+
+  tabular_cooling.BuildCoolingThermalSource(md, "eint_sdc", "thermal_src_total");
+  CopyField(md, "thermal_src_ohmic_pre_flux", "thermal_src_ohmic");
+  CombineThermalSources(md, "thermal_src_total", "thermal_src_ohmic", "thermal_src_lagged");
+
+  RecordSDCIterationDiagnostics(md, cfg.iterations);
+  CommitSimplifiedSDCInternalEnergyUpdate(md);
 
   return TaskStatus::complete;
 }
@@ -288,7 +449,8 @@ TaskStatus RunSimplifiedSDCThermalCoupling(MeshData<Real> *md, const Real dt) {
 
 TaskStatus InitializeStageLaggedThermalSource(MeshData<Real> *md) {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
-  if (!ThermalSourceSolverEnabled(hydro_pkg.get())) {
+  if (!ThermalSourceSolverEnabled(hydro_pkg.get()) ||
+      UseRKL2MidpointThermalSolve(hydro_pkg.get())) {
     return TaskStatus::complete;
   }
 
@@ -299,6 +461,8 @@ TaskStatus InitializeStageLaggedThermalSource(MeshData<Real> *md) {
   ZeroField(md, "thermal_src_lagged");
   ZeroField(md, "thermal_src_pre_flux");
   ZeroField(md, "thermal_src_ohmic_pre_flux");
+  ZeroField(md, "thermal_src_ohmic_post_hydro_sts");
+  ZeroField(md, "thermal_src_ohmic_sts_delta");
   ZeroField(md, "thermal_src_ohmic");
   ZeroField(md, "thermal_src_total");
   CopyField(md, "eint_stage_start", "eint_sdc");
@@ -310,13 +474,25 @@ TaskStatus InitializeStageLaggedThermalSource(MeshData<Real> *md) {
     tabular_cooling.BuildCoolingThermalSource(md, "eint_stage_start", "thermal_src_total");
   }
   if (couple_ohmic) {
-    BuildOhmicThermalSourceFromFluxDivergence(md, "eint_stage_start", "thermal_src_ohmic");
+    // Preserve the accepted pre-hydro STS half-step Ohmic source explicitly. The
+    // first-pass midpoint thermal solve consumes thermal_src_ohmic_pre_flux, while the
+    // post-hydro STS source is tracked separately in thermal_src_ohmic_post_hydro_sts.
+    BuildStageStartOhmicThermalSource(md, "eint_stage_start", "thermal_src_ohmic",
+                                      "thermal_src_ohmic_pre_flux");
   }
   CombineThermalSources(md, "thermal_src_total", "thermal_src_ohmic", "thermal_src_lagged");
   CopyField(md, "thermal_src_lagged", "thermal_src_pre_flux");
-  CopyField(md, "thermal_src_ohmic", "thermal_src_ohmic_pre_flux");
 
   return TaskStatus::complete;
+}
+
+TaskStatus ApplyCoupledRKL2MidpointThermalSolve(MeshData<Real> *md, const Real dt) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  if (!UseRKL2MidpointThermalSolve(hydro_pkg.get())) {
+    return TaskStatus::complete;
+  }
+
+  return RunRKL2MidpointThermalCoupling(md, dt);
 }
 
 TaskStatus AddCoupledInternalEnergySources(MeshData<Real> *md, const SimTime &,
@@ -325,7 +501,36 @@ TaskStatus AddCoupledInternalEnergySources(MeshData<Real> *md, const SimTime &,
   if (!ThermalSourceSolverEnabled(hydro_pkg.get())) {
     return TaskStatus::complete;
   }
+  if (hydro_pkg->Param<DiffInt>("diffint") == DiffInt::rkl2) {
+    if (UseRKL2MidpointThermalSolve(hydro_pkg.get())) {
+      return TaskStatus::complete;
+    }
+    PARTHENON_FAIL(
+        "thermal_source_solver with diffusion/integrator = rkl2 currently supports only "
+        "the coupled midpoint path with thermal_source_solver/couple_cooling = true and "
+        "thermal_source_solver/couple_ohmic_heating = true.");
+  }
   return RunSimplifiedSDCThermalCoupling(md, dt);
+}
+
+TaskStatus RecordAcceptedSTSPostHydroOhmicSource(MeshData<Real> *md) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  if (!ThermalSourceSolverEnabled(hydro_pkg.get()) ||
+      !hydro_pkg->Param<bool>("thermal_couple_ohmic")) {
+    ZeroField(md, "thermal_src_ohmic_post_hydro_sts");
+    ZeroField(md, "thermal_src_ohmic_sts_delta");
+    return TaskStatus::complete;
+  }
+
+  // Reconstruct the accepted post-hydro STS half-step source from the committed state.
+  // `eint_next` is scratch here; the stored source remains volumetric in
+  // thermal_src_ohmic_post_hydro_sts.
+  SaveCurrentSpecificInternalEnergy(md, "eint_next");
+  BuildOhmicThermalSource(md, "eint_next", "thermal_src_ohmic_post_hydro_sts");
+  SubtractFields(md, "thermal_src_ohmic_post_hydro_sts", "thermal_src_ohmic_pre_flux",
+                 "thermal_src_ohmic_sts_delta");
+
+  return TaskStatus::complete;
 }
 
 } // namespace Hydro

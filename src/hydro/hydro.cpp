@@ -968,9 +968,10 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       PARTHENON_REQUIRE(
           ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer,
           "Coupled ohmic heating requires diffusion/resistivity_coeff = spitzer.");
-      PARTHENON_REQUIRE(pkg->Param<DiffInt>("diffint") == DiffInt::unsplit,
+      const auto diffint = pkg->Param<DiffInt>("diffint");
+      PARTHENON_REQUIRE(diffint == DiffInt::unsplit || diffint == DiffInt::rkl2,
                         "Coupled ohmic heating currently requires "
-                        "diffusion/integrator = unsplit.");
+                        "diffusion/integrator = unsplit or rkl2.");
     }
   }
 
@@ -1037,7 +1038,18 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   pkg->AddField("thermal_ae", thermal_m);
   pkg->AddField("thermal_src_lagged", thermal_m);
   pkg->AddField("thermal_src_pre_flux", thermal_m);
+  // In coupled-ohmic STS runs, this is the accepted pre-hydro half-step Ohmic source
+  // reconstructed from the stage-start state and consumed by the first-pass midpoint
+  // thermal solve.
   pkg->AddField("thermal_src_ohmic_pre_flux", thermal_m);
+  // In coupled-ohmic STS runs, this is the accepted post-hydro half-step Ohmic source
+  // reconstructed after the final STS magnetic split. It is bookkeeping only in this
+  // first pass and is not consumed by the midpoint thermal solve.
+  pkg->AddField("thermal_src_ohmic_post_hydro_sts", thermal_m);
+  // In coupled-ohmic STS runs, this is the accepted post-minus-pre Ohmic half-step
+  // source difference reconstructed from committed states. It is a bookkeeping-only
+  // diagnostic for validating the midpoint source accounting.
+  pkg->AddField("thermal_src_ohmic_sts_delta", thermal_m);
   pkg->AddField("thermal_src_ohmic", thermal_m);
   pkg->AddField("thermal_src_total", thermal_m);
   pkg->AddField("thermal_sdc_iter_count", thermal_m);

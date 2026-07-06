@@ -15,7 +15,8 @@
 
 using namespace parthenon::package::prelude;
 
-TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md) {
+TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md,
+                          bool magnetic_only_resistive_flux) {
   const bool coupled_ohmic =
       hydro_pkg->Param<bool>("thermal_source_solver_enabled") &&
       hydro_pkg->Param<bool>("thermal_couple_ohmic");
@@ -46,16 +47,20 @@ TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md) {
     const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
 
     if (coupled_ohmic) {
-      // The coupled internal-energy solver owns both the lagged ohmic source
-      // iteration and the final magnetic-only resistive commit. Skip the
-      // standard resistive diffusion path here to avoid double-applying B.
-    } else
-    if (resistivity == Resistivity::ohmic &&
-        ohm_diff.GetCoeffType() == ResistivityCoeff::fixed) {
-      OhmicDiffFluxIsoFixed(md);
+      if (magnetic_only_resistive_flux) {
+        // STS still owns the magnetic diffusion update, but coupled ohmic heating keeps
+        // the legacy resistive IEN flux disabled so the thermal solver remains the sole
+        // owner of the heat source.
+        AddMagneticOnlyResistiveFlux(md);
+      } else {
+        // Outside STS, the coupled internal-energy solver owns the lagged ohmic source
+        // iteration and the final magnetic-only resistive commit. Skip the standard
+        // resistive diffusion path here to avoid double-applying B or IEN.
+      }
     } else if (resistivity == Resistivity::ohmic &&
-        ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer) {
-      OhmicDiffFluxGeneral(md);
+               (ohm_diff.GetCoeffType() == ResistivityCoeff::fixed ||
+                ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer)) {
+      AddOhmicResistiveFlux(md);
     } else {
       PARTHENON_FAIL("Unknown Resistivity Type")
     }

@@ -25,6 +25,8 @@ Real EstimateTimestep(MeshData<Real> *md);
 using parthenon::SimTime;
 TaskStatus SaveStageStartInternalEnergy(MeshData<Real> *md);
 TaskStatus InitializeStageLaggedThermalSource(MeshData<Real> *md);
+TaskStatus ApplyCoupledRKL2MidpointThermalSolve(MeshData<Real> *md, const Real dt);
+TaskStatus RecordAcceptedSTSPostHydroOhmicSource(MeshData<Real> *md);
 TaskStatus UpdateStageAdvectiveInternalEnergy(MeshData<Real> *md, const Real dt);
 TaskStatus ApplyPreFluxThermalSource(MeshData<Real> *md, const Real dt);
 TaskStatus AddUnsplitSources(MeshData<Real> *md, const SimTime &tm, const Real beta_dt);

@@ -22,6 +22,7 @@ struct InternalEnergySolverConfig {
 };
 
 TaskStatus InitializeStageLaggedThermalSource(MeshData<Real> *md);
+TaskStatus ApplyCoupledRKL2MidpointThermalSolve(MeshData<Real> *md, const Real dt);
 TaskStatus AddCoupledInternalEnergySources(MeshData<Real> *md, const SimTime &tm,
                                            const Real dt);
 

@@ -183,22 +183,24 @@ Real EstimateResistivityTimestep(MeshData<Real> *md);
 
 Real EstimateOhmicHeatingTimestep(MeshData<Real> *md);
 
-//! Calculate isotropic resistivity with fixed coefficient
-void OhmicDiffFluxIsoFixed(MeshData<Real> *md);
+//! Add the legacy resistive flux contribution to the hydro flux arrays.
+//! This path owns both the magnetic update and the resistive contribution to IEN.
+void AddOhmicResistiveFlux(MeshData<Real> *md);
 
-//! Calculate resistivity (general case incl. Spitzer)
-void OhmicDiffFluxGeneral(MeshData<Real> *md);
+//! Add only the magnetic-field resistive flux contribution to the hydro flux arrays.
+//! This is the ownership boundary for STS-style B updates that must not touch IEN.
+void AddMagneticOnlyResistiveFlux(MeshData<Real> *md);
 
-//! Calculate only the magnetic-field resistive flux contribution
-void OhmicDiffusionMagneticFlux(MeshData<Real> *md);
+//! Build a cell-centered Ohmic thermal source from the divergence of the resistive
+//! energy flux using the supplied thermodynamic state and destination field names.
+//! This source construction is owned by the thermal solver, not by the magnetic update.
+void BuildOhmicThermalSource(MeshData<Real> *md, const std::string &eint_field,
+                             const std::string &source_field);
 
-//! Build a cell-centered ohmic thermal source from the divergence of the resistive
-//! energy flux using the supplied thermodynamic state and source field names.
-void BuildOhmicThermalSourceFromFluxDivergence(MeshData<Real> *md,
-                                               const std::string &eint_field,
-                                               const std::string &source_field);
-
-// Calculate all diffusion fluxes, i.e., update the .flux views in md
-TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md);
+// Calculate all diffusion fluxes, i.e., update the .flux views in md.
+// When magnetic_only_resistive_flux is true, coupled-ohmic runs contribute only the
+// magnetic resistive fluxes and leave IEN ownership with the thermal solver.
+TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md,
+                          bool magnetic_only_resistive_flux = false);
 
 #endif //  HYDRO_DIFFUSION_DIFFUSION_HPP_

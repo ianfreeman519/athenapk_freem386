@@ -434,22 +434,20 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
   return cfl_diff * fac * min_dt_resist;
 }
 
-//---------------------------------------------------------------------------------------
-//! Calculate isotropic resistivity with fixed coefficient
+void AddOhmicResistiveFlux(MeshData<Real> *md) {
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
 
-void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
-  OhmicDiffFluxIsoFixedImpl<true>(md);
+  if (ohm_diff.GetCoeffType() == ResistivityCoeff::fixed) {
+    OhmicDiffFluxIsoFixedImpl<true>(md);
+  } else if (ohm_diff.GetCoeffType() == ResistivityCoeff::spitzer) {
+    OhmicDiffFluxGeneralImpl<true>(md);
+  } else {
+    PARTHENON_FAIL("Unknown Resistivity Type");
+  }
 }
 
-//---------------------------------------------------------------------------------------
-//! TODO(pgrete) Calculate Ohmic diffusion, general case, e.g., with varying (Spitzer)
-//! coefficient
-
-void OhmicDiffFluxGeneral(MeshData<Real> *md) {
-  OhmicDiffFluxGeneralImpl<true>(md);
-}
-
-void OhmicDiffusionMagneticFlux(MeshData<Real> *md) {
+void AddMagneticOnlyResistiveFlux(MeshData<Real> *md) {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
 
@@ -462,9 +460,8 @@ void OhmicDiffusionMagneticFlux(MeshData<Real> *md) {
   }
 }
 
-void BuildOhmicThermalSourceFromFluxDivergence(MeshData<Real> *md,
-                                               const std::string &eint_field,
-                                               const std::string &source_field) {
+void BuildOhmicThermalSource(MeshData<Real> *md, const std::string &eint_field,
+                             const std::string &source_field) {
   auto pmb = md->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);

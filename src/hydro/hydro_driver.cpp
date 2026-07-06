@@ -214,10 +214,13 @@ TaskStatus RKL2StepOther(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
 // Assumes that prim and cons are in sync initially.
 // Guarantees that prim and cons are in sync at the end.
 void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
-                 const Real tau) {
+                 const Real tau, const bool record_post_hydro_ohmic_source = false) {
 
   auto hydro_pkg = blocks[0]->packages.Get("Hydro");
   auto mindt_diff = hydro_pkg->Param<Real>("dt_diff");
+  const bool coupled_ohmic =
+      hydro_pkg->Param<bool>("thermal_source_solver_enabled") &&
+      hydro_pkg->Param<bool>("thermal_couple_ohmic");
 
   // get number of RKL steps
   // eq (21) using half hyperbolic timestep due to Strang split
@@ -283,8 +286,8 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
     // Calculate the diffusive fluxes for Y0 (here still "base" as nothing has been
     // updated yet) so that we can store the result as MY0 and reuse later
     // (in every subsetp).
-    auto hydro_diff_fluxes =
-        tl.AddTask(reset_fluxes, CalcDiffFluxes, hydro_pkg.get(), base.get());
+    auto hydro_diff_fluxes = tl.AddTask(reset_fluxes, CalcDiffFluxes, hydro_pkg.get(),
+                                        base.get(), coupled_ohmic);
 
     auto send_flx =
         tl.AddTask(hydro_diff_fluxes, parthenon::LoadAndSendFluxCorrections, base);
@@ -353,8 +356,8 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
       auto reset_fluxes = tl.AddTask(none, ResetFluxes, base.get());
 
       // Calculate the diffusive fluxes for Yjm1 (here u1)
-      auto hydro_diff_fluxes =
-          tl.AddTask(reset_fluxes, CalcDiffFluxes, hydro_pkg.get(), base.get());
+      auto hydro_diff_fluxes = tl.AddTask(reset_fluxes, CalcDiffFluxes, hydro_pkg.get(),
+                                          base.get(), coupled_ohmic);
 
       auto send_flx =
           tl.AddTask(hydro_diff_fluxes, parthenon::LoadAndSendFluxCorrections, base);
@@ -387,12 +390,35 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
     b_jm2 = b_jm1;
     b_jm1 = b_j;
   }
+
+  if (record_post_hydro_ohmic_source && coupled_ohmic) {
+    TaskRegion &region_record_ohmic_source = ptask_coll->AddRegion(num_partitions);
+    for (int i = 0; i < num_partitions; i++) {
+      auto &tl = region_record_ohmic_source[i];
+      auto &base = pmesh->mesh_data.GetOrAdd("base", i);
+      tl.AddTask(none, RecordAcceptedSTSPostHydroOhmicSource, base.get());
+    }
+  }
 }
 
 // See the advection.hpp declaration for a description of how this function gets called.
 TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
   TaskCollection tc;
   auto hydro_pkg = blocks[0]->packages.Get("Hydro");
+  const auto &diffint = hydro_pkg->Param<DiffInt>("diffint");
+  const bool thermal_solver_enabled =
+      hydro_pkg->Param<bool>("thermal_source_solver_enabled");
+  const bool thermal_couple_cooling = hydro_pkg->Param<bool>("thermal_couple_cooling");
+  const bool thermal_couple_ohmic = hydro_pkg->Param<bool>("thermal_couple_ohmic");
+  if (thermal_solver_enabled && diffint == DiffInt::rkl2 &&
+      (!thermal_couple_cooling || !thermal_couple_ohmic)) {
+    PARTHENON_FAIL(
+        "thermal_source_solver with diffusion/integrator = rkl2 currently supports only "
+        "the coupled midpoint path with thermal_source_solver/couple_cooling = true and "
+        "thermal_source_solver/couple_ohmic_heating = true.");
+  }
+  const bool use_rkl2_midpoint_thermal_solve =
+      thermal_solver_enabled && thermal_couple_ohmic && diffint == DiffInt::rkl2;
 
   TaskID none(0);
   // Number of task lists that can be executed indepenently and thus *may*
@@ -498,9 +524,16 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
   if (stage == 1) {
     // If any tasks modify the conserved variables before this place, then
     // the STS tasks should be updated to not assume prim and cons are in sync.
-    const auto &diffint = hydro_pkg->Param<DiffInt>("diffint");
     if (diffint == DiffInt::rkl2) {
       AddSTSTasks(&tc, pmesh, blocks, 0.5 * tm.dt);
+    }
+    if (use_rkl2_midpoint_thermal_solve) {
+      TaskRegion &midpoint_thermal_region = tc.AddRegion(num_partitions);
+      for (int i = 0; i < num_partitions; i++) {
+        auto &tl = midpoint_thermal_region[i];
+        auto &mu0 = pmesh->mesh_data.GetOrAdd("base", i);
+        tl.AddTask(none, ApplyCoupledRKL2MidpointThermalSolve, mu0.get(), tm.dt);
+      }
     }
     TaskRegion &strang_init_region = tc.AddRegion(num_partitions);
     for (int i = 0; i < num_partitions; i++) {
@@ -545,6 +578,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
   TaskRegion &single_tasklist_per_pack_region = tc.AddRegion(num_partitions);
   const bool use_pre_flux_thermal_predictor =
       hydro_pkg->Param<bool>("thermal_source_solver_enabled") &&
+      !use_rkl2_midpoint_thermal_solve &&
       hydro_pkg->Param<std::string>("thermal_source_predictor") ==
           "end_of_interface_state";
   for (int i = 0; i < num_partitions; i++) {
@@ -646,11 +680,10 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     auto fill_derived =
         tl.AddTask(none, parthenon::Update::FillDerived<MeshData<Real>>, mu0.get());
   }
-  const auto &diffint = hydro_pkg->Param<DiffInt>("diffint");
   // If any tasks modify the conserved variables before this place and after FillDerived,
   // then the STS tasks should be updated to not assume prim and cons are in sync.
   if (diffint == DiffInt::rkl2 && stage == integrator->nstages) {
-    AddSTSTasks(&tc, pmesh, blocks, 0.5 * tm.dt);
+    AddSTSTasks(&tc, pmesh, blocks, 0.5 * tm.dt, true);
   }
 
   // Single task in single (serial) region to reset global vars used in reductions in the
