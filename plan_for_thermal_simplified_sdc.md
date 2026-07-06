@@ -1041,6 +1041,40 @@ Deliverables:
 - Code changes
 - A concise explanation of the energy bookkeeping
 - Validation results and any remaining ambiguities
+
+Context carried forward from the current branch:
+- the reduced validation suite that was assembled and exercised lives under
+  `test/simplified_sdc_reduced_validation/`
+- the exact reduced-suite inputs are:
+  - bookkeeping:
+    `test/coupled_thermal_validation/linear_wave_stage_bookkeeping.in`
+  - frozen-source reproduction:
+    `test/simplified_sdc_reduced_validation/frozen_ohmic_initial.in`
+    `test/simplified_sdc_reduced_validation/frozen_ohmic_legacy.in`
+    `test/simplified_sdc_reduced_validation/frozen_ohmic_coupled.in`
+  - smoke stability:
+    `test/simplified_sdc_reduced_validation/current_sheet_smoke_diffusing.in`
+    `test/simplified_sdc_reduced_validation/current_sheet_smoke_competing_diffusing.in`
+- the exact runner is:
+  `test/simplified_sdc_reduced_validation/run_reduced_suite.sh`
+- the exact local command that passed on this branch was:
+  `cmake --build build-serial-hdf5 -j2`
+  `test/simplified_sdc_reduced_validation/run_reduced_suite.sh /tmp/simplified_sdc_reduced_validation`
+- rebuild `build-serial-hdf5/bin/athenaPK` after source edits before trusting any
+  results; an earlier serial binary in this repo was stale enough to leave the
+  simplified-SDC frozen-source diagnostics at zero even though the source tree and the
+  rebuilt binary behaved correctly
+- in this environment, `build-mpi/bin/athenaPK` reflected the newer code path but could
+  not be used for routine validation because Open MPI failed during local singleton
+  startup (`No network interfaces were found for out-of-band communications`)
+- the reduced suite passed after rebuilding the serial binary, with:
+  - bookkeeping validator pass on the one-cycle RK1 linear-wave case
+  - frozen-state ohmic reproduction pass using
+    `test/coupled_thermal_validation/validate_frozen_ohmic_source.py`
+  - both reduced current-sheet smoke cases completing cleanly through 3 cycles with
+    finite outputs and `thermal_sdc_iter_count = 2`
+- do not waste time re-deriving those suite choices unless the live code constraints or
+  file contents have changed
 ```
 
 ### Prompt 4: Identify and implement the pre-flux lagged-source insertion point
@@ -1075,6 +1109,79 @@ Deliverables:
 - Code changes
 - A short explanation of the task-graph change
 - Risks for later SDC iterations
+
+Context carried forward from the current branch:
+- the relevant reduced validation assets now live in
+  `test/simplified_sdc_reduced_validation/`
+- the frozen-source and smoke runs were already exercised successfully with:
+  `cmake --build build-serial-hdf5 -j2`
+  `test/simplified_sdc_reduced_validation/run_reduced_suite.sh /tmp/simplified_sdc_reduced_validation`
+- the most recent reduced Prompt 3 run reconfirmed the live-code constraints before
+  execution:
+  - coupled ohmic cases used `diffusion/resistivity = ohmic`,
+    `diffusion/resistivity_coeff = spitzer`, and `diffusion/integrator = unsplit`
+  - coupled cooling cases used `cooling/enable_cooling = tabular`
+  - the code still hard-failed in `RunSimplifiedSDCThermalCoupling()` if
+    `thermal_source_solver/couple_cooling = false`, so there is still no true
+    simplified-SDC ohmic-only validation mode
+- rebuild `build-serial-hdf5/bin/athenaPK` before any audit or follow-on validation
+  after source edits; a stale serial executable in this repo previously mimicked legacy
+  behavior and produced all-zero simplified-SDC diagnostics for the coupled frozen case
+- do not rely on `build-mpi/bin/athenaPK` in this environment unless the MPI startup
+  issue is resolved; this workspace hit Open MPI singleton-init failure related to local
+  out-of-band networking
+- the reduced smoke validator is
+  `test/simplified_sdc_reduced_validation/validate_current_sheet_smoke.py`
+  and it intentionally checks only:
+  - finite outputs
+  - positive density / temperature
+  - measurable evolution from first to final output
+  - expected iteration count
+  It is a smoke/stability check only, not a source-accounting proof.
+- the last successful Prompt 3 run produced these high-signal results:
+  - bookkeeping case:
+    - command:
+      `build-serial-hdf5/bin/athenaPK -i test/coupled_thermal_validation/linear_wave_stage_bookkeeping.in`
+    - completed `cycle=1` at `time=6.2491678851570587e-03`
+    - `validate_stage_bookkeeping.py` reported
+      `max_abs_adv_err = 0`, `max_abs_ae_err = 0`
+    - this proves the implemented scalar identity
+      `thermal_ae = (eint_adv - eint_stage_start) / dt_stage`
+      in the one-cycle source-free `rk1` case only
+  - frozen-source reproduction case:
+    - commands:
+      `build-serial-hdf5/bin/athenaPK -i test/simplified_sdc_reduced_validation/frozen_ohmic_initial.in`
+      `build-serial-hdf5/bin/athenaPK -i test/simplified_sdc_reduced_validation/frozen_ohmic_legacy.in`
+      `build-serial-hdf5/bin/athenaPK -i test/simplified_sdc_reduced_validation/frozen_ohmic_coupled.in cooling/table_filename=/home/ianfr/athenapk_freem386/test/free_free_loss_aluminum_ni_1e18_Zbar_3.cooling`
+    - the legacy and coupled runs both completed `cycle=1` at
+      `time=5.8593749999999998e-04`
+    - `validate_frozen_ohmic_source.py` reported
+      `coupled_vs_legacy_max = 0`,
+      `source_vs_legacy_max_rel = 7.5224738214752276e-08`,
+      `iter_count_min = iter_count_max = 1`
+    - this proves frozen-state volumetric ohmic source reproduction only; it does not
+      prove exact pre-flux `thermal_ae` bookkeeping
+  - reduced current-sheet smoke cases:
+    - diffusing case completed `cycle=3` at `time=1.5975028986219317e-14`
+      with finite outputs, `rho_min = 4.5e-03`,
+      `temp_min = 6.4557679407799698e+05`,
+      `iter_count_min = iter_count_max = 2`
+    - competing case completed `cycle=3` at `time=1.5851703294699899e-14`
+      with finite outputs, `rho_min = 4.5e-03`,
+      `temp_min = 6.4788658583646722e+05`,
+      `iter_count_min = iter_count_max = 2`
+    - both are smoke/stability passes only; neither proves correct pre-flux accounting
+- the frozen-source reproduction wrappers are:
+  `frozen_ohmic_initial.in`, `frozen_ohmic_legacy.in`, and
+  `frozen_ohmic_coupled.in`
+  under `test/simplified_sdc_reduced_validation/`
+- the diffusion `iprob = 40` wrappers still need `diffusion/ohm_diff_coeff_code`
+  present even on the Spitzer branch for the problem generator path to start cleanly;
+  this is a useful live-code quirk to remember when regenerating similar frozen-source
+  tests
+- the top-level `.gitignore` currently ignores `test*/`, so this reduced-suite directory
+  is easy to overlook in `git status`; account for that if a future session needs to
+  preserve or review the files explicitly
 ```
 
 ### Prompt 5: Implement the first simplified-SDC stage-local path
@@ -1218,4 +1325,291 @@ Deliverables:
 - Code and doc changes
 - A concise summary of what was removed
 - Any remaining technical debt or follow-up work
+```
+
+
+## Validation Sessions For Future Codex Runs
+
+The previous proposed smoke suite was too loose for the current implementation state of
+this branch. In particular:
+
+- a true `ohmic-only` simplified-SDC run is not currently supported because the live
+  solver hard-fails when `thermal_source_solver/couple_cooling = false`
+- `test/pulsed_reconnection.in` is not a good base input for validation of the current
+  SDC path because it still reflects older coupling assumptions and uses
+  `diffusion/integrator = rkl2`
+- the current branch already contains better reduced validation assets under
+  `test/coupled_thermal_validation/`
+- successful reduced current-sheet runs demonstrate smoke-test stability, not full source
+  accounting
+- the pre-flux bookkeeping remains structurally limited because there is still no
+  `cons_stage_start` snapshot
+
+The next validation work should therefore be split into separate Codex sessions. Do not
+try to combine inspection, suite assembly, execution, and bookkeeping audit into one run
+unless you have a specific reason to do so.
+
+### Recommended session boundaries
+
+- Prompt 1:
+  start a new session
+- Prompt 2:
+  start a new session after Prompt 1 is complete
+- Prompt 3:
+  you may use a new session or continue directly from Prompt 2 if that session already
+  created the suite and still has the full context
+- Prompt 4:
+  start a new session after Prompt 3 so the bookkeeping audit is not biased by whatever
+  edits were made during suite assembly
+
+### What each session is meant to prove
+
+- Prompt 1 proves:
+  what the branch currently supports, what the actual runtime constraints are, and which
+  field names and units are live
+- Prompt 2 proves:
+  that the reduced validation suite is aligned with the implementation as it actually
+  exists
+- Prompt 3 proves:
+  reduced-run startup, stability, and validator behavior
+- Prompt 4 proves:
+  the current code-path bookkeeping and double-counting story as far as the existing
+  diagnostics allow
+
+### What should not be claimed yet
+
+- do not claim that smoke-test completion proves correct source accounting
+- do not claim that `thermal_ae` is a fully settled `A_e` representation
+- do not claim that pre-flux lagged-source consumption is fully proven in multi-stage
+  live hydro runs
+- do not claim that a true `ohmic-only` simplified-SDC mode has been validated unless a
+  prior session first implements that mode
+
+### Fixed session header
+
+Use this same header at the top of every future validation session:
+
+```text
+You are working in my local AthenaPK repository at `/home/ianfr/athenapk_freem386`.
+
+AthenaPK is a finite-volume astrophysical MHD codebase. Treat this as an existing
+production codebase: inspect the live implementation first, prefer minimal targeted
+changes, and do not assume the planning document matches the code.
+
+This branch contains simplified-SDC thermal coupling work between tabular cooling and
+Spitzer ohmic heating. Validation must distinguish smoke-test stability from source-
+accounting correctness.
+```
+
+## Copy-Pasteable Prompt 1
+
+Use this in a new Codex session.
+
+```text
+You are working in my local AthenaPK repository at `/home/ianfr/athenapk_freem386`.
+
+AthenaPK is a finite-volume astrophysical MHD codebase. Treat this as an existing production codebase: inspect the live implementation first, prefer minimal targeted changes, and do not assume the planning document matches the code.
+
+This branch contains simplified-SDC thermal coupling work between tabular cooling and Spitzer ohmic heating. Validation must distinguish smoke-test stability from source-accounting correctness.
+
+Inspect the current simplified-SDC thermal coupling implementation in this AthenaPK branch and write a compact validation-readiness report.
+
+Read the live implementation, not the plan, and confirm:
+- the exact parsed `thermal_source_solver/*` input parameters,
+- the hard validation constraints for coupled cooling and coupled ohmic heating,
+- whether coupled ohmic heating requires `diffusion/integrator = unsplit`,
+- the exact names of all registered thermal bookkeeping and diagnostic fields,
+- whether each `thermal_src_*` field is a volumetric or specific energy rate,
+- where the pre-flux lagged source is applied relative to stage flux construction,
+- whether the current code allows a true `ohmic-only` simplified-SDC run.
+
+Use these files first:
+- `src/hydro/hydro.cpp`
+- `src/hydro/hydro_driver.cpp`
+- `src/hydro/srcterms/internal_energy_solver.cpp`
+- `src/hydro/srcterms/tabular_cooling.cpp`
+- `src/hydro/diffusion/diffusion.cpp`
+
+Deliver:
+- a short table of inputs, constraints, field names, and units,
+- a list of stale or misleading existing inputs/scripts, if any,
+- a clear statement of what is currently testable versus what is still structurally ambiguous.
+```
+
+## Copy-Pasteable Prompt 2
+
+Use this in a new Codex session after Prompt 1 is complete.
+
+```text
+You are working in my local AthenaPK repository at `/home/ianfr/athenapk_freem386`.
+
+AthenaPK is a finite-volume astrophysical MHD codebase. Treat this as an existing production codebase: inspect the live implementation first, prefer minimal targeted changes, and do not assume the planning document matches the code.
+
+This branch contains simplified-SDC thermal coupling work between tabular cooling and Spitzer ohmic heating. Validation must distinguish smoke-test stability from source-accounting correctness.
+
+Create a reduced validation suite for the current simplified-SDC implementation, but do not base it on `test/pulsed_reconnection.in`.
+
+Use the existing reduced validation assets under `test/coupled_thermal_validation/` as the starting point. Prefer:
+- `linear_wave_stage_bookkeeping.in`
+- `current_sheet_thermal_frozen.in`
+- `current_sheet_thermal_diffusing.in`
+- `current_sheet_thermal_competing_frozen.in`
+- `current_sheet_thermal_competing_diffusing.in`
+- `coupled_ohmic_frozen_source.in`
+- the existing Python validators in the same directory
+
+Before selecting cases, re-verify the live code constraints from `src/hydro/hydro.cpp`,
+`src/hydro/hydro_driver.cpp`, `src/hydro/srcterms/internal_energy_solver.cpp`,
+`src/hydro/srcterms/tabular_cooling.cpp`, and `src/hydro/diffusion/diffusion.cpp`.
+Do not assume the suite implied by this document is still valid.
+
+Use these live-code facts as hard constraints unless you find the implementation has
+changed:
+- the only parsed `thermal_source_solver/*` inputs are:
+  - `enabled`
+  - `iterations`
+  - `source_predictor`
+  - `store_diagnostics`
+  - `couple_cooling`
+  - `couple_ohmic_heating`
+  - `couple_conduction`
+  - `couple_viscous_heating`
+- coupled cooling requires `cooling/enable_cooling = tabular`
+- coupled ohmic heating requires:
+  - `diffusion/resistivity = ohmic`
+  - `diffusion/resistivity_coeff = spitzer`
+  - `diffusion/integrator = unsplit`
+- the runtime path currently hard-fails if `thermal_source_solver/couple_cooling = false`,
+  so a true simplified-SDC `ohmic-only` case is not currently supported even though the
+  init-time guard does not forbid that combination
+- `thermal_src_*` fields are volumetric energy rates, while `eint_*` fields are specific
+  internal energies and `thermal_ae` is a specific internal-energy rate
+
+Your job is to assemble a short suite that covers three distinct goals:
+1. source-free stage bookkeeping,
+2. frozen-state ohmic source reproduction,
+3. reduced current-sheet stability in coupled cooling + ohmic heating.
+
+Do not add a true `ohmic-only` simplified-SDC case unless you first verify from the code that it is supported. If it is not supported, state that explicitly and do not force it into the suite.
+
+Prefer validation cases that separate:
+- smoke stability from source-accounting correctness
+- frozen-source reproduction from evolving-current-sheet behavior
+
+Avoid misleading inputs:
+- do not treat existing cooled reconnection inputs with fixed resistivity as coupled-ohmic
+  validation cases without editing them, because the live solver requires Spitzer
+  resistivity for coupled ohmic heating
+- do not assume any existing repository input already contains a valid
+  `[thermal_source_solver]` block; verify that directly
+
+Deliver:
+- the exact input files to use,
+- any small wrapper inputs or scripts you add under a new test directory,
+- the exact run commands,
+- the expected scope of each case: bookkeeping, source reproduction, or smoke stability.
+```
+
+## Copy-Pasteable Prompt 3
+
+Use this in a new Codex session, or continue directly from Prompt 2 only if that session
+already created the suite and still has the relevant context.
+
+```text
+You are working in my local AthenaPK repository at `/home/ianfr/athenapk_freem386`.
+
+AthenaPK is a finite-volume astrophysical MHD codebase. Treat this as an existing production codebase: inspect the live implementation first, prefer minimal targeted changes, and do not assume the planning document matches the code.
+
+This branch contains simplified-SDC thermal coupling work between tabular cooling and Spitzer ohmic heating. Validation must distinguish smoke-test stability from source-accounting correctness.
+
+Run the reduced simplified-SDC validation suite for this AthenaPK branch and summarize only high-signal results.
+
+Use single-rank runs if possible and keep cases short. Reuse the existing validation scripts where they already match the intended check.
+
+Before running, verify that each selected case still matches the live implementation
+constraints:
+- if a case claims coupled ohmic heating, it must use `diffusion/resistivity = ohmic`,
+  `diffusion/resistivity_coeff = spitzer`, and `diffusion/integrator = unsplit`
+- if a case claims coupled cooling, it must use `cooling/enable_cooling = tabular`
+- do not present any case as a true simplified-SDC `ohmic-only` run unless the live code
+  has changed to allow `thermal_source_solver/couple_cooling = false`
+
+For each case, report:
+- exact command,
+- whether startup succeeded,
+- cycles completed and final simulation time,
+- whether the run completed cleanly,
+- any NaNs, infinities, negative pressures, or timestep collapse,
+- whether the result is a smoke-test pass, a source-accounting pass, or only a partial check.
+
+Important scope rules:
+- use `validate_stage_bookkeeping.py` only on one-cycle `rk1` bookkeeping cases where `Time` is a valid proxy for the stage dt,
+- use frozen-source comparison only for frozen or diffusion-only-style runs,
+- treat `thermal_src_*` validator outputs as volumetric source checks, not specific-energy
+  rate checks,
+- do not claim that successful current-sheet completion proves correct pre-flux accounting.
+- do not claim that a passing frozen-source check proves the pre-flux `thermal_ae`
+  bookkeeping is exact; the live code still computes `thermal_ae =
+  (eint_adv - eint_stage_start) / dt_stage` after a pre-flux-lagged source has already
+  modified the state used for reconstruction
+- if `store_diagnostics` is used, remember that with solver disabled it only guarantees
+  stage bookkeeping fields; `thermal_src_*` snapshots and `thermal_sdc_iter_count` are
+  only populated by the active solver path
+
+Deliver:
+- a compact results table,
+- validator outputs,
+- a short list of remaining unproven points.
+```
+
+## Copy-Pasteable Prompt 4
+
+Use this in a new Codex session after Prompt 3.
+
+```text
+You are working in my local AthenaPK repository at `/home/ianfr/athenapk_freem386`.
+
+AthenaPK is a finite-volume astrophysical MHD codebase. Treat this as an existing production codebase: inspect the live implementation first, prefer minimal targeted changes, and do not assume the planning document matches the code.
+
+This branch contains simplified-SDC thermal coupling work between tabular cooling and Spitzer ohmic heating. Validation must distinguish smoke-test stability from source-accounting correctness.
+
+Audit the bookkeeping and double-counting risk in the current simplified-SDC thermal coupling implementation.
+
+Answer these questions directly from code and, where useful, from reduced validation outputs:
+- Is the accepted internal-energy correction committed once per stage or more than once?
+- Is the magnetic resistive update applied once per stage or more than once?
+- Is the legacy resistive `IEN` flux path disabled when coupled ohmic heating is enabled?
+- Are `thermal_src_*` fields handled consistently as volumetric sources while `eint_*` fields remain specific energies?
+- What exactly is proven by `eint_stage_start`, `eint_adv`, `eint_sdc`, and `thermal_ae`?
+- What remains ambiguous because there is still no `cons_stage_start` snapshot?
+
+Carry these known live-code facts into the audit unless you discover that the branch has
+changed:
+- `RunSimplifiedSDCThermalCoupling()` currently hard-fails if
+  `thermal_source_solver/couple_cooling = false`, so a true simplified-SDC `ohmic-only`
+  run is not presently available as a validation mode
+- `thermal_src_total` is semantically overloaded: inside the iteration it is
+  advective-plus-ohmic total, but after the final solve it is overwritten with the
+  cooling-only source before `thermal_src_lagged` is rebuilt
+- the pre-flux lagged source is applied in driver order:
+  `SaveStageStartInternalEnergy` ->
+  `InitializeStageLaggedThermalSource` ->
+  `ApplyPreFluxThermalSource` ->
+  pre-flux boundary exchange ->
+  `FillDerived` ->
+  stage flux construction
+- the standard resistive diffusion path is skipped when coupled ohmic heating is enabled,
+  and the magnetic-only resistive update is committed after the thermal solve
+
+Use these files first:
+- `src/hydro/srcterms/internal_energy_solver.cpp`
+- `src/hydro/diffusion/diffusion.cpp`
+- `src/hydro/hydro.cpp`
+- `src/hydro/hydro_driver.cpp`
+- the existing validation scripts under `test/coupled_thermal_validation/`
+
+Deliver:
+- a yes/no answer for each bookkeeping question,
+- the code locations that support each answer,
+- a final section called `Still Ambiguous` that lists anything the current diagnostics cannot prove.
 ```
