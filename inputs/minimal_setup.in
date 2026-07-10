@@ -32,13 +32,14 @@ code_mass_cgs = 1.0
 code_time_cgs = 1.0
 
 <problem/pulsed_reconnection>
-B0 = 1e5 # consistent with MARZ
+current_peak_MA = 0.5 # gives Bphi ~= 1e5 G at r = 1 cm outside the current core
 rho_wire = 2.7e-3  # 0.01 * Aluminum at solid density - this is the peak density
 rho_background = 1e-6       # Near vacuum
 T_wire = 0.99e5      # Inflow temperature
 T_background = 11e4  # Background temperature
 v0 = 50e5       # flow speed away from wires
 w = 0.50     # Gaussian profile standard deviation
+w_B = 0.50   # Gaussian current profile width
 array_separation = 2
 N = 101
 perturb_amplitude = 0.01
