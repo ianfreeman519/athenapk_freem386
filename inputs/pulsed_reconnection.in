@@ -1,65 +1,88 @@
 # AthenaPK - a performance portable block structured AMR MHD code
-# Copyright (c) 2023, Athena Parthenon Collaboration. All rights reserved.
-# Licensed under the BSD 3-Clause License (the "LICENSE");
+# Copyright (c) 2023, Athena Parthenon Collaboration.
+# Licensed under the BSD 3-Clause License.
 
 <comment>
-problem = pulsed_reconnection - freeman 2026
+problem = pulsed_reconnection - simplified-SDC thermal coupling smoke test
 
 <job>
 problem_id = pulsed_reconnection
 
+
 <diffusion>
 integrator = rkl2
-resistivity = ohmic          # none (disabled) or ohmic
+
+resistivity = ohmic
+resistivity_coeff = spitzer
+
 cfl_diff_heat = 0.5
-resistivity_coeff = fixed
-ohm_diff_coeff_code = 1e4
-# spitzer_log_lambda = 10.0
-$ spitzer_eta_max = 1e10    
+
+spitzer_log_lambda = 10.0
+spitzer_eta_max = 5e6
+
+
 
 <cooling>
-enable_cooling = tabular                # To disable, set to `none`
-table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling    # Path to the cooling table (in a text file)
-lambda_units_cgs = 1                    # Conversion factor of the cooling rate relative to CGS units       
-integrator = rk12              # Other possible options are `rk12` and `rk45` for error bound subcycling
-max_iter = 1000                    # Max number of iteration for subcycling. Unsued for Townsend integrator
-cfl = 0.45                          # Restrict global timestep to `cfl*e / dedt`, i.e., some fraction of change per cycle in the specific internal energy (i.e., temperature)
-d_log_temp_tol = 1e-8              # Tolerance in cooling table between subsequent entries. Both subcycling integrators and cfl restriction rely on a table lookup that assumes equally spaced (in log space) temperature values.
-d_e_tol = 1e-8                    # Tolerance for the relative error in the change of internal energy for the error bound subcyling integrators (rk12 and rk45). Unused for Townsend integrator.
+enable_cooling = tabular
+
+table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling
+lambda_units_cgs = 1.0
+
+integrator = rk12
+max_iter = 1000
+cfl = 0.45
+
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
+
+
+<thermal_source_solver>
+enabled = false
+iterations = 2  # Fixed number of thermal correction passes per explicit stage
+source_predictor = end_of_interface_state   # Currently supported predictor
+store_diagnostics = true        # Retain internal SDC fields for validation output
+couple_cooling = true
+couple_ohmic_heating = true
+
+# These source terms are not implemented in this solver yet
+couple_conduction = false
+couple_viscous_heating = false
 
 <units>
-code_length_cgs = 1.0 
+code_length_cgs = 1.0
 code_mass_cgs = 1.0
 code_time_cgs = 1.0
+
 
 <problem/pulsed_reconnection>
 current_peak_MA = 0.5 # gives Bphi ~= 1e5 G at r = 1 cm outside the current core
 rho_wire = 2.7e-3  # 0.01 * Aluminum at solid density - this is the peak density
 rho_background = 1e-6       # Near vacuum
 T_wire = 0.99e5      # Inflow temperature
-T_background = 11e4  # Background temperature
+T_background = 1e4  # Background temperature
 v0 = 50e5       # flow speed away from wires
 w = 0.50     # Gaussian profile standard deviation
 w_B = 0.50   # Gaussian current profile width
-array_separation = 2
-N = 101
+array_separation = 6
+N = 200
 
 density_perturb_amplitude = 0.01
 temperature_perturb_amplitude = 0.0
 
+
 <parthenon/mesh>
 refinement = none
-nghost = 4
+nghost = 2
 
-nx1 = 320
-x1min = -2.0
-x1max =  2.0
+nx1 = 1536   
+x1min = -9
+x1max = 9
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 =  160
-x2min = -0.9
-x2max = 0.9
+nx2 = 1024
+x2min = -6
+x2max = 6
 ix2_bc = outflow
 ox2_bc = outflow
 
@@ -69,44 +92,39 @@ x3max = 1.0
 ix3_bc = periodic
 ox3_bc = periodic
 
-# <parthenon/static_refinement0>
-# x1min = -4.0
-# x1max =  4.0
-# x2min = -0.001
-# x2max =  0.001
-# x3min = -0.0
-# x3max =  0.0
-# level =  3
-
 <parthenon/meshblock>
-nx1 = 80
-nx2 = 80
+nx1 = 64
+nx2 = 64
 nx3 = 1
+
 
 <parthenon/time>
 integrator = vl2
-cfl = 0.45
-tlim = 1e-6 # 1000ns
-# dt_max = 1e-9
+cfl = 0.20
+
+tlim = 3e-7
+dt_max = 1e-8
 
 <hydro>
 fluid = glmmhd
 eos = adiabatic
 riemann = hlld
-reconstruction = wenoz
-gamma = 1.66666666 # gamma = C_p/C_v
+reconstruction = plm
+gamma = 1.6666666666666667
 first_order_flux_correct = true
-Tfloor = 1e4
-
-mean_molecular_weight = 6.75
+Tfloor = 1e3
+mean_molecular_weight = 27
 Z = 13
+
+
 
 <parthenon/output0>
 file_type = hdf5
-dt = 1e-10
+dt = 1e-9
 id = out0
 variables = cons, prim, curlBx, curlBy, curlBz, beta, eta, divv, dt_hyp_fms, dt_hyp_cs, dt_cool_local, dt_heat_local
-
 <parthenon/output1>
 file_type = rst
 dt = 1e-8
+id = out1
+

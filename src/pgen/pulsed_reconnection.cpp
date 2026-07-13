@@ -22,6 +22,7 @@
 // AthenaPK headers
 #include "../main.hpp"
 #include "../units.hpp"
+#include "../bvals/boundary_conditions_apk.hpp"
 #include "../eos/adiabatic_glmmhd.hpp"
 #include "../hydro/diffusion/diffusion.hpp" // For storing eta later
 #include "../hydro/srcterms/tabular_cooling.hpp"
@@ -29,6 +30,195 @@
 namespace pulsed_reconnection {
 using namespace parthenon::driver::prelude;
 using namespace parthenon::package::prelude;
+
+KOKKOS_INLINE_FUNCTION
+Real GaussianProfile(const Real r, const Real width);
+
+KOKKOS_INLINE_FUNCTION
+Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number);
+
+namespace {
+
+struct PulsedSourceParams {
+  Real gm1;
+  Real k_b;
+  Real m_bar;
+  Real current_peak_MA;
+  Real rho_wire_cgs;
+  Real rho_background_cgs;
+  Real T_wire;
+  Real T_background;
+  Real v0_cgs;
+  Real array_separation_cgs;
+  Real width_thermo_cgs;
+  Real width_magnetic_cgs;
+  int azimuthal_mode_number;
+  Real density_perturb_amplitude;
+  Real temperature_perturb_amplitude;
+  Real current_field_prefac;
+  Real rho_wire;
+  Real rho_background;
+  Real v0;
+  Real array_separation;
+  Real width_thermo;
+  Real width_magnetic;
+};
+
+struct PulsedSourceState {
+  Real rho;
+  Real pressure;
+  Real v1;
+  Real v2;
+  Real v3;
+  Real B1;
+  Real B2;
+  Real B3;
+};
+
+PulsedSourceParams g_source_params{};
+bool g_source_params_initialized = false;
+
+PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg,
+                                    ParameterInput *pin) {
+  PulsedSourceParams params{};
+  params.gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  params.current_peak_MA =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "current_peak_MA", 1.0);
+  params.rho_wire_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1e-3);
+  params.rho_background_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-6);
+  params.T_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4);
+  params.T_background =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 1e2);
+  params.v0_cgs = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
+  params.array_separation_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 4.0);
+  params.width_thermo_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
+  params.width_magnetic_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "w_B",
+      pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic",
+                        params.width_thermo_cgs));
+  params.azimuthal_mode_number =
+      pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
+  params.density_perturb_amplitude =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "density_perturb_amplitude", 0.0);
+  params.temperature_perturb_amplitude =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "temperature_perturb_amplitude",
+                        0.0);
+
+  PARTHENON_REQUIRE(params.width_thermo_cgs > 0.0,
+                    "problem/pulsed_reconnection/w must be positive.");
+  PARTHENON_REQUIRE(params.width_magnetic_cgs > 0.0,
+                    "problem/pulsed_reconnection/w_B must be positive.");
+  PARTHENON_REQUIRE(params.array_separation_cgs > 0.0,
+                    "problem/pulsed_reconnection/array_separation must be positive.");
+  PARTHENON_REQUIRE(params.current_peak_MA >= 0.0,
+                    "problem/pulsed_reconnection/current_peak_MA must be nonnegative.");
+  PARTHENON_REQUIRE(params.azimuthal_mode_number >= 0,
+                    "problem/pulsed_reconnection/N must be nonnegative.");
+
+  const auto units = hydro_pkg->Param<Units>("units");
+  params.k_b = units.k_boltzmann();
+  params.m_bar =
+      pin->GetReal("hydro", "mean_molecular_weight") * units.atomic_mass_unit();
+  const Real current_peak_ampere = params.current_peak_MA * 1.0e6;
+  params.current_field_prefac = 0.2 * current_peak_ampere * units.cm() * units.gauss();
+  params.rho_wire = params.rho_wire_cgs * units.g_cm3();
+  params.rho_background = params.rho_background_cgs * units.g_cm3();
+  params.v0 = params.v0_cgs * units.cm_s();
+  params.array_separation = params.array_separation_cgs * units.cm();
+  params.width_thermo = params.width_thermo_cgs * units.cm();
+  params.width_magnetic = params.width_magnetic_cgs * units.cm();
+
+  return params;
+}
+
+void EnsureSourceParamsInitialized(const std::shared_ptr<StateDescriptor> &hydro_pkg,
+                                   ParameterInput *pin) {
+  if (!g_source_params_initialized) {
+    g_source_params = LoadSourceParams(hydro_pkg, pin);
+    g_source_params_initialized = true;
+  }
+}
+
+KOKKOS_INLINE_FUNCTION
+PulsedSourceState EvaluateSourceState(const PulsedSourceParams &params, const Real x,
+                                      const Real y) {
+  PulsedSourceState state{};
+  const Real d = params.array_separation / 2.0;
+  Real thermo_profile_sum = 0.0;
+  Real density_profile_sum = 0.0;
+
+  for (int A = -1; A <= 1; A += 2) {
+    const Real y_center = A * d;
+    const Real y_local = y - y_center;
+    const Real r2 = SQR(x) + SQR(y_local);
+    const Real r = sqrt(r2);
+    const Real theta = atan2(y_local, x);
+    const Real thermo_profile = GaussianProfile(r, params.width_thermo);
+    const Real density_perturbation = AzimuthalThermoPerturbation(
+        theta, params.density_perturb_amplitude, params.azimuthal_mode_number);
+    const Real temperature_perturbation = AzimuthalThermoPerturbation(
+        theta, params.temperature_perturb_amplitude, params.azimuthal_mode_number);
+    thermo_profile_sum += thermo_profile * temperature_perturbation;
+    density_profile_sum += thermo_profile * density_perturbation;
+
+    if (r > 0.0) {
+      const Real inv_r = 1.0 / r;
+      const Real xhat = x * inv_r;
+      const Real yhat = y_local * inv_r;
+      state.v1 += params.v0 * xhat * thermo_profile;
+      state.v2 += params.v0 * yhat * thermo_profile;
+    }
+
+    const Real enclosed_fraction = 1.0 - exp(-r2 / SQR(params.width_magnetic));
+    const Real Bphi_over_r =
+        r2 > 0.0 ? params.current_field_prefac * enclosed_fraction / r2
+                 : params.current_field_prefac / SQR(params.width_magnetic);
+    state.B1 += -Bphi_over_r * y_local;
+    state.B2 += Bphi_over_r * x;
+  }
+
+  state.rho = params.rho_background + params.rho_wire * density_profile_sum;
+  const Real T = params.T_background + params.T_wire * thermo_profile_sum;
+  state.pressure = T * params.k_b * state.rho / params.m_bar;
+  return state;
+}
+
+template <bool INNER_X2>
+void PulsedSourceX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  auto pmb = mbd->GetBlockPointer();
+  auto cons = mbd->PackVariables(std::vector<std::string>{"cons"}, coarse);
+  const auto params = g_source_params;
+  const bool fine = false;
+  const auto nb = IndexRange{0, 0};
+  constexpr auto domain = INNER_X2 ? IndexDomain::inner_x2 : IndexDomain::outer_x2;
+  auto coords = pmb->coords;
+
+  pmb->par_for_bndry(
+      "PulsedSourceX2", nb, domain, parthenon::TopologicalElement::CC, coarse, fine,
+      KOKKOS_LAMBDA(const int &, const int &k, const int &j, const int &i) {
+        const Real x = coords.Xc<1>(i);
+        const Real y = coords.Xc<2>(j);
+        const auto state = EvaluateSourceState(params, x, y);
+        cons(IDN, k, j, i) = state.rho;
+        cons(IM1, k, j, i) = state.rho * state.v1;
+        cons(IM2, k, j, i) = state.rho * state.v2;
+        cons(IM3, k, j, i) = state.rho * state.v3;
+        cons(IB1, k, j, i) = state.B1;
+        cons(IB2, k, j, i) = state.B2;
+        cons(IB3, k, j, i) = state.B3;
+        cons(IEN, k, j, i) =
+            state.pressure / params.gm1 +
+            0.5 * (SQR(state.B1) + SQR(state.B2) + SQR(state.B3) +
+                   state.rho *
+                       (SQR(state.v1) + SQR(state.v2) + SQR(state.v3)));
+      });
+}
+
+} // namespace
 
 KOKKOS_INLINE_FUNCTION
 void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
@@ -73,6 +263,12 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   hydro_pkg->AddField("dt_cool_local", m);
   hydro_pkg->AddField("dt_hyp_fms", m);
   hydro_pkg->AddField("dt_hyp_cs", m);
+}
+
+void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
+  auto hydro_pkg = mesh->packages.Get("Hydro");
+  g_source_params = LoadSourceParams(hydro_pkg, pin);
+  g_source_params_initialized = true;
 }
 
 // storing the curls just before output
@@ -268,83 +464,36 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
-
-  Real gm1  = pin->GetReal("hydro", "gamma") - 1.0;
-  const Real current_peak_MA =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "current_peak_MA", 1.0);
-  const Real rho_wire_cgs =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1e-3);
-  const Real rho_background_cgs =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-6);
-  const Real T_wire = pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4);
-  const Real T_background =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 1e2);
-  const Real v0_cgs = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
-  const Real array_separation_cgs =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 4.0);
-  const Real width_thermo_cgs =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
-  const Real width_magnetic_cgs = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "w_B",
-      pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic", width_thermo_cgs));
-  int azimuthal_mode_number =
-      pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
-  Real density_perturb_amplitude =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "density_perturb_amplitude", 0.0);
-  Real temperature_perturb_amplitude =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "temperature_perturb_amplitude", 0.0);
-  PARTHENON_REQUIRE(width_thermo_cgs > 0.0,
-                    "problem/pulsed_reconnection/w must be positive.");
-  PARTHENON_REQUIRE(width_magnetic_cgs > 0.0,
-                    "problem/pulsed_reconnection/w_B must be positive.");
-  PARTHENON_REQUIRE(array_separation_cgs > 0.0,
-                    "problem/pulsed_reconnection/array_separation must be positive.");
-  PARTHENON_REQUIRE(current_peak_MA >= 0.0,
-                    "problem/pulsed_reconnection/current_peak_MA must be nonnegative.");
-  PARTHENON_REQUIRE(azimuthal_mode_number >= 0,
-                    "problem/pulsed_reconnection/N must be nonnegative.");
-  
-
-  Real k_b, atomic_mass_unit, m_bar;
   auto hydro_pkg = pmb->packages.Get("Hydro");
-  const auto units = hydro_pkg->Param<Units>("units");
-  k_b = units.k_boltzmann();
-  atomic_mass_unit = units.atomic_mass_unit();
-  m_bar = pin->GetReal("hydro", "mean_molecular_weight") * atomic_mass_unit;
-  const Real current_peak_ampere = current_peak_MA * 1.0e6;
-  const Real current_field_prefac = 0.2 * current_peak_ampere * units.cm() * units.gauss();
-  const Real rho_wire = rho_wire_cgs * units.g_cm3();
-  const Real rho_background = rho_background_cgs * units.g_cm3();
-  const Real v0 = v0_cgs * units.cm_s();
-  const Real array_separation = array_separation_cgs * units.cm();
-  const Real width_thermo = width_thermo_cgs * units.cm();
-  const Real width_magnetic = width_magnetic_cgs * units.cm();
+  EnsureSourceParamsInitialized(hydro_pkg, pin);
+  const auto params = g_source_params;
 
   // Printing out input values for slurm records
   if (parthenon::Globals::my_rank == 0 && pmb->gid == 0) {
     std::cout << "========================================" << std::endl;
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ================== " << pin->GetReal("hydro", "gamma") << std::endl;
-    std::cout << "current_peak [MA] ====== " << current_peak_MA << std::endl;
-    std::cout << "rho_wire(core) [g/cm^3]= " << rho_wire_cgs << std::endl;
-    std::cout << "rho_background [g/cm^3]= " << rho_background_cgs << std::endl;
-    std::cout << "T_wire(core) [K] ======= " << T_wire << std::endl;
-    std::cout << "T_background [K] ======= " << T_background << std::endl;
-    std::cout << "v0(core) [cm/s] ======== " << v0_cgs << std::endl;
-    std::cout << "array_separation [cm] == " << array_separation_cgs << std::endl;
-    std::cout << "thermo width w [cm] ==== " << width_thermo_cgs << std::endl;
-    std::cout << "magnetic width w_B [cm]  " << width_magnetic_cgs << std::endl;
-    std::cout << "azimuthal mode N ======= " << azimuthal_mode_number << std::endl;
-    std::cout << "dens. perturb. amplitude=" << density_perturb_amplitude << std::endl;
-    std::cout << "temp perturb. amplitude =" << temperature_perturb_amplitude << std::endl;
+    std::cout << "current_peak [MA] ====== " << params.current_peak_MA << std::endl;
+    std::cout << "rho_wire(core) [g/cm^3]= " << params.rho_wire_cgs << std::endl;
+    std::cout << "rho_background [g/cm^3]= " << params.rho_background_cgs << std::endl;
+    std::cout << "T_wire(core) [K] ======= " << params.T_wire << std::endl;
+    std::cout << "T_background [K] ======= " << params.T_background << std::endl;
+    std::cout << "v0(core) [cm/s] ======== " << params.v0_cgs << std::endl;
+    std::cout << "array_separation [cm] == " << params.array_separation_cgs << std::endl;
+    std::cout << "thermo width w [cm] ==== " << params.width_thermo_cgs << std::endl;
+    std::cout << "magnetic width w_B [cm]  " << params.width_magnetic_cgs << std::endl;
+    std::cout << "azimuthal mode N ======= " << params.azimuthal_mode_number << std::endl;
+    std::cout << "dens. perturb. amplitude=" << params.density_perturb_amplitude << std::endl;
+    std::cout << "temp perturb. amplitude =" << params.temperature_perturb_amplitude
+              << std::endl;
     std::cout << "Converted code units:" << std::endl;
-    std::cout << "current field prefac === " << current_field_prefac << std::endl;
-    std::cout << "rho_wire(core) [code] == " << rho_wire << std::endl;
-    std::cout << "rho_background [code] == " << rho_background << std::endl;
-    std::cout << "v0(core) [code] ======== " << v0 << std::endl;
-    std::cout << "array_separation [code]  " << array_separation << std::endl;
-    std::cout << "thermo width w [code] == " << width_thermo << std::endl;
-    std::cout << "magnetic width w_B [code]" << width_magnetic << std::endl;
+    std::cout << "current field prefac === " << params.current_field_prefac << std::endl;
+    std::cout << "rho_wire(core) [code] == " << params.rho_wire << std::endl;
+    std::cout << "rho_background [code] == " << params.rho_background << std::endl;
+    std::cout << "v0(core) [code] ======== " << params.v0 << std::endl;
+    std::cout << "array_separation [code]  " << params.array_separation << std::endl;
+    std::cout << "thermo width w [code] == " << params.width_thermo << std::endl;
+    std::cout << "magnetic width w_B [code]" << params.width_magnetic << std::endl;
     std::cout << "thermo profile ========= exp(-(r / w)^2)" << std::endl;
     std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
     std::cout << "magnetic current ======= Jz = I/(pi*w_B^2)*exp(-(r/w_B)^2)"
@@ -358,67 +507,42 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   pmb->par_for(
       "ProblemGenerator::pulsed_reconnection", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int k, const int j, const int i) {
-        // Gaussian exploding-wire profile centered on each array element.
-        Real v1 = 0.0;
-        Real v2 = 0.0;
-        Real x = coords.Xc<1>(i);
-        Real y = coords.Xc<2>(j);
-        Real d = array_separation / 2.0;
-        Real thermo_profile_sum = 0.0;
-        Real density_profile_sum = 0.0;
-        Real B1 = 0.0;
-        Real B2 = 0.0;
+        const Real x = coords.Xc<1>(i);
+        const Real y = coords.Xc<2>(j);
+        const auto state = EvaluateSourceState(params, x, y);
 
-        // Two wire arrays centered at x=0, y=+/-array_separation/2 with radial outflow.
-        for (int A = -1; A <= 1; A += 2) {
-          Real y_center = A * d;
-          Real y_local = y - y_center;
-          Real r2 = SQR(x) + SQR(y_local);
-          Real r = sqrt(r2);
-          Real theta = atan2(y_local, x);
-          Real thermo_profile = GaussianProfile(r, width_thermo);
-          Real density_perturbation =
-              AzimuthalThermoPerturbation(theta, density_perturb_amplitude, azimuthal_mode_number);
-          Real temperature_perturbation =
-              AzimuthalThermoPerturbation(theta, temperature_perturb_amplitude, azimuthal_mode_number);
-          thermo_profile_sum += thermo_profile * temperature_perturbation;
-          density_profile_sum += thermo_profile * density_perturbation;
+        u(IDN, k, j, i) = state.rho;
+        u(IM1, k, j, i) = state.rho * state.v1;
+        u(IM2, k, j, i) = state.rho * state.v2;
+        u(IM3, k, j, i) = state.rho * state.v3;
+        u(IB1, k, j, i) = state.B1;
+        u(IB2, k, j, i) = state.B2;
+        u(IB3, k, j, i) = state.B3;
 
-          if (r > 0.0) {
-            const Real inv_r = 1.0 / r;
-            const Real xhat = x * inv_r;
-            const Real yhat = y_local * inv_r;
-            v1 += v0 * xhat * thermo_profile;
-            v2 += v0 * yhat * thermo_profile;
-          }
-
-          const Real enclosed_fraction = 1.0 - exp(-r2 / SQR(width_magnetic));
-          const Real Bphi_over_r =
-              r2 > 0.0 ? current_field_prefac * enclosed_fraction / r2
-                       : current_field_prefac / SQR(width_magnetic);
-          B1 += -Bphi_over_r * y_local;
-          B2 += Bphi_over_r * x;
-        }
-
-        Real rho = rho_background + rho_wire * density_profile_sum;
-        Real T = T_background + T_wire * thermo_profile_sum;
-        Real P = T * k_b * rho / m_bar;
-
-        u(IDN, k, j, i) = rho;
-        u(IM1, k, j, i) = rho * v1;
-        u(IM2, k, j, i) = rho * v2;
-        u(IM3, k, j, i) = 0.0;
-        u(IB1, k, j, i) = B1;
-        u(IB2, k, j, i) = B2;
-        u(IB3, k, j, i) = 0.0;
-
-        u(IEN, k, j, i) = P / gm1 +
-                          0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
-                                 SQR(u(IB3, k, j, i)) +
-                                 (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) +
-                                  SQR(u(IM3, k, j, i))) /
-                                     u(IDN, k, j, i));
+        u(IEN, k, j, i) =
+            state.pressure / params.gm1 +
+            0.5 * (SQR(state.B1) + SQR(state.B2) + SQR(state.B3) +
+                   state.rho *
+                       (SQR(state.v1) + SQR(state.v2) + SQR(state.v3)));
       });
 }
- // namespace pulsed_reconnection
+
+void PulsedSourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  PulsedSourceX2<true>(mbd, coarse);
 }
+
+void PulsedSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  PulsedSourceX2<false>(mbd, coarse);
+}
+
+void PulsedDiodeInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  Hydro::BoundaryFunction::DiodeX1BC<parthenon::BoundaryFunction::BCSide::Inner>(mbd,
+                                                                                  coarse);
+}
+
+void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  Hydro::BoundaryFunction::DiodeX1BC<parthenon::BoundaryFunction::BCSide::Outer>(mbd,
+                                                                                  coarse);
+}
+
+} // namespace pulsed_reconnection

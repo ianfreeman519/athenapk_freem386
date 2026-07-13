@@ -102,10 +102,23 @@ int main(int argc, char *argv[]) {
     pman.app_input->MeshBlockUserWorkBeforeOutput = periodic_reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = periodic_reconnection::ProblemInitPackageData;
   } else if (problem == "pulsed_reconnection") {
+    pman.app_input->InitUserMeshData = pulsed_reconnection::InitUserMeshData;
     pman.app_input->ProblemGenerator = pulsed_reconnection::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput =
         pulsed_reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = pulsed_reconnection::ProblemInitPackageData;
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x1,
+                                              "pulsed_diode_x1_inner",
+                                              pulsed_reconnection::PulsedDiodeInnerX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x1,
+                                              "pulsed_diode_x1_outer",
+                                              pulsed_reconnection::PulsedDiodeOuterX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x2,
+                                              "pulsed_source_x2_inner",
+                                              pulsed_reconnection::PulsedSourceInnerX2);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x2,
+                                              "pulsed_source_x2_outer",
+                                              pulsed_reconnection::PulsedSourceOuterX2);
   } else if (problem == "current_sheet_thermal") {
     pman.app_input->ProblemGenerator = current_sheet_thermal::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput =

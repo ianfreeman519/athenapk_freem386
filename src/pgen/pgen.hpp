@@ -38,10 +38,15 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
 }
 namespace pulsed_reconnection {
 using namespace parthenon::driver::prelude;
+void InitUserMeshData(Mesh *mesh, ParameterInput *pin);
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm);
+void PulsedDiodeInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void PulsedSourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void PulsedSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 }
 namespace current_sheet_thermal {
 using namespace parthenon::driver::prelude;

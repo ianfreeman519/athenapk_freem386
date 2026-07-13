@@ -35,6 +35,52 @@ using parthenon::CoordinateDirection;
 // using parthenon::Real;
 using parthenon::BoundaryFunction::BCSide;
 
+template <typename PackT, typename CoordsT>
+KOKKOS_INLINE_FUNCTION Real ExtrapolateLinearX1(const PackT &cons, const CoordsT &coords,
+                                                const int var, const int k, const int j,
+                                                const int ref, const int interior_step,
+                                                const Real x_ghost) {
+  const int i0 = ref;
+  const int i1 = ref + interior_step;
+  const Real x0 = coords.template Xc<1>(i0);
+  const Real x1 = coords.template Xc<1>(i1);
+  const Real u0 = cons(var, k, j, i0);
+  const Real u1 = cons(var, k, j, i1);
+  const Real dx = x1 - x0;
+  if (dx == 0.0) {
+    return u0;
+  }
+  return u0 + (u1 - u0) * (x_ghost - x0) / dx;
+}
+
+template <typename PackT, typename CoordsT>
+KOKKOS_INLINE_FUNCTION Real ExtrapolateQuadraticX1(const PackT &cons, const CoordsT &coords,
+                                                   const int var, const int k, const int j,
+                                                   const int ref, const int interior_step,
+                                                   const Real x_ghost) {
+  const int i0 = ref;
+  const int i1 = ref + interior_step;
+  const int i2 = ref + 2 * interior_step;
+  const Real x0 = coords.template Xc<1>(i0);
+  const Real x1 = coords.template Xc<1>(i1);
+  const Real x2 = coords.template Xc<1>(i2);
+  const Real u0 = cons(var, k, j, i0);
+  const Real u1 = cons(var, k, j, i1);
+  const Real u2 = cons(var, k, j, i2);
+
+  const Real d0 = (x0 - x1) * (x0 - x2);
+  const Real d1 = (x1 - x0) * (x1 - x2);
+  const Real d2 = (x2 - x0) * (x2 - x1);
+  if (d0 == 0.0 || d1 == 0.0 || d2 == 0.0) {
+    return ExtrapolateLinearX1(cons, coords, var, k, j, ref, interior_step, x_ghost);
+  }
+
+  const Real l0 = ((x_ghost - x1) * (x_ghost - x2)) / d0;
+  const Real l1 = ((x_ghost - x0) * (x_ghost - x2)) / d1;
+  const Real l2 = ((x_ghost - x0) * (x_ghost - x1)) / d2;
+  return l0 * u0 + l1 * u1 + l2 * u2;
+}
+
 template <CoordinateDirection DIR, BCSide SIDE>
 void ReflectBC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
   // make sure DIR is X[123]DIR so we don't have to check again
@@ -168,6 +214,80 @@ void LinearBC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
           const Real x_g = coords.Xc<3>(k);
           cons(v, k, j, i) = m * (x_g - x_ref) + u_ref;
         }
+      });
+}
+
+template <BCSide SIDE>
+void DiodeX1BC(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  MeshBlock *pmb = mbd->GetBlockPointer();
+
+  const auto &bounds = coarse ? pmb->c_cellbounds : pmb->cellbounds;
+  const auto &range = bounds.GetBoundsI(IndexDomain::interior);
+  const int ref = (SIDE == BCSide::Inner) ? range.s : range.e;
+  const int interior_step = (SIDE == BCSide::Inner) ? 1 : -1;
+  const int interior_cells = range.e - range.s + 1;
+
+  constexpr IndexDomain domain = (SIDE == BCSide::Inner) ? IndexDomain::inner_x1
+                                                         : IndexDomain::outer_x1;
+
+  auto cons = mbd->PackVariables(std::vector<std::string>{"cons"}, coarse);
+  const int nvar = cons.GetDim(4);
+  const bool fine = false;
+  const auto nb = IndexRange{0, 0};
+  auto coords = pmb->coords;
+
+  pmb->par_for_bndry(
+      "DiodeX1BC", nb, domain, parthenon::TopologicalElement::CC, coarse, fine,
+      KOKKOS_LAMBDA(const int &, const int &k, const int &j, const int &i) {
+        for (int v = 0; v < nvar; ++v) {
+          cons(v, k, j, i) = cons(v, k, j, ref);
+        }
+
+        const Real rho = cons(IDN, k, j, i);
+        const Real m2 = cons(IM2, k, j, i);
+        const Real m3 = cons(IM3, k, j, i);
+        const Real copied_m1 = cons(IM1, k, j, i);
+        const Real copied_b1 = cons(IB1, k, j, i);
+        const Real copied_b2 = cons(IB2, k, j, i);
+        const Real copied_b3 = cons(IB3, k, j, i);
+        const Real copied_ke =
+            rho > 0.0 ? 0.5 * (copied_m1 * copied_m1 + m2 * m2 + m3 * m3) / rho : 0.0;
+        const Real copied_me =
+            0.5 * (copied_b1 * copied_b1 + copied_b2 * copied_b2 + copied_b3 * copied_b3);
+        Real internal_e = cons(IEN, k, j, i) - copied_ke - copied_me;
+        if (internal_e < 0.0) {
+          internal_e = 0.0;
+        }
+
+        Real m1 = copied_m1;
+        if ((SIDE == BCSide::Inner && m1 > 0.0) || (SIDE == BCSide::Outer && m1 < 0.0)) {
+          m1 = 0.0;
+        }
+        cons(IM1, k, j, i) = m1;
+
+        const Real x_ghost = coords.Xc<1>(i);
+        if (interior_cells >= 3) {
+          cons(IB1, k, j, i) =
+              ExtrapolateQuadraticX1(cons, coords, IB1, k, j, ref, interior_step, x_ghost);
+          cons(IB2, k, j, i) =
+              ExtrapolateQuadraticX1(cons, coords, IB2, k, j, ref, interior_step, x_ghost);
+          cons(IB3, k, j, i) =
+              ExtrapolateQuadraticX1(cons, coords, IB3, k, j, ref, interior_step, x_ghost);
+        } else if (interior_cells >= 2) {
+          cons(IB1, k, j, i) =
+              ExtrapolateLinearX1(cons, coords, IB1, k, j, ref, interior_step, x_ghost);
+          cons(IB2, k, j, i) =
+              ExtrapolateLinearX1(cons, coords, IB2, k, j, ref, interior_step, x_ghost);
+          cons(IB3, k, j, i) =
+              ExtrapolateLinearX1(cons, coords, IB3, k, j, ref, interior_step, x_ghost);
+        }
+
+        const Real b1 = cons(IB1, k, j, i);
+        const Real b2 = cons(IB2, k, j, i);
+        const Real b3 = cons(IB3, k, j, i);
+        const Real new_ke = rho > 0.0 ? 0.5 * (m1 * m1 + m2 * m2 + m3 * m3) / rho : 0.0;
+        const Real new_me = 0.5 * (b1 * b1 + b2 * b2 + b3 * b3);
+        cons(IEN, k, j, i) = internal_e + new_ke + new_me;
       });
 }
 
