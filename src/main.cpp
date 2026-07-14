@@ -124,6 +124,17 @@ int main(int argc, char *argv[]) {
     pman.app_input->MeshBlockUserWorkBeforeOutput =
         current_sheet_thermal::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = current_sheet_thermal::ProblemInitPackageData;
+  } else if (problem == "marz_sheet") {
+    pman.app_input->InitUserMeshData = marz_sheet::InitUserMeshData;
+    pman.app_input->ProblemGenerator = marz_sheet::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput = marz_sheet::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = marz_sheet::ProblemInitPackageData;
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x1,
+                                              "marz_sheet_x1_inner",
+                                              marz_sheet::DrivenInnerX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x1,
+                                              "marz_sheet_x1_outer",
+                                              marz_sheet::DrivenOuterX1);
   } else if (problem == "refinement_temp_test") {
     pman.app_input->ProblemGenerator = refinement_temp_test::ProblemGenerator;
   } else if (problem == "breakRefinementBoundaries") {

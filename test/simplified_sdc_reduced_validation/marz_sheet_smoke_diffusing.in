@@ -1,0 +1,102 @@
+# AthenaPK reduced validation input: reduced MARZ-sheet driven smoke test
+
+<comment>
+problem = reduced MARZ-like current-sheet driven coupled smoke validation
+
+<job>
+problem_id = marz_sheet
+
+<diffusion>
+integrator = unsplit
+resistivity = ohmic
+resistivity_coeff = spitzer
+spitzer_log_lambda = 10.0
+spitzer_eta_max = 5e6
+cfl = 0.2
+cfl_diff_heat = 0.2
+
+<cooling>
+enable_cooling = tabular
+table_filename = inputs/cooling_tables/spk_aluminum_LTE.cooling
+lambda_units_cgs = 1.0
+integrator = rk12
+max_iter = 1000
+cfl = 0.2
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
+
+<thermal_source_solver>
+enabled = true
+iterations = 2
+source_predictor = end_of_interface_state
+store_diagnostics = true
+couple_cooling = true
+couple_ohmic_heating = true
+couple_conduction = false
+couple_viscous_heating = false
+
+<units>
+code_length_cgs = 1.0
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/marz_sheet>
+B0 = 4.0e5
+Bguide = 5.0e4
+rho_in = 4.5e-3
+T_in = 1.16e6
+v_in = 2.0e6
+delta_B = 0.02
+delta_v = 0.03
+rho_bump = 0.0
+delta_rho = 0.02
+seed_amplitude = 2.0e2
+seed_mode_number = 1
+delta_seed = 0.05
+use_driven_x1_boundaries = true
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+nx1 = 96
+x1min = -0.18
+x1max = 0.18
+ix1_bc = marz_sheet_x1_inner
+ox1_bc = marz_sheet_x1_outer
+nx2 = 64
+x2min = -0.18
+x2max = 0.18
+ix2_bc = periodic
+ox2_bc = periodic
+nx3 = 1
+x3min = -0.01
+x3max = 0.01
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/meshblock>
+nx1 = 96
+nx2 = 64
+nx3 = 1
+
+<parthenon/time>
+integrator = rk1
+cfl = 0.2
+nlim = 3
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = none
+reconstruction = dc
+gamma = 1.66666666
+first_order_flux_correct = false
+Tfloor = 1.0e4
+mean_molecular_weight = 27
+Z = 13
+
+<parthenon/output0>
+file_type = hdf5
+dn = 1
+id = out0
+variables = cons, T, eta, curlBz, dt_cool_local, dt_heat_local, thermal_sdc_iter_count

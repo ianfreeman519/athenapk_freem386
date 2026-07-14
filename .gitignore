@@ -2,6 +2,15 @@
 build*/
 CMakeFiles/*
 test*/
+!test/
+test/*
+!test/simplified_sdc_reduced_validation/
+test/simplified_sdc_reduced_validation/*
+!test/simplified_sdc_reduced_validation/marz_sheet_initial_state.in
+!test/simplified_sdc_reduced_validation/marz_sheet_smoke_diffusing.in
+!test/simplified_sdc_reduced_validation/marz_sheet_smoke_undriven.in
+!test/simplified_sdc_reduced_validation/validate_marz_sheet_initial_state.py
+!test/simplified_sdc_reduced_validation/validate_marz_sheet_smoke.py
 
 # Cloudy
 cloudy/
