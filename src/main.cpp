@@ -119,6 +119,25 @@ int main(int argc, char *argv[]) {
     pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x2,
                                               "pulsed_source_x2_outer",
                                               pulsed_reconnection::PulsedSourceOuterX2);
+  } else if (problem == "tophat_pulsed_reconnection") {
+    pman.app_input->InitUserMeshData = tophat_pulsed_reconnection::InitUserMeshData;
+    pman.app_input->ProblemGenerator = tophat_pulsed_reconnection::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput =
+        tophat_pulsed_reconnection::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = tophat_pulsed_reconnection::ProblemInitPackageData;
+    Hydro::ProblemSourceFirstOrder = tophat_pulsed_reconnection::Driving;
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x1,
+                                              "tophat_pulsed_diode_x1_inner",
+                                              tophat_pulsed_reconnection::PulsedDiodeInnerX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x1,
+                                              "tophat_pulsed_diode_x1_outer",
+                                              tophat_pulsed_reconnection::PulsedDiodeOuterX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x2,
+                                              "tophat_pulsed_source_x2_inner",
+                                              tophat_pulsed_reconnection::TophatSourceInnerX2);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x2,
+                                              "tophat_pulsed_source_x2_outer",
+                                              tophat_pulsed_reconnection::TophatSourceOuterX2);
   } else if (problem == "current_sheet_thermal") {
     pman.app_input->ProblemGenerator = current_sheet_thermal::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput =
@@ -135,6 +154,25 @@ int main(int argc, char *argv[]) {
     pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x1,
                                               "marz_sheet_x1_outer",
                                               marz_sheet::DrivenOuterX1);
+  } else if (problem == "marz_arrays") {
+    pman.app_input->InitUserMeshData = marz_arrays::InitUserMeshData;
+    pman.app_input->PreStepMeshUserWorkInLoop = marz_arrays::PreStepMeshUserWorkInLoop;
+    pman.app_input->ProblemGenerator = marz_arrays::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput = marz_arrays::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = marz_arrays::ProblemInitPackageData;
+    Hydro::ProblemSourceFirstOrder = marz_arrays::DriveSource;
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x1,
+                                              "marz_arrays_x1_inner",
+                                              marz_arrays::DrivenInnerX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x1,
+                                              "marz_arrays_x1_outer",
+                                              marz_arrays::DrivenOuterX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x2,
+                                              "marz_arrays_x2_inner",
+                                              marz_arrays::SourceInnerX2);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x2,
+                                              "marz_arrays_x2_outer",
+                                              marz_arrays::SourceOuterX2);
   } else if (problem == "refinement_temp_test") {
     pman.app_input->ProblemGenerator = refinement_temp_test::ProblemGenerator;
   } else if (problem == "breakRefinementBoundaries") {

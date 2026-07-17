@@ -48,6 +48,19 @@ void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 void PulsedSourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 void PulsedSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 }
+namespace tophat_pulsed_reconnection {
+using namespace parthenon::driver::prelude;
+void InitUserMeshData(Mesh *mesh, ParameterInput *pin);
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+void PulsedDiodeInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void TophatSourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void TophatSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+}
 namespace current_sheet_thermal {
 using namespace parthenon::driver::prelude;
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
@@ -64,6 +77,20 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm);
 void DrivenInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 void DrivenOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+}
+namespace marz_arrays {
+using namespace parthenon::driver::prelude;
+void InitUserMeshData(Mesh *mesh, ParameterInput *pin);
+void PreStepMeshUserWorkInLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm);
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void DriveSource(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+void DrivenInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void DrivenOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void SourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void SourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 }
 namespace refinement_temp_test {
 using namespace parthenon::driver::prelude;

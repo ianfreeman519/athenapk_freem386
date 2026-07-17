@@ -1,0 +1,684 @@
+//========================================================================================
+// AthenaPK - a performance portable block structured AMR MHD code
+// Copyright (c) 2021-2023, Athena Parthenon Collaboration. All rights reserved.
+// Licensed under the 3-Clause License (the "LICENSE")
+//========================================================================================
+//! \file tophat_pulsed_reconnection.cpp
+//! \brief Problem generator mimicking pulsed power reconnection experiments.
+//!
+//! REFERENCE: Trust Me Bro I made it all up
+//========================================================================================
+
+// Parthenon headers
+#include "Kokkos_MathematicalFunctions.hpp"
+#include "kokkos_abstraction.hpp"
+#include "mesh/domain.hpp"
+#include "mesh/mesh.hpp"
+#include "parthenon_array_generic.hpp"
+#include "utils/error_checking.hpp"
+#include <parthenon/driver.hpp>
+#include <parthenon/package.hpp>
+
+// AthenaPK headers
+#include "../main.hpp"
+#include "../units.hpp"
+#include "../bvals/boundary_conditions_apk.hpp"
+#include "../eos/adiabatic_glmmhd.hpp"
+#include "../hydro/diffusion/diffusion.hpp" // For storing eta later
+#include "../hydro/srcterms/tabular_cooling.hpp"
+
+namespace tophat_pulsed_reconnection {
+using namespace parthenon::driver::prelude;
+using namespace parthenon::package::prelude;
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfile(const Real r, const Real width);
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfile(const Real r, const Real width, const Real falloff);
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfileDerivative(const Real r, const Real width);
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfileDerivative(const Real r, const Real width, const Real falloff);
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatEnclosedCurrentFraction(const Real r, const Real core_width,
+                                   const Real initial_expansion_width);
+
+KOKKOS_INLINE_FUNCTION
+Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number);
+
+namespace {
+
+struct TophatSourceParams {
+  Real gm1;
+  Real k_b;
+  Real m_bar;
+  Real rho_background_cgs;
+  Real T_background;
+  Real array_separation_cgs;
+  Real core_width_cgs;
+  Real initial_expansion_width_cgs;
+  Real rho_array_cgs;
+  Real T_array;
+  Real current_peak_MA;
+  Real v0_cgs;
+  int azimuthal_mode_number;
+  Real density_perturb_amplitude;
+  Real temperature_perturb_amplitude;
+  Real current_field_prefac;
+  Real rho_background;
+  Real array_separation;
+  Real core_width;
+  Real initial_expansion_width;
+  Real rho_array;
+  Real T_array_code;
+  Real v0;
+};
+
+struct TophatSourceState {
+  Real rho;
+  Real pressure;
+  Real v1;
+  Real v2;
+  Real v3;
+  Real B1;
+  Real B2;
+  Real B3;
+};
+
+KOKKOS_INLINE_FUNCTION
+bool InTophatSupport(const TophatSourceParams &params, const Real x, const Real y) {
+  const Real support_radius = params.core_width;
+  const Real d = params.array_separation / 2.0;
+
+  for (int A = -1; A <= 1; A += 2) {
+    const Real y_local = y - A * d;
+    const Real r2 = SQR(x) + SQR(y_local);
+    if (r2 < SQR(support_radius)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TophatSourceParams g_source_params{};
+bool g_source_params_initialized = false;
+
+TophatSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg,
+                                    ParameterInput *pin) {
+  TophatSourceParams params{};
+  params.gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  params.rho_background_cgs =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "rho_background", 1e-6);
+  params.T_background =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "T_background", 1e2);
+  params.array_separation_cgs =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "array_separation", 4.0);
+  params.core_width_cgs =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "core_width", 1.0);
+  params.initial_expansion_width_cgs = pin->GetOrAddReal(
+      "problem/tophat_pulsed_reconnection", "initial_expansion_width", 1.0);
+  params.rho_array_cgs =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "rho_array", 1e-3);
+  params.T_array =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "T_array", 1.1e4);
+  params.current_peak_MA =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "current_peak_MA", 1.0);
+  params.v0_cgs = pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "v0", 1.0e6);
+  params.azimuthal_mode_number =
+      pin->GetOrAddInteger("problem/tophat_pulsed_reconnection", "N", 0);
+  params.density_perturb_amplitude =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "density_perturb_amplitude", 0.0);
+  params.temperature_perturb_amplitude =
+      pin->GetOrAddReal("problem/tophat_pulsed_reconnection", "temperature_perturb_amplitude",
+                        0.0);
+
+  PARTHENON_REQUIRE(params.array_separation_cgs > 0.0,
+                    "problem/tophat_pulsed_reconnection/array_separation must be positive.");
+  PARTHENON_REQUIRE(params.core_width_cgs > 0.0,
+                    "problem/tophat_pulsed_reconnection/core_width must be positive.");
+  PARTHENON_REQUIRE(
+      params.initial_expansion_width_cgs > 0.0,
+      "problem/tophat_pulsed_reconnection/initial_expansion_width must be positive.");
+  PARTHENON_REQUIRE(params.current_peak_MA >= 0.0,
+                    "problem/tophat_pulsed_reconnection/current_peak_MA must be nonnegative.");
+  PARTHENON_REQUIRE(params.azimuthal_mode_number >= 0,
+                    "problem/tophat_pulsed_reconnection/N must be nonnegative.");
+
+  const auto units = hydro_pkg->Param<Units>("units");
+  params.k_b = units.k_boltzmann();
+  params.m_bar =
+      pin->GetReal("hydro", "mean_molecular_weight") * units.atomic_mass_unit();
+  const Real current_peak_ampere = params.current_peak_MA * 1.0e6;
+  params.current_field_prefac = 0.2 * current_peak_ampere * units.cm() * units.gauss();
+  params.rho_background = params.rho_background_cgs * units.g_cm3();
+  params.array_separation = params.array_separation_cgs * units.cm();
+  params.core_width = params.core_width_cgs * units.cm();
+  params.initial_expansion_width = params.initial_expansion_width_cgs * units.cm();
+  params.rho_array = params.rho_array_cgs * units.g_cm3();
+  params.T_array_code = params.T_array;
+  params.v0 = params.v0_cgs * units.cm_s();
+
+  return params;
+}
+
+void EnsureSourceParamsInitialized(const std::shared_ptr<StateDescriptor> &hydro_pkg,
+                                   ParameterInput *pin) {
+  if (!g_source_params_initialized) {
+    g_source_params = LoadSourceParams(hydro_pkg, pin);
+    g_source_params_initialized = true;
+  }
+}
+
+KOKKOS_INLINE_FUNCTION
+TophatSourceState EvaluateSourceState(const TophatSourceParams &params, const Real x,
+                                      const Real y) {
+  TophatSourceState state{};
+  const Real d = params.array_separation / 2.0;
+  Real thermo_profile_sum = 0.0;
+  Real density_profile_sum = 0.0;
+
+  for (int A = -1; A <= 1; A += 2) {
+    const Real y_center = A * d;
+    const Real y_local = y - y_center;
+    const Real r2 = SQR(x) + SQR(y_local);
+    const Real r = sqrt(r2);
+    const Real theta = atan2(y_local, x);
+    const Real thermo_profile =
+        TopHatProfile(r, params.core_width, params.initial_expansion_width);
+    const Real dthermo_profile_dr =
+        TopHatProfileDerivative(r, params.core_width, params.initial_expansion_width);
+    const Real density_perturbation = AzimuthalThermoPerturbation(
+        theta, params.density_perturb_amplitude, params.azimuthal_mode_number);
+    const Real temperature_perturbation = AzimuthalThermoPerturbation(
+        theta, params.temperature_perturb_amplitude, params.azimuthal_mode_number);
+    thermo_profile_sum += thermo_profile * temperature_perturbation;
+    density_profile_sum += thermo_profile * density_perturbation;
+
+    if (r > 0.0) {
+      const Real inv_r = 1.0 / r;
+      const Real xhat = x * inv_r;
+      const Real yhat = y_local * inv_r;
+      state.v1 += params.v0 * dthermo_profile_dr * xhat;
+      state.v2 += params.v0 * dthermo_profile_dr * yhat;
+    }
+
+    const Real enclosed_fraction =
+        TopHatEnclosedCurrentFraction(r, params.core_width, params.initial_expansion_width);
+    const Real Bphi_over_r =
+        r2 > 0.0 ? params.current_field_prefac * enclosed_fraction / r2
+                 : params.current_field_prefac /
+                       (SQR(params.core_width) + params.core_width * params.initial_expansion_width +
+                        (2.0 / 7.0) * SQR(params.initial_expansion_width));
+    state.B1 += -Bphi_over_r * y_local;
+    state.B2 += Bphi_over_r * x;
+  }
+
+  state.rho = params.rho_background + params.rho_array * density_profile_sum;
+  const Real T = params.T_background + params.T_array_code * thermo_profile_sum;
+  state.pressure = T * params.k_b * state.rho / params.m_bar;
+  return state;
+}
+
+template <bool INNER_X2>
+void TophatSourceX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  auto pmb = mbd->GetBlockPointer();
+  auto cons = mbd->PackVariables(std::vector<std::string>{"cons"}, coarse);
+  const auto params = g_source_params;
+  const bool fine = false;
+  const auto nb = IndexRange{0, 0};
+  constexpr auto domain = INNER_X2 ? IndexDomain::inner_x2 : IndexDomain::outer_x2;
+  auto coords = pmb->coords;
+
+  pmb->par_for_bndry(
+      "TophatSourceX2", nb, domain, parthenon::TopologicalElement::CC, coarse, fine,
+      KOKKOS_LAMBDA(const int &, const int &k, const int &j, const int &i) {
+        const Real x = coords.Xc<1>(i);
+        const Real y = coords.Xc<2>(j);
+        const auto state = EvaluateSourceState(params, x, y);
+        cons(IDN, k, j, i) = state.rho;
+        cons(IM1, k, j, i) = state.rho * state.v1;
+        cons(IM2, k, j, i) = state.rho * state.v2;
+        cons(IM3, k, j, i) = state.rho * state.v3;
+        cons(IB1, k, j, i) = state.B1;
+        cons(IB2, k, j, i) = state.B2;
+        cons(IB3, k, j, i) = state.B3;
+        cons(IEN, k, j, i) =
+            state.pressure / params.gm1 +
+            0.5 * (SQR(state.B1) + SQR(state.B2) + SQR(state.B3) +
+                   state.rho *
+                       (SQR(state.v1) + SQR(state.v2) + SQR(state.v3)));
+      });
+}
+
+void ApplyDriving(MeshData<Real> *md) {
+  auto cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  const auto params = g_source_params;
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "tophat_pulsed_reconnection::Driving",
+      parthenon::DevExecSpace(), 0, cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e,
+      ib.s, ib.e, KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        auto cons = cons_pack(b);
+        const auto &coords = cons_pack.GetCoords(b);
+        const Real x = coords.Xc<1>(i);
+        const Real y = coords.Xc<2>(j);
+
+        if (!InTophatSupport(params, x, y)) {
+          return;
+        }
+
+        const auto state = EvaluateSourceState(params, x, y);
+        cons(IDN, k, j, i) = state.rho;
+        cons(IM1, k, j, i) = state.rho * state.v1;
+        cons(IM2, k, j, i) = state.rho * state.v2;
+        cons(IM3, k, j, i) = state.rho * state.v3;
+        cons(IB1, k, j, i) = state.B1;
+        cons(IB2, k, j, i) = state.B2;
+        cons(IB3, k, j, i) = state.B3;
+        cons(IEN, k, j, i) =
+            state.pressure / params.gm1 +
+            0.5 * (SQR(state.B1) + SQR(state.B2) + SQR(state.B3) +
+                   state.rho *
+                       (SQR(state.v1) + SQR(state.v2) + SQR(state.v3)));
+        if (cons.GetDim(4) > IPS) {
+          cons(IPS, k, j, i) = 0.0;
+        }
+      });
+}
+
+} // namespace
+
+void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real /*dt*/) {
+  ApplyDriving(md);
+}
+
+KOKKOS_INLINE_FUNCTION
+void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
+                                  Real &dprofile_dr) {
+  const Real exponent = -SQR(r / width);
+  profile = exp(fmax(-700.0, exponent));
+  dprofile_dr = (-2.0 * r / SQR(width)) * profile;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfile(const Real r, const Real width) {
+  return TopHatProfile(r, width, width);
+}
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfile(const Real r, const Real width, const Real falloff) {
+  if (r <= width) {
+    return 1.0;
+  } else if (r >= width + falloff) {
+    return 0.0;
+  } else {
+    const Real x = (r - width) / falloff;
+    const Real x2 = x * x;
+    const Real x3 = x2 * x;
+    const Real x4 = x3 * x;
+    const Real x5 = x4 * x;
+    return 1.0 - 10.0 * x3 + 15.0 * x4 - 6.0 * x5;
+  }
+}
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfileDerivative(const Real r, const Real width) {
+  return TopHatProfileDerivative(r, width, width);
+}
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatProfileDerivative(const Real r, const Real width, const Real falloff) {
+  if (r <= width || r >= width + falloff) {
+    return 0.0;
+  } else {
+    const Real x = (r - width) / falloff;
+    const Real one_minus_x = 1.0 - x;
+    return (-30.0 / falloff) * x * x * one_minus_x * one_minus_x;
+  }
+}
+
+KOKKOS_INLINE_FUNCTION
+Real TopHatEnclosedCurrentFraction(const Real r, const Real core_width,
+                                   const Real initial_expansion_width) {
+  const Real total_integral =
+      0.5 * SQR(core_width) + 0.5 * core_width * initial_expansion_width +
+      (1.0 / 7.0) * SQR(initial_expansion_width);
+
+  if (r <= 0.0) {
+    return 0.0;
+  } else if (r <= core_width) {
+    return 0.5 * SQR(r) / total_integral;
+  } else if (r >= core_width + initial_expansion_width) {
+    return 1.0;
+  } else {
+    const Real x = (r - core_width) / initial_expansion_width;
+    const Real x2 = x * x;
+    const Real x4 = x2 * x2;
+    const Real x5 = x4 * x;
+    const Real x6 = x5 * x;
+    const Real x7 = x6 * x;
+    const Real int_profile_dx = x - 2.5 * x4 + 3.0 * x5 - x6;
+    const Real int_x_profile_dx = 0.5 * x2 - 2.0 * x5 + 2.5 * x6 - (6.0 / 7.0) * x7;
+    const Real enclosed_integral = 0.5 * SQR(core_width) +
+                                   initial_expansion_width * core_width * int_profile_dx +
+                                   SQR(initial_expansion_width) * int_x_profile_dx;
+    return enclosed_integral / total_integral;
+  }
+}
+
+KOKKOS_INLINE_FUNCTION
+Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number) {
+  const Real phase = static_cast<Real>(mode_number) * theta;
+  const Real cos_phase = cos(phase);
+  return 1 + p * cos_phase;
+}
+
+// Setting up derived fields:
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hydro_pkg) {
+  // Defining m to pass to the field definition
+  auto m = Metadata({Metadata::Cell, Metadata::OneCopy}, std::vector<int>({1}));
+  // Field definitions
+  hydro_pkg->AddField("curlBx", m);
+  hydro_pkg->AddField("curlBy", m);
+  hydro_pkg->AddField("curlBz", m);
+  hydro_pkg->AddField("divv", m);
+  hydro_pkg->AddField("beta", m);
+  hydro_pkg->AddField("eta", m);
+  hydro_pkg->AddField("T", m);
+  hydro_pkg->AddField("dt_diff_local", m);
+  hydro_pkg->AddField("dt_heat_local", m);
+  hydro_pkg->AddField("dt_cool_local", m);
+  hydro_pkg->AddField("dt_hyp_fms", m);
+  hydro_pkg->AddField("dt_hyp_cs", m);
+}
+
+void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
+  auto hydro_pkg = mesh->packages.Get("Hydro");
+  g_source_params = LoadSourceParams(hydro_pkg, pin);
+  g_source_params_initialized = true;
+}
+
+// storing the curls just before output
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm) {
+  auto &coords = pmb->coords;
+  auto &mbd = pmb->meshblock_data.Get();
+  auto &u = mbd->Get("cons").data;
+  auto &w = mbd->Get("prim").data;
+  auto &data = pmb->meshblock_data.Get(); // This is for grabbing the meshblocks defined above
+  auto hydro_pkg = pmb->packages.Get("Hydro"); // This is for grabbing the calculated diffusivity
+  const bool has_ohm_diff = hydro_pkg->AllParams().hasKey("ohm_diff");
+  OhmicDiffusivity ohm_diff_dev(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0, 0.0,
+                                0.0, 0.0, -1.0, 0.0); // Dummy init
+  if (has_ohm_diff) {
+    ohm_diff_dev = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+  }
+
+  // Get derived fields
+  auto &curlBx = data->Get("curlBx").data;
+  auto &curlBy = data->Get("curlBy").data;
+  auto &curlBz = data->Get("curlBz").data;
+  auto &divv = data->Get("divv").data;
+  auto &eta_field    = data->Get("eta").data;
+  auto &beta_field   = data->Get("beta").data;
+  auto &T_field      = data->Get("T").data;
+  auto &dt_diff_local = data->Get("dt_diff_local").data;
+  auto &dt_heat_local = data->Get("dt_heat_local").data;
+  auto &dt_cool_local = data->Get("dt_cool_local").data;
+  auto &dt_hyp_fms = data->Get("dt_hyp_fms").data;
+  auto &dt_hyp_cs = data->Get("dt_hyp_cs").data;
+  Real mbar = hydro_pkg->Param<Real>("mbar");
+  const auto units = hydro_pkg->Param<Units>("units");
+  Real k_B = units.k_boltzmann();
+  const auto cfl_hyp = hydro_pkg->Param<Real>("cfl");
+  const auto cfl_diff = hydro_pkg->Param<Real>("cfl_diff");
+  const auto cfl_diff_heat = hydro_pkg->Param<Real>("cfl_diff_heat");
+  const auto cfl_cool = pin->GetOrAddReal("cooling", "cfl", 0.1);
+  const auto eos = hydro_pkg->Param<AdiabaticGLMMHDEOS>("eos");
+  const auto gm1 = hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
+  const auto ndim = pmb->pmy_mesh->ndim;
+  const auto resistivity = hydro_pkg->Param<Resistivity>("resistivity");
+  const auto enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
+  cooling::CoolingTableObj cooling_table_obj;
+  if (enable_cooling == Cooling::tabular) {
+    cooling_table_obj =
+        hydro_pkg->Param<cooling::TabularCooling>("tabular_cooling").GetCoolingTableObj();
+  }
+
+  Real fac = 0.5;
+  if (ndim == 2) {
+    fac = 0.25;
+  } else if (ndim == 3) {
+    fac = 1.0 / 6.0;
+  }
+
+  // Getting indices
+  IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
+  IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::entire);
+  IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::entire);
+  IndexRange ib_int = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb_int = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb_int = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+
+  // Actually computing and storing curl data
+  pmb->par_for(
+      "tophat_pulsed_reconnection::UserWorkBeforeOutput", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int k, const int j, const int i) {
+        const Real inf = std::numeric_limits<Real>::infinity();
+        Real term1, term2;
+        // curlBx = dBzdy - dBydz
+        term1 = (u(IB3,k,j+1,i) - u(IB3,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1));
+        term2 = (u(IB2,k+1,j,i) - u(IB2,k-1,j,i))/(coords.Xc<3>(k+1)-coords.Xc<3>(k-1));
+        curlBx(k, j, i) = term1 - term2;
+        // curlBy = dBxdz - dBzdx
+        term1 = (u(IB1,k+1,j,i) - u(IB1,k-1,j,i))/(coords.Xc<3>(k+1)-coords.Xc<3>(k-1));
+        term2 = (u(IB3,k,j,i+1) - u(IB3,k,j,i-1))/(coords.Xc<1>(i+1)-coords.Xc<1>(i-1));
+        curlBy(k, j, i) = term1 - term2;
+        // curlBz = dBydx - dBxdy
+        term1 = (u(IB2,k,j,i+1) - u(IB2,k,j,i-1))/(coords.Xc<1>(i+1)-coords.Xc<1>(i-1));
+        term2 = (u(IB1,k,j+1,i) - u(IB1,k,j-1,i))/(coords.Xc<2>(j+1)-coords.Xc<2>(j-1));
+        curlBz(k, j, i) = term1 - term2;
+        // divv = dvx/dx + dvy/dy + dvz/dz
+        Real dvx_dx = (w(IV1, k, j, i+1) - w(IV1, k, j, i-1)) / (coords.Xc<1>(i+1) - coords.Xc<1>(i-1));
+        Real dvy_dy = (w(IV2, k, j+1, i) - w(IV2, k, j-1, i)) / (coords.Xc<2>(j+1) - coords.Xc<2>(j-1));
+        Real dvz_dz = (w(IV3, k+1, j, i) - w(IV3, k-1, j, i)) / (coords.Xc<3>(k+1) - coords.Xc<3>(k-1));
+        divv(k, j, i) = dvx_dx + dvy_dy + dvz_dz;
+
+        // Calculating temperature 
+        Real rho = u(IDN, k, j, i);
+        Real p = w(IPR, k, j, i);
+        T_field(k, j, i) = mbar / k_B * p / rho;
+
+        // beta = p / (B^2 / 2) - in Heaviside Lorentz units, this is p / (0.5 * 4pi * B^2)
+        beta_field(k, j, i) = p / (0.5 * 4 * M_PI * (SQR(u(IB1,k,j,i)) + SQR(u(IB2,k,j,i)) + SQR(u(IB3,k,j,i))));
+        Real eta_val = 0.0;
+        if (has_ohm_diff) {
+          eta_val = ohm_diff_dev.Get(p, rho);
+        }
+        eta_field(k, j, i) = eta_val;
+
+        // Resistive diffusion timestep: cfl * fac * min(dx^2 / eta)
+        Real dt_diff_val = inf;
+        if (resistivity != Resistivity::none && eta_val > 0.0) {
+          dt_diff_val = SQR(coords.Dxc<1>(k, j, i)) / eta_val;
+          if (ndim >= 2) {
+            dt_diff_val = fmin(dt_diff_val, SQR(coords.Dxc<2>(k, j, i)) / eta_val);
+          }
+          if (ndim >= 3) {
+            dt_diff_val = fmin(dt_diff_val, SQR(coords.Dxc<3>(k, j, i)) / eta_val);
+          }
+          dt_diff_val = cfl_diff * fac * dt_diff_val;
+        }
+        dt_diff_local(k, j, i) = dt_diff_val;
+
+        // Ohmic heating timestep: cfl * e_int / (eta j^2)
+        Real dBzdy = ndim > 1 ? (u(IB3, k, j + 1, i) - u(IB3, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        Real dBydz = ndim > 2 ? (u(IB2, k + 1, j, i) - u(IB2, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBxdz = ndim > 2 ? (u(IB1, k + 1, j, i) - u(IB1, k - 1, j, i)) /
+                                    (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                              : 0.0;
+        Real dBzdx = (u(IB3, k, j, i + 1) - u(IB3, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBydx = (u(IB2, k, j, i + 1) - u(IB2, k, j, i - 1)) /
+                     (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        Real dBxdy = ndim > 1 ? (u(IB1, k, j + 1, i) - u(IB1, k, j - 1, i)) /
+                                    (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                              : 0.0;
+        Real jx = dBzdy - dBydz;
+        Real jy = dBxdz - dBzdx;
+        Real jz = dBydx - dBxdy;
+        Real j_squared = SQR(jx) + SQR(jy) + SQR(jz);
+        Real internal_e_dens = p / gm1;
+        Real dt_heat_val =
+            (resistivity != Resistivity::none && eta_val > 0.0 && j_squared > 0.0)
+                ? cfl_diff_heat * fabs(internal_e_dens / (eta_val * j_squared))
+                : inf;
+        dt_heat_local(k, j, i) = dt_heat_val;
+
+        // Cooling timestep: cfl * |e / de_dt|
+        Real internal_e_spec = p / (rho * gm1);
+        Real de_dt_cool = enable_cooling == Cooling::tabular
+                              ? cooling_table_obj.DeDt(internal_e_spec, rho)
+                              : 0.0;
+        Real dt_cool_val = (enable_cooling == Cooling::tabular && de_dt_cool != 0.0 &&
+                            internal_e_spec >= eos.GetInternalEFloor())
+                               ? fabs(cfl_cool * internal_e_spec / de_dt_cool)
+                               : inf;
+        dt_cool_local(k, j, i) = dt_cool_val;
+
+        // Hyperbolic timestep estimates using fast magnetosonic and sound speeds
+        Real prim_local[(NHYDRO)];
+        prim_local[IDN] = rho;
+        prim_local[IV1] = w(IV1, k, j, i);
+        prim_local[IV2] = w(IV2, k, j, i);
+        prim_local[IV3] = w(IV3, k, j, i);
+        prim_local[IPR] = p;
+        Real cs = eos.SoundSpeed(prim_local);
+        Real lambda_fms_x =
+            eos.FastMagnetosonicSpeed(rho, p, u(IB1, k, j, i), u(IB2, k, j, i), u(IB3, k, j, i));
+        Real dt_hyp_fms_val = coords.Dxc<1>(k, j, i) / (fabs(prim_local[IV1]) + lambda_fms_x);
+        Real dt_hyp_cs_val = coords.Dxc<1>(k, j, i) / (fabs(prim_local[IV1]) + cs);
+        if (ndim > 1) {
+          Real lambda_fms_y =
+              eos.FastMagnetosonicSpeed(rho, p, u(IB2, k, j, i), u(IB3, k, j, i), u(IB1, k, j, i));
+          dt_hyp_fms_val =
+              fmin(dt_hyp_fms_val, coords.Dxc<2>(k, j, i) / (fabs(prim_local[IV2]) + lambda_fms_y));
+          dt_hyp_cs_val =
+              fmin(dt_hyp_cs_val, coords.Dxc<2>(k, j, i) / (fabs(prim_local[IV2]) + cs));
+        }
+        if (ndim > 2) {
+          Real lambda_fms_z =
+              eos.FastMagnetosonicSpeed(rho, p, u(IB3, k, j, i), u(IB1, k, j, i), u(IB2, k, j, i));
+          dt_hyp_fms_val =
+              fmin(dt_hyp_fms_val, coords.Dxc<3>(k, j, i) / (fabs(prim_local[IV3]) + lambda_fms_z));
+          dt_hyp_cs_val =
+              fmin(dt_hyp_cs_val, coords.Dxc<3>(k, j, i) / (fabs(prim_local[IV3]) + cs));
+        }
+        dt_hyp_fms(k, j, i) = cfl_hyp * dt_hyp_fms_val;
+        dt_hyp_cs(k, j, i) = cfl_hyp * dt_hyp_cs_val;
+      }
+  );
+}
+
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
+  IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+
+  auto &mbd = pmb->meshblock_data.Get();
+  auto &u = mbd->Get("cons").data;
+  auto hydro_pkg = pmb->packages.Get("Hydro");
+  EnsureSourceParamsInitialized(hydro_pkg, pin);
+  const auto params = g_source_params;
+
+  // Printing out input values for slurm records
+  if (parthenon::Globals::my_rank == 0 && pmb->gid == 0) {
+    std::cout << "========================================" << std::endl;
+    std::cout << "Input parameters:" << std::endl;
+    std::cout << "gamma ================== " << pin->GetReal("hydro", "gamma") << std::endl;
+    std::cout << "rho_background [g/cm^3]= " << params.rho_background_cgs << std::endl;
+    std::cout << "T_background [K] ======= " << params.T_background << std::endl;
+    std::cout << "array_separation [cm] == " << params.array_separation_cgs << std::endl;
+    std::cout << "core_width [cm] ======== " << params.core_width_cgs << std::endl;
+    std::cout << "initial_expansion [cm] = " << params.initial_expansion_width_cgs
+              << std::endl;
+    std::cout << "rho_array [g/cm^3] ===== " << params.rho_array_cgs << std::endl;
+    std::cout << "T_array [K] ============ " << params.T_array << std::endl;
+    std::cout << "current_peak [MA] ====== " << params.current_peak_MA << std::endl;
+    std::cout << "v0 [cm/s] ============== " << params.v0_cgs << std::endl;
+    std::cout << "azimuthal mode N ======= " << params.azimuthal_mode_number << std::endl;
+    std::cout << "dens. perturb. amplitude=" << params.density_perturb_amplitude << std::endl;
+    std::cout << "temp perturb. amplitude =" << params.temperature_perturb_amplitude
+              << std::endl;
+    std::cout << "Converted code units:" << std::endl;
+    std::cout << "current field prefac === " << params.current_field_prefac << std::endl;
+    std::cout << "rho_background [code] == " << params.rho_background << std::endl;
+    std::cout << "array_separation [code]  " << params.array_separation << std::endl;
+    std::cout << "core_width [code] ====== " << params.core_width << std::endl;
+    std::cout << "initial_expansion [code] " << params.initial_expansion_width << std::endl;
+    std::cout << "rho_array [code] ======= " << params.rho_array << std::endl;
+    std::cout << "T_array [code] ========= " << params.T_array_code << std::endl;
+    std::cout << "v0 [code] ============== " << params.v0 << std::endl;
+    std::cout << "thermo profile ========= 1 for r<=core, quintic taper over expansion"
+              << std::endl;
+    std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
+    std::cout << "velocity profile ======= v = v0*d(profile)/dr * r_hat" << std::endl;
+    std::cout << "magnetic current ======= Jz follows same top-hat profile" << std::endl;
+    std::cout << "magnetic field ========= Bphi from enclosed top-hat current" << std::endl;
+  }
+
+  auto &coords = pmb->coords;
+
+  pmb->par_for(
+      "ProblemGenerator::tophat_pulsed_reconnection", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int k, const int j, const int i) {
+        const Real x = coords.Xc<1>(i);
+        const Real y = coords.Xc<2>(j);
+        const auto state = EvaluateSourceState(params, x, y);
+
+        u(IDN, k, j, i) = state.rho;
+        u(IM1, k, j, i) = state.rho * state.v1;
+        u(IM2, k, j, i) = state.rho * state.v2;
+        u(IM3, k, j, i) = state.rho * state.v3;
+        u(IB1, k, j, i) = state.B1;
+        u(IB2, k, j, i) = state.B2;
+        u(IB3, k, j, i) = state.B3;
+
+        u(IEN, k, j, i) =
+            state.pressure / params.gm1 +
+            0.5 * (SQR(state.B1) + SQR(state.B2) + SQR(state.B3) +
+                   state.rho *
+                       (SQR(state.v1) + SQR(state.v2) + SQR(state.v3)));
+      });
+}
+
+void TophatSourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  TophatSourceX2<true>(mbd, coarse);
+}
+
+void TophatSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  TophatSourceX2<false>(mbd, coarse);
+}
+
+void PulsedDiodeInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  Hydro::BoundaryFunction::DiodeX1BC<parthenon::BoundaryFunction::BCSide::Inner>(mbd,
+                                                                                  coarse);
+}
+
+void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  Hydro::BoundaryFunction::DiodeX1BC<parthenon::BoundaryFunction::BCSide::Outer>(mbd,
+                                                                                  coarse);
+}
+
+} // namespace tophat_pulsed_reconnection

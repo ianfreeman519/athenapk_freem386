@@ -1,0 +1,94 @@
+# AthenaPK reduced validation input: MARZ-like array-source initial-state dump
+
+<comment>
+problem = MARZ-like array-source initial-state validation
+
+<job>
+problem_id = marz_arrays
+
+<diffusion>
+integrator = unsplit
+resistivity = ohmic
+resistivity_coeff = spitzer
+spitzer_log_lambda = 10.0
+spitzer_eta_max = 5e6
+cfl = 0.2
+cfl_diff_heat = 0.2
+
+<cooling>
+enable_cooling = none
+
+<units>
+code_length_cgs = 1.0
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/marz_arrays>
+current_peak_MA = 1.0
+drive_model = static
+drive_t0 = 0.0
+drive_rise_time = 2.0e-9
+drive_plateau_fraction = 1.0
+rho_array = 4.5e-3
+rho_background = 1.0e-5
+T_array = 3.5e5
+T_background = 2.5e4
+v_array = 2.5e6
+array_separation = 0.32
+width_thermo = 0.05
+width_magnetic = 0.035
+source_radius = 0.05
+source_taper_width = 0.02
+source_mass_replenish_time = 5.0e-10
+source_momentum_replenish_time = 2.5e-10
+source_energy_replenish_time = 5.0e-10
+source_field_replenish_time = 2.5e-10
+seed_mode_number = 0
+density_perturb_amplitude = 0.0
+temperature_perturb_amplitude = 0.0
+use_driven_x2_boundaries = true
+use_diode_x1_boundaries = true
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+nx1 = 96
+x1min = -0.24
+x1max = 0.24
+ix1_bc = marz_arrays_x1_inner
+ox1_bc = marz_arrays_x1_outer
+nx2 = 96
+x2min = -0.24
+x2max = 0.24
+ix2_bc = marz_arrays_x2_inner
+ox2_bc = marz_arrays_x2_outer
+nx3 = 1
+x3min = -0.01
+x3max = 0.01
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/meshblock>
+nx1 = 96
+nx2 = 96
+nx3 = 1
+
+<parthenon/time>
+integrator = rk1
+nlim = 0
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.66666666
+first_order_flux_correct = false
+Tfloor = 1.0e4
+mean_molecular_weight = 27
+Z = 13
+
+<parthenon/output0>
+file_type = hdf5
+id = out0
+variables = cons, prim, T, curlBz

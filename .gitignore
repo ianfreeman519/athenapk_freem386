@@ -11,6 +11,12 @@ test/simplified_sdc_reduced_validation/*
 !test/simplified_sdc_reduced_validation/marz_sheet_smoke_undriven.in
 !test/simplified_sdc_reduced_validation/validate_marz_sheet_initial_state.py
 !test/simplified_sdc_reduced_validation/validate_marz_sheet_smoke.py
+!test/simplified_sdc_reduced_validation/marz_arrays_initial_state.in
+!test/simplified_sdc_reduced_validation/marz_arrays_sheet_formation_smoke.in
+!test/simplified_sdc_reduced_validation/marz_arrays_ramp_vs_static_compare.in
+!test/simplified_sdc_reduced_validation/validate_marz_arrays_initial_state.py
+!test/simplified_sdc_reduced_validation/validate_marz_arrays_smoke.py
+!test/simplified_sdc_reduced_validation/validate_marz_arrays_ramp_vs_static.py
 
 # Cloudy
 cloudy/
