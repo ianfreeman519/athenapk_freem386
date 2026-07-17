@@ -1,0 +1,101 @@
+# AthenaPK reduced validation input: reduced MARZ-sheet initial-state dump
+
+<comment>
+problem = reduced MARZ-like current-sheet initial-state validation
+
+<job>
+problem_id = marz_sheet
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic
+resistivity_coeff = spitzer
+spitzer_log_lambda = 10.0
+spitzer_eta_max = 5e6
+cfl = 0.2
+cfl_diff_heat = 0.2
+
+<cooling>
+enable_cooling = tabular
+table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling
+lambda_units_cgs = 1.0
+integrator = rk12
+max_iter = 1000
+cfl = 0.45
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
+
+
+<units>
+code_length_cgs = 1.0
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/marz_sheet>
+B0 = 4.0e5
+Bguide = 5.0e2
+rho_in = 4.5e-3
+T_in = 1.16e6
+v_in = 2.0e6
+delta_B = 0.02
+delta_v = 0.03
+rho_bump = 0.0
+delta_rho = 0.02
+seed_amplitude = 2.0e2
+seed_mode_number = 1
+delta_seed = 0.05
+use_driven_x1_boundaries = true
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+nx1 = 640
+x1min = -0.4
+x1max = 0.4
+ix1_bc = marz_sheet_x1_inner
+ox1_bc = marz_sheet_x1_outer
+
+nx2 = 320
+x2min = -0.8
+x2max = 0.8
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3 = 1
+x3min = -0.01
+x3max = 0.01
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/meshblock>
+nx1 = 64
+nx2 = 32
+nx3 = 1
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.20
+tlim = 3e-7
+dt_max = 1e-8
+
+<hydro>
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.66666666
+first_order_flux_correct = false
+Tfloor = 1.0e4
+mean_molecular_weight = 6.75
+Z = 13
+
+<parthenon/output0>
+file_type = hdf5
+dt = 1e-9
+id = out0
+variables = cons, prim, curlBx, curlBy, curlBz, beta, eta, divv, dt_hyp_fms, dt_hyp_cs, dt_cool_local, dt_heat_local, eint_stage_start, eint_adv, eint_sdc, thermal_ae, thermal_src_lagged, thermal_src_pre_flux, thermal_src_ohmic_pre_flux, thermal_src_ohmic, thermal_src_total, thermal_sdc_iter_count
+
+<parthenon/output1>
+file_type = rst
+dt = 1e-8
+id = out1
