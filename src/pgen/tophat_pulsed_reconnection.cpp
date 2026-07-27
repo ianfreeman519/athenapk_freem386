@@ -202,8 +202,8 @@ TophatSourceState EvaluateSourceState(const TophatSourceParams &params, const Re
       const Real inv_r = 1.0 / r;
       const Real xhat = x * inv_r;
       const Real yhat = y_local * inv_r;
-      state.v1 += params.v0 * dthermo_profile_dr * xhat;
-      state.v2 += params.v0 * dthermo_profile_dr * yhat;
+      state.v1 += -1 * params.v0 * dthermo_profile_dr * xhat;
+      state.v2 += -1 * params.v0 * dthermo_profile_dr * yhat;
     }
 
     const Real enclosed_fraction =
