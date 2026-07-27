@@ -91,8 +91,10 @@ Real TophatProfileEnclosedCurrentFraction(const Real r, const Real width, const 
     const Real x6 = x5 * x;
     const Real x7 = x6 * x;
     const Real int_profile_dx = x - 2.5 * x4 + 3.0 * x5 - x6;
+    const Real int_x_profile_dx =
+        0.5 * x2 - 2.0 * x5 + 2.5 * x6 - (6.0 / 7.0) * x7;
     return (0.5 * SQR(width) + width * falloff * int_profile_dx +
-            (1.0 / 7.0) * SQR(falloff)) /
+            SQR(falloff) * int_x_profile_dx) /
            total_integral;
   }
 }
@@ -331,7 +333,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
   Real peak_current_MA = pin->GetOrAddReal("problem/tophat", "peak_current_MA", 1.0);
   Real v0 = pin->GetOrAddReal("problem/tophat", "v0", 1.0e6);
-  Real azimuthal_mode_number = pin->GetOrAddReal("problem/tophat", "N", 0.0);
+  int azimuthal_mode_number = pin->GetOrAddInteger("problem/tophat", "N", 0);
   Real density_perturb_amplitude = pin->GetOrAddReal("problem/tophat", "density_perturb_amplitude", 0.0);
   Real temperature_perturb_amplitude = pin->GetOrAddReal("problem/tophat", "temperature_perturb_amplitude", 0.0);
 
@@ -369,16 +371,16 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
       KOKKOS_LAMBDA(const int k, const int j, const int i) {
         const Real x = coords.Xc<1>(i);  // Grabbing local x and y coordinates for the cell
         const Real y = coords.Xc<2>(j);
+        Real density_profile_sum = 0.0;
+        Real temperature_profile_sum = 0.0;
+        Real v1 = 0.0;
+        Real v2 = 0.0;
 
         // Initializing local field data to the background
-        cons(IDN, k, j, i) = rho_background;
-        cons(IM1, k, j, i) = 0.0;
-        cons(IM2, k, j, i) = 0.0;
         cons(IM3, k, j, i) = 0.0;
         cons(IB1, k, j, i) = 0.0;
         cons(IB2, k, j, i) = 0.0;
         cons(IB3, k, j, i) = 0.0;
-        cons(IEN, k, j, i) = rho_background * k_b * T_background / m_bar / gm1;
         
         // Looping over both arrays (one at y=-1*d, one at y=+1*d)
         for (int A = -1; A <= 1; A += 2) {
@@ -393,7 +395,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           const Real temperature_perturb = AzimuthalThermoPerturbation(theta, temperature_perturb_amplitude, azimuthal_mode_number);
 
           const Real local_density = rho_array * tophat_profile * density_perturb;
-          const Real local_temperature = T_array * tophat_profile * temperature_perturb;
+          density_profile_sum += tophat_profile * density_perturb;
+          temperature_profile_sum += tophat_profile * temperature_perturb;
 
           // Finding r_hat in cartesian for velocity
           const Real inv_r = (r > 0.0) ? 1.0 / r : 0.0;
@@ -406,13 +409,16 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           const Real Bphi = (r > 0.0) ? magnetic_prefactor * enclosed_fraction / r : 0.0;
 
           // Adding contributions from this array to the local cell values
-          cons(IDN, k, j, i) += local_density;
-          cons(IM1, k, j, i) += local_density * v0 * dtophat_dr * xhat;
-          cons(IM2, k, j, i) += local_density * v0 * dtophat_dr * yhat;
+          v1 += -v0 * dtophat_dr * xhat;
+          v2 += -v0 * dtophat_dr * yhat;
           cons(IB1, k, j, i) += -Bphi * yhat;  // Bx = -Bphi * sin(theta)
           cons(IB2, k, j, i) += Bphi * xhat;  // By = Bphi * cos(theta)
-          cons(IEN, k, j, i) += local_density * k_b * local_temperature / m_bar / gm1;    // Kinetic and magnetic will be included later
         }
+        cons(IDN, k, j, i) = rho_background + rho_array * density_profile_sum;
+        const Real temperature = T_background + T_array * temperature_profile_sum;
+        cons(IM1, k, j, i) = cons(IDN, k, j, i) * v1;
+        cons(IM2, k, j, i) = cons(IDN, k, j, i) * v2;
+        cons(IEN, k, j, i) = cons(IDN, k, j, i) * k_b * temperature / m_bar / gm1;
         cons(IEN, k, j, i) +=
             0.5 * (SQR(cons(IB1, k, j, i)) + SQR(cons(IB2, k, j, i)) +
                    SQR(cons(IB3, k, j, i)) +

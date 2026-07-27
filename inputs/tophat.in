@@ -1,10 +1,10 @@
-# AthenaPK reduced validation input: reduced MARZ-sheet initial-state dump
+# AthenaPK input: tophat problem
 
 <comment>
-problem = reduced MARZ-like current-sheet initial-state validation
+problem = tophat current-sheet validation
 
 <job>
-problem_id = tophat_pulsed_reconnection
+problem_id = tophat
 
 <diffusion>
 integrator = rkl2
@@ -31,15 +31,15 @@ code_length_cgs = 1.0
 code_mass_cgs = 1.0
 code_time_cgs = 1.0
 
-<problem/tophat_pulsed_reconnection>
+<problem/tophat>
 rho_background = 1e-6
 T_background = 1e3
 array_separation = 4.0
 core_width = 1.0
-initial_expansion_width = 0.6
+initial_expansion_width = 0.5
 rho_array = 1e-3
-T_array = 0.99e5
-current_peak_MA = 1.0
+T_array = 1.1e4
+peak_current_MA = 1.0
 v0 = 1e6
 N = 0
 temperature_perturb_amplitude = 0
@@ -49,14 +49,14 @@ density_perturb_amplitude = 0
 refinement = none
 nghost = 2
 nx1 = 320
-x1min = -1.9
-x1max = 1.9
-ix1_bc = outflow
-ox1_bc = outflow
+x1min = -2.0
+x1max = 2.0
+ix1_bc = tophat_diode_x1_inner
+ox1_bc = tophat_diode_x1_outer
 
 nx2 = 320
-x2min = -1.9
-x2max = 1.9
+x2min = -2.0
+x2max = 2.0
 ix2_bc = periodic
 ox2_bc = periodic
 
