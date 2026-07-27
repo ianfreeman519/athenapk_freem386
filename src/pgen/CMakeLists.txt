@@ -29,6 +29,7 @@ target_sources(athenaPK PRIVATE
     breakRefinementBoundaries.cpp
     periodic_reconnection.cpp
     pulsed_reconnection.cpp
+    tophat.cpp
     tophat_pulsed_reconnection.cpp
     MARZ.cpp
     marz_arrays.cpp

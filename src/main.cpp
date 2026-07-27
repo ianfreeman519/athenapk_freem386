@@ -138,6 +138,16 @@ int main(int argc, char *argv[]) {
     pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x2,
                                               "tophat_pulsed_source_x2_outer",
                                               tophat_pulsed_reconnection::TophatSourceOuterX2);
+  } else if (problem == "tophat") {
+    pman.app_input->ProblemGenerator = tophat::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput = tophat::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = tophat::ProblemInitPackageData;
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x1,
+                                              "tophat_diode_x1_inner",
+                                              tophat::DiodeInnerX1);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x1,
+                                              "tophat_diode_x1_outer",
+                                              tophat::DiodeOuterX1);
   } else if (problem == "current_sheet_thermal") {
     pman.app_input->ProblemGenerator = current_sheet_thermal::ProblemGenerator;
     pman.app_input->MeshBlockUserWorkBeforeOutput =

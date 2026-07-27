@@ -61,6 +61,15 @@ void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 void TophatSourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 void TophatSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 }
+namespace tophat {
+using namespace parthenon::driver::prelude;
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+void DiodeInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void DiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+}
 namespace current_sheet_thermal {
 using namespace parthenon::driver::prelude;
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
