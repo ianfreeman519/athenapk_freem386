@@ -107,6 +107,7 @@ int main(int argc, char *argv[]) {
     pman.app_input->MeshBlockUserWorkBeforeOutput =
         pulsed_reconnection::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = pulsed_reconnection::ProblemInitPackageData;
+    Hydro::ProblemSourceFirstOrder = pulsed_reconnection::Driving;
     pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x1,
                                               "pulsed_diode_x1_inner",
                                               pulsed_reconnection::PulsedDiodeInnerX1);

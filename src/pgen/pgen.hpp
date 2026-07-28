@@ -41,6 +41,7 @@ using namespace parthenon::driver::prelude;
 void InitUserMeshData(Mesh *mesh, ParameterInput *pin);
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt);
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm);
 void PulsedDiodeInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);

@@ -68,6 +68,12 @@ struct PulsedSourceParams {
   Real array_separation;
   Real width_thermo;
   Real width_magnetic;
+  bool drive_enable;
+  Real drive_radius_factor;
+  Real drive_tau_B;
+  Real drive_tau_p;
+  Real drive_max_fractional_B_change_per_step;
+  Real drive_max_fractional_p_change_per_step;
 };
 
 struct PulsedSourceState {
@@ -83,6 +89,8 @@ struct PulsedSourceState {
 
 PulsedSourceParams g_source_params{};
 bool g_source_params_initialized = false;
+Real g_last_measured_current_upper = 0.0;
+Real g_last_measured_current_lower = 0.0;
 
 template <bool INNER_X1>
 void PulsedOutflowDiodeX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
@@ -133,6 +141,33 @@ void PulsedOutflowDiodeX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse
       });
 }
 
+KOKKOS_INLINE_FUNCTION
+Real DriveSupportWeight(const Real r2, const Real width_magnetic,
+                        const Real drive_radius) {
+  if (r2 > SQR(drive_radius)) {
+    return 0.0;
+  }
+  return exp(fmax(-700.0, -r2 / SQR(width_magnetic)));
+}
+
+KOKKOS_INLINE_FUNCTION
+Real TargetPeakCurrentDensity(const PulsedSourceParams &params) {
+  return 2.0 * params.current_field_prefac / SQR(params.width_magnetic);
+}
+
+KOKKOS_INLINE_FUNCTION
+void AddSingleWireMagneticField(const Real current_field_prefac, const Real width_magnetic,
+                                const Real x, const Real y_local, const Real weight,
+                                Real &B1, Real &B2) {
+  const Real r2 = SQR(x) + SQR(y_local);
+  const Real enclosed_fraction = 1.0 - exp(-r2 / SQR(width_magnetic));
+  const Real Bphi_over_r =
+      r2 > 0.0 ? current_field_prefac * enclosed_fraction / r2
+               : current_field_prefac / SQR(width_magnetic);
+  B1 += -weight * Bphi_over_r * y_local;
+  B2 += weight * Bphi_over_r * x;
+}
+
 PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg,
                                     ParameterInput *pin) {
   PulsedSourceParams params{};
@@ -164,6 +199,10 @@ PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydr
                         0.0);
   params.force_balance =
       pin->GetOrAddReal("problem/pulsed_reconnection", "force_balance", 1.0);
+  params.drive_enable =
+      pin->GetOrAddBoolean("problem/pulsed_reconnection", "drive_enable", false);
+  params.drive_radius_factor =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "drive_radius_factor", 1.0);
 
   PARTHENON_REQUIRE(params.width_thermo_cgs > 0.0,
                     "problem/pulsed_reconnection/w must be positive.");
@@ -188,6 +227,29 @@ PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydr
   params.array_separation = params.array_separation_cgs * units.cm();
   params.width_thermo = params.width_thermo_cgs * units.cm();
   params.width_magnetic = params.width_magnetic_cgs * units.cm();
+  const Real drive_time_default =
+      1.0e-2 * params.width_magnetic / fmax(params.v0, std::numeric_limits<Real>::min());
+  params.drive_tau_B =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "drive_tau_B", drive_time_default);
+  params.drive_tau_p =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "drive_tau_p", params.drive_tau_B);
+  params.drive_max_fractional_B_change_per_step = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_max_fractional_B_change_per_step", 0.1);
+  params.drive_max_fractional_p_change_per_step = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_max_fractional_p_change_per_step", 0.1);
+
+  PARTHENON_REQUIRE(params.drive_radius_factor > 0.0,
+                    "problem/pulsed_reconnection/drive_radius_factor must be positive.");
+  PARTHENON_REQUIRE(params.drive_tau_B > 0.0,
+                    "problem/pulsed_reconnection/drive_tau_B must be positive.");
+  PARTHENON_REQUIRE(params.drive_tau_p > 0.0,
+                    "problem/pulsed_reconnection/drive_tau_p must be positive.");
+  PARTHENON_REQUIRE(params.drive_max_fractional_B_change_per_step > 0.0,
+                    "problem/pulsed_reconnection/"
+                    "drive_max_fractional_B_change_per_step must be positive.");
+  PARTHENON_REQUIRE(params.drive_max_fractional_p_change_per_step > 0.0,
+                    "problem/pulsed_reconnection/"
+                    "drive_max_fractional_p_change_per_step must be positive.");
 
   return params;
 }
@@ -209,7 +271,7 @@ PulsedSourceState EvaluateSourceState(const PulsedSourceParams &params, const Re
   Real density_profile_sum = 0.0;
   Real force_balance_pressure_sum = 0.0;
 
-  for (int A = -101; A <= 101; A += 2) {
+  for (int A = -1; A <= 1; A += 2) {
     const Real y_center = A * d;
     const Real y_local = y - y_center;
     const Real r2 = SQR(x) + SQR(y_local);
@@ -349,6 +411,152 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
   g_source_params_initialized = true;
 }
 
+void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real dt) {
+  const auto params = g_source_params;
+  if (!params.drive_enable || dt <= 0.0) {
+    return;
+  }
+
+  auto cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
+  IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  const Real drive_radius = params.drive_radius_factor * params.width_magnetic;
+  const int i_tile = std::max(1, ib.e - ib.s - 1);
+
+  Kokkos::Array<Real, 4> sums{{0.0, 0.0, 0.0, 0.0}};
+  Kokkos::parallel_reduce(
+      "pulsed_reconnection::MeasureDrivenCurrent",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+          {0, kb.s, jb.s + 1, ib.s + 1},
+          {cons_pack.GetDim(5), kb.e + 1, jb.e, ib.e}, {1, 1, 1, i_tile}),
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i, Real &lw_lower,
+                    Real &lj_lower, Real &lw_upper, Real &lj_upper) {
+        const auto &coords = cons_pack.GetCoords(b);
+        const Real curlBz =
+            (cons_pack(b, IB2, k, j, i + 1) - cons_pack(b, IB2, k, j, i - 1)) /
+                (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1)) -
+            (cons_pack(b, IB1, k, j + 1, i) - cons_pack(b, IB1, k, j - 1, i)) /
+                (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1));
+        const Real x = coords.Xc<1>(i);
+        const Real y = coords.Xc<2>(j);
+        const Real volume = coords.CellVolume(k, j, i);
+        const Real half_sep = 0.5 * params.array_separation;
+
+        const Real y_lower = y + half_sep;
+        const Real w_lower = DriveSupportWeight(SQR(x) + SQR(y_lower), params.width_magnetic,
+                                                drive_radius);
+        lw_lower += w_lower * volume;
+        lj_lower += w_lower * curlBz * volume;
+
+        const Real y_upper = y - half_sep;
+        const Real w_upper = DriveSupportWeight(SQR(x) + SQR(y_upper), params.width_magnetic,
+                                                drive_radius);
+        lw_upper += w_upper * volume;
+        lj_upper += w_upper * curlBz * volume;
+      },
+      sums[0], sums[1], sums[2], sums[3]);
+
+#ifdef MPI_PARALLEL
+  PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, sums.data(), 4, MPI_PARTHENON_REAL,
+                                    MPI_SUM, MPI_COMM_WORLD));
+#endif
+
+  const Real measured_lower = sums[0] > 0.0 ? sums[1] / sums[0] : 0.0;
+  const Real measured_upper = sums[2] > 0.0 ? sums[3] / sums[2] : 0.0;
+  g_last_measured_current_lower = measured_lower;
+  g_last_measured_current_upper = measured_upper;
+
+  const Real target_current = TargetPeakCurrentDensity(params);
+  const Real prefac_scale = 0.5 * SQR(params.width_magnetic);
+  const Real max_prefac_step =
+      params.drive_max_fractional_B_change_per_step * params.current_field_prefac;
+  const Real raw_prefac_lower = (target_current - measured_lower) * prefac_scale;
+  const Real raw_prefac_upper = (target_current - measured_upper) * prefac_scale;
+  const Real relax_B = fmin(dt / params.drive_tau_B, 1.0);
+  const Real applied_prefac_lower =
+      fmax(-max_prefac_step, fmin(max_prefac_step, raw_prefac_lower * relax_B));
+  const Real applied_prefac_upper =
+      fmax(-max_prefac_step, fmin(max_prefac_step, raw_prefac_upper * relax_B));
+  const Real relax_p = fmin(dt / params.drive_tau_p, 1.0);
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "pulsed_reconnection::Driving", parthenon::DevExecSpace(), 0,
+      cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        auto cons = cons_pack(b);
+        const auto &coords = cons_pack.GetCoords(b);
+        const Real x = coords.Xc<1>(i);
+        const Real y = coords.Xc<2>(j);
+        const Real half_sep = 0.5 * params.array_separation;
+
+        Real dB1 = 0.0;
+        Real dB2 = 0.0;
+        Real target_pressure = params.T_background * params.k_b * params.rho_background /
+                               params.m_bar;
+        Real support_weight = 0.0;
+
+        {
+          const Real y_local = y + half_sep;
+          const Real weight = DriveSupportWeight(SQR(x) + SQR(y_local), params.width_magnetic,
+                                                 drive_radius);
+          support_weight = fmax(support_weight, weight);
+          AddSingleWireMagneticField(applied_prefac_lower, params.width_magnetic, x, y_local,
+                                     weight, dB1, dB2);
+          target_pressure += params.T_wire * params.k_b * params.rho_wire /
+                             params.m_bar * weight;
+          target_pressure +=
+              params.force_balance *
+              ForceBalanceProfile(sqrt(SQR(x) + SQR(y_local)), params.width_magnetic,
+                                  params.current_field_prefac);
+        }
+        {
+          const Real y_local = y - half_sep;
+          const Real weight = DriveSupportWeight(SQR(x) + SQR(y_local), params.width_magnetic,
+                                                 drive_radius);
+          support_weight = fmax(support_weight, weight);
+          AddSingleWireMagneticField(applied_prefac_upper, params.width_magnetic, x, y_local,
+                                     weight, dB1, dB2);
+          target_pressure += params.T_wire * params.k_b * params.rho_wire /
+                             params.m_bar * weight;
+          target_pressure +=
+              params.force_balance *
+              ForceBalanceProfile(sqrt(SQR(x) + SQR(y_local)), params.width_magnetic,
+                                  params.current_field_prefac);
+        }
+
+        if (support_weight <= 0.0) {
+          return;
+        }
+
+        const Real rho = cons(IDN, k, j, i);
+        const Real old_B1 = cons(IB1, k, j, i);
+        const Real old_B2 = cons(IB2, k, j, i);
+        const Real old_B3 = cons(IB3, k, j, i);
+        const Real old_me = 0.5 * (SQR(old_B1) + SQR(old_B2) + SQR(old_B3));
+        const Real new_B1 = old_B1 + dB1;
+        const Real new_B2 = old_B2 + dB2;
+        const Real new_me = 0.5 * (SQR(new_B1) + SQR(new_B2) + SQR(old_B3));
+        const Real ke = rho > 0.0
+                            ? 0.5 * (SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
+                                     SQR(cons(IM3, k, j, i))) /
+                                  rho
+                            : 0.0;
+        const Real current_pressure =
+            fmax(0.0, params.gm1 * (cons(IEN, k, j, i) - ke - old_me));
+        const Real max_dp =
+            params.drive_max_fractional_p_change_per_step * fmax(target_pressure, 1.0e-20);
+        const Real raw_dp = (target_pressure - current_pressure) * support_weight * relax_p;
+        const Real applied_dp = fmax(-max_dp, fmin(max_dp, raw_dp));
+        const Real new_internal_energy =
+            fmax(0.0, current_pressure / params.gm1 + applied_dp / params.gm1);
+
+        cons(IB1, k, j, i) = new_B1;
+        cons(IB2, k, j, i) = new_B2;
+        cons(IEN, k, j, i) = new_internal_energy + ke + new_me;
+      });
+}
+
 // storing the curls just before output
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm) {
@@ -394,6 +602,12 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   if (enable_cooling == Cooling::tabular) {
     cooling_table_obj =
         hydro_pkg->Param<cooling::TabularCooling>("tabular_cooling").GetCoolingTableObj();
+  }
+
+  if (g_source_params.drive_enable && parthenon::Globals::my_rank == 0 && pmb->gid == 0) {
+    std::cout << "pulsed_reconnection drive currents [code] lower/upper = "
+              << g_last_measured_current_lower << " / " << g_last_measured_current_upper
+              << std::endl;
   }
 
   Real fac = 0.5;
