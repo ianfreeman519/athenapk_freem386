@@ -70,8 +70,10 @@ struct PulsedSourceParams {
   Real width_magnetic;
   bool drive_enable;
   Real drive_radius_factor;
+  Real drive_tau_rho;
   Real drive_tau_B;
   Real drive_tau_p;
+  Real drive_max_fractional_rho_change_per_step;
   Real drive_max_fractional_B_change_per_step;
   Real drive_max_fractional_p_change_per_step;
 };
@@ -229,10 +231,14 @@ PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydr
   params.width_magnetic = params.width_magnetic_cgs * units.cm();
   const Real drive_time_default =
       1.0e-2 * params.width_magnetic / fmax(params.v0, std::numeric_limits<Real>::min());
+  params.drive_tau_rho =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "drive_tau_rho", drive_time_default);
   params.drive_tau_B =
       pin->GetOrAddReal("problem/pulsed_reconnection", "drive_tau_B", drive_time_default);
   params.drive_tau_p =
       pin->GetOrAddReal("problem/pulsed_reconnection", "drive_tau_p", params.drive_tau_B);
+  params.drive_max_fractional_rho_change_per_step = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_max_fractional_rho_change_per_step", 0.1);
   params.drive_max_fractional_B_change_per_step = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_max_fractional_B_change_per_step", 0.1);
   params.drive_max_fractional_p_change_per_step = pin->GetOrAddReal(
@@ -240,10 +246,15 @@ PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydr
 
   PARTHENON_REQUIRE(params.drive_radius_factor > 0.0,
                     "problem/pulsed_reconnection/drive_radius_factor must be positive.");
+  PARTHENON_REQUIRE(params.drive_tau_rho > 0.0,
+                    "problem/pulsed_reconnection/drive_tau_rho must be positive.");
   PARTHENON_REQUIRE(params.drive_tau_B > 0.0,
                     "problem/pulsed_reconnection/drive_tau_B must be positive.");
   PARTHENON_REQUIRE(params.drive_tau_p > 0.0,
                     "problem/pulsed_reconnection/drive_tau_p must be positive.");
+  PARTHENON_REQUIRE(params.drive_max_fractional_rho_change_per_step > 0.0,
+                    "problem/pulsed_reconnection/"
+                    "drive_max_fractional_rho_change_per_step must be positive.");
   PARTHENON_REQUIRE(params.drive_max_fractional_B_change_per_step > 0.0,
                     "problem/pulsed_reconnection/"
                     "drive_max_fractional_B_change_per_step must be positive.");
@@ -478,6 +489,7 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
       fmax(-max_prefac_step, fmin(max_prefac_step, raw_prefac_lower * relax_B));
   const Real applied_prefac_upper =
       fmax(-max_prefac_step, fmin(max_prefac_step, raw_prefac_upper * relax_B));
+  const Real relax_rho = fmin(dt / params.drive_tau_rho, 1.0);
   const Real relax_p = fmin(dt / params.drive_tau_p, 1.0);
 
   parthenon::par_for(
@@ -489,11 +501,10 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
         const Real x = coords.Xc<1>(i);
         const Real y = coords.Xc<2>(j);
         const Real half_sep = 0.5 * params.array_separation;
+        const auto target_state = EvaluateSourceState(params, x, y);
 
         Real dB1 = 0.0;
         Real dB2 = 0.0;
-        Real target_pressure = params.T_background * params.k_b * params.rho_background /
-                               params.m_bar;
         Real support_weight = 0.0;
 
         {
@@ -503,12 +514,6 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
           support_weight = fmax(support_weight, weight);
           AddSingleWireMagneticField(applied_prefac_lower, params.width_magnetic, x, y_local,
                                      weight, dB1, dB2);
-          target_pressure += params.T_wire * params.k_b * params.rho_wire /
-                             params.m_bar * weight;
-          target_pressure +=
-              params.force_balance *
-              ForceBalanceProfile(sqrt(SQR(x) + SQR(y_local)), params.width_magnetic,
-                                  params.current_field_prefac);
         }
         {
           const Real y_local = y - half_sep;
@@ -517,12 +522,6 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
           support_weight = fmax(support_weight, weight);
           AddSingleWireMagneticField(applied_prefac_upper, params.width_magnetic, x, y_local,
                                      weight, dB1, dB2);
-          target_pressure += params.T_wire * params.k_b * params.rho_wire /
-                             params.m_bar * weight;
-          target_pressure +=
-              params.force_balance *
-              ForceBalanceProfile(sqrt(SQR(x) + SQR(y_local)), params.width_magnetic,
-                                  params.current_field_prefac);
         }
 
         if (support_weight <= 0.0) {
@@ -530,6 +529,11 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
         }
 
         const Real rho = cons(IDN, k, j, i);
+        const Real max_drho =
+            params.drive_max_fractional_rho_change_per_step * fmax(target_state.rho, 1.0e-20);
+        const Real raw_drho = (target_state.rho - rho) * support_weight * relax_rho;
+        const Real applied_drho = fmax(-max_drho, fmin(max_drho, raw_drho));
+        const Real new_rho = fmax(params.rho_background, rho + applied_drho);
         const Real old_B1 = cons(IB1, k, j, i);
         const Real old_B2 = cons(IB2, k, j, i);
         const Real old_B3 = cons(IB3, k, j, i);
@@ -537,23 +541,24 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
         const Real new_B1 = old_B1 + dB1;
         const Real new_B2 = old_B2 + dB2;
         const Real new_me = 0.5 * (SQR(new_B1) + SQR(new_B2) + SQR(old_B3));
-        const Real ke = rho > 0.0
-                            ? 0.5 * (SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
-                                     SQR(cons(IM3, k, j, i))) /
-                                  rho
-                            : 0.0;
+        const Real momentum_sq = SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
+                                 SQR(cons(IM3, k, j, i));
+        const Real ke = rho > 0.0 ? 0.5 * momentum_sq / rho : 0.0;
         const Real current_pressure =
             fmax(0.0, params.gm1 * (cons(IEN, k, j, i) - ke - old_me));
         const Real max_dp =
-            params.drive_max_fractional_p_change_per_step * fmax(target_pressure, 1.0e-20);
-        const Real raw_dp = (target_pressure - current_pressure) * support_weight * relax_p;
+            params.drive_max_fractional_p_change_per_step * fmax(target_state.pressure, 1.0e-20);
+        const Real raw_dp =
+            (target_state.pressure - current_pressure) * support_weight * relax_p;
         const Real applied_dp = fmax(-max_dp, fmin(max_dp, raw_dp));
         const Real new_internal_energy =
             fmax(0.0, current_pressure / params.gm1 + applied_dp / params.gm1);
 
+        cons(IDN, k, j, i) = new_rho;
         cons(IB1, k, j, i) = new_B1;
         cons(IB2, k, j, i) = new_B2;
-        cons(IEN, k, j, i) = new_internal_energy + ke + new_me;
+        const Real new_ke = new_rho > 0.0 ? 0.5 * momentum_sq / new_rho : 0.0;
+        cons(IEN, k, j, i) = new_internal_energy + new_ke + new_me;
       });
 }
 
