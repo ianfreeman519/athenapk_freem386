@@ -61,10 +61,10 @@ rho_background = 1e-6       # Near vacuum
 T_wire = 0.99e5      # Inflow temperature
 T_background = 1e4  # Background temperature
 v0 = 50e5       # flow speed away from wires
-w = 0.50     # Gaussian profile standard deviation
-w_B = 0.50   # Gaussian current profile width
-array_separation = 6
-N = 200
+w = 1.0     # Gaussian profile standard deviation
+w_B = 1.5   # Gaussian current profile width
+array_separation = 4
+N = 10
 
 density_perturb_amplitude = 0.01
 temperature_perturb_amplitude = 0.0
@@ -74,17 +74,17 @@ temperature_perturb_amplitude = 0.0
 refinement = none
 nghost = 2
 
-nx1 = 1536   
-x1min = -9
-x1max = 9
-ix1_bc = outflow
-ox1_bc = outflow
+nx1 = 512
+x1min = -4.0
+x1max =  4.0
+ix1_bc = pulsed_diode_x1_inner
+ox1_bc = pulsed_diode_x1_outer
 
-nx2 = 1024
-x2min = -6
-x2max = 6
-ix2_bc = outflow
-ox2_bc = outflow
+nx2 = 256
+x2min = -2.0
+x2max =  2.0
+ix2_bc = periodic
+ox2_bc = periodic
 
 nx3 = 1
 x3min = -1.0
@@ -93,7 +93,7 @@ ix3_bc = periodic
 ox3_bc = periodic
 
 <parthenon/meshblock>
-nx1 = 64
+nx1 = 128
 nx2 = 64
 nx3 = 1
 
@@ -112,8 +112,9 @@ riemann = hlld
 reconstruction = plm
 gamma = 1.6666666666666667
 first_order_flux_correct = true
+dfloor = 1e-8
 Tfloor = 1e3
-mean_molecular_weight = 27
+mean_molecular_weight = 6.25
 Z = 13
 
 
@@ -123,6 +124,7 @@ file_type = hdf5
 dt = 1e-9
 id = out0
 variables = cons, prim, curlBx, curlBy, curlBz, beta, eta, divv, dt_hyp_fms, dt_hyp_cs, dt_cool_local, dt_heat_local
+
 <parthenon/output1>
 file_type = rst
 dt = 1e-8
