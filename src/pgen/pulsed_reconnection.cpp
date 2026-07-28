@@ -78,6 +78,55 @@ struct PulsedSourceState {
 PulsedSourceParams g_source_params{};
 bool g_source_params_initialized = false;
 
+template <bool INNER_X1>
+void PulsedOutflowDiodeX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
+  auto pmb = mbd->GetBlockPointer();
+  const auto &bounds = coarse ? pmb->c_cellbounds : pmb->cellbounds;
+  const auto &range = bounds.GetBoundsI(IndexDomain::interior);
+  const int ref = INNER_X1 ? range.s : range.e;
+
+  auto cons = mbd->PackVariables(std::vector<std::string>{"cons"}, coarse);
+  const int nvar = cons.GetDim(4);
+  constexpr auto domain = INNER_X1 ? IndexDomain::inner_x1 : IndexDomain::outer_x1;
+  const bool fine = false;
+  const auto nb = IndexRange{0, 0};
+
+  pmb->par_for_bndry(
+      "pulsed_reconnection::PulsedOutflowDiodeX1", nb, domain,
+      parthenon::TopologicalElement::CC, coarse, fine,
+      KOKKOS_LAMBDA(const int &, const int &k, const int &j, const int &i) {
+        for (int v = 0; v < nvar; ++v) {
+          cons(v, k, j, i) = cons(v, k, j, ref);
+        }
+
+        const Real rho = cons(IDN, k, j, i);
+        const Real m2 = cons(IM2, k, j, i);
+        const Real m3 = cons(IM3, k, j, i);
+        const Real copied_m1 = cons(IM1, k, j, i);
+        const Real b1 = cons(IB1, k, j, i);
+        const Real b2 = cons(IB2, k, j, i);
+        const Real b3 = cons(IB3, k, j, i);
+        const Real copied_ke =
+            rho > 0.0 ? 0.5 * (copied_m1 * copied_m1 + m2 * m2 + m3 * m3) / rho : 0.0;
+        const Real me = 0.5 * (b1 * b1 + b2 * b2 + b3 * b3);
+        Real internal_e = cons(IEN, k, j, i) - copied_ke - me;
+        if (internal_e < 0.0) {
+          internal_e = 0.0;
+        }
+
+        Real m1 = copied_m1;
+        if constexpr (INNER_X1) {
+          m1 = fmin(m1, 0.0);
+        } else {
+          m1 = fmax(m1, 0.0);
+        }
+
+        const Real ke = rho > 0.0 ? 0.5 * (m1 * m1 + m2 * m2 + m3 * m3) / rho : 0.0;
+        cons(IM1, k, j, i) = m1;
+        cons(IEN, k, j, i) = internal_e + ke + me;
+      });
+}
+
 PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg,
                                     ParameterInput *pin) {
   PulsedSourceParams params{};
@@ -151,7 +200,7 @@ PulsedSourceState EvaluateSourceState(const PulsedSourceParams &params, const Re
   Real thermo_profile_sum = 0.0;
   Real density_profile_sum = 0.0;
 
-  for (int A = -1; A <= 1; A += 2) {
+  for (int A = -101; A <= 101; A += 2) {
     const Real y_center = A * d;
     const Real y_local = y - y_center;
     const Real r2 = SQR(x) + SQR(y_local);
@@ -536,13 +585,11 @@ void PulsedSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse)
 }
 
 void PulsedDiodeInnerX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
-  Hydro::BoundaryFunction::DiodeX1BC<parthenon::BoundaryFunction::BCSide::Inner>(mbd,
-                                                                                  coarse);
+  PulsedOutflowDiodeX1<true>(mbd, coarse);
 }
 
 void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse) {
-  Hydro::BoundaryFunction::DiodeX1BC<parthenon::BoundaryFunction::BCSide::Outer>(mbd,
-                                                                                  coarse);
+  PulsedOutflowDiodeX1<false>(mbd, coarse);
 }
 
 } // namespace pulsed_reconnection

@@ -49,16 +49,16 @@ density_perturb_amplitude = 0
 refinement = none
 nghost = 2
 nx1 = 320
-x1min = -2.0
-x1max = 2.0
+x1min = -1.9
+x1max = 1.9
 ix1_bc = tophat_diode_x1_inner
 ox1_bc = tophat_diode_x1_outer
 
 nx2 = 320
-x2min = -2.0
-x2max = 2.0
-ix2_bc = periodic
-ox2_bc = periodic
+x2min = -1.9
+x2max = 1.9
+ix2_bc = linear
+ox2_bc = linear
 
 nx3 = 1
 x3min = -0.01
