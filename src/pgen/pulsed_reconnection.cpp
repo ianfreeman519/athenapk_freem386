@@ -11,6 +11,7 @@
 
 // Parthenon headers
 #include "Kokkos_MathematicalFunctions.hpp"
+#include "Kokkos_MathematicalSpecialFunctions.hpp"
 #include "kokkos_abstraction.hpp"
 #include "mesh/domain.hpp"
 #include "mesh/mesh.hpp"
@@ -35,6 +36,10 @@ KOKKOS_INLINE_FUNCTION
 Real GaussianProfile(const Real r, const Real width);
 
 KOKKOS_INLINE_FUNCTION
+Real ForceBalanceProfile(const Real r, const Real width_magnetic,
+                         const Real current_field_prefac);
+
+KOKKOS_INLINE_FUNCTION
 Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number);
 
 namespace {
@@ -55,6 +60,7 @@ struct PulsedSourceParams {
   int azimuthal_mode_number;
   Real density_perturb_amplitude;
   Real temperature_perturb_amplitude;
+  Real force_balance;
   Real current_field_prefac;
   Real rho_wire;
   Real rho_background;
@@ -156,6 +162,8 @@ PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydr
   params.temperature_perturb_amplitude =
       pin->GetOrAddReal("problem/pulsed_reconnection", "temperature_perturb_amplitude",
                         0.0);
+  params.force_balance =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "force_balance", 1.0);
 
   PARTHENON_REQUIRE(params.width_thermo_cgs > 0.0,
                     "problem/pulsed_reconnection/w must be positive.");
@@ -199,6 +207,7 @@ PulsedSourceState EvaluateSourceState(const PulsedSourceParams &params, const Re
   const Real d = params.array_separation / 2.0;
   Real thermo_profile_sum = 0.0;
   Real density_profile_sum = 0.0;
+  Real force_balance_pressure_sum = 0.0;
 
   for (int A = -101; A <= 101; A += 2) {
     const Real y_center = A * d;
@@ -213,6 +222,8 @@ PulsedSourceState EvaluateSourceState(const PulsedSourceParams &params, const Re
         theta, params.temperature_perturb_amplitude, params.azimuthal_mode_number);
     thermo_profile_sum += thermo_profile * temperature_perturbation;
     density_profile_sum += thermo_profile * density_perturbation;
+    force_balance_pressure_sum +=
+        ForceBalanceProfile(r, params.width_magnetic, params.current_field_prefac);
 
     if (r > 0.0) {
       const Real inv_r = 1.0 / r;
@@ -232,7 +243,9 @@ PulsedSourceState EvaluateSourceState(const PulsedSourceParams &params, const Re
 
   state.rho = params.rho_background + params.rho_wire * density_profile_sum;
   const Real T = params.T_background + params.T_wire * thermo_profile_sum;
-  state.pressure = T * params.k_b * state.rho / params.m_bar;
+  state.pressure =
+      T * params.k_b * state.rho / params.m_bar +
+      params.force_balance * force_balance_pressure_sum;
   return state;
 }
 
@@ -281,6 +294,22 @@ KOKKOS_INLINE_FUNCTION
 Real GaussianProfile(const Real r, const Real width) {
   const Real exponent = -SQR(r / width);
   return exp(fmax(-700.0, exponent));
+}
+
+KOKKOS_INLINE_FUNCTION
+Real ForceBalanceProfile(const Real r, const Real width_magnetic,
+                         const Real current_field_prefac) {
+  const Real q = SQR(r / width_magnetic);
+  const Real amplitude = SQR(current_field_prefac / width_magnetic);
+  constexpr Real ln2 = 0.6931471805599453094;
+
+  // Limit q -> 0 of E1(q) - E1(2q) is ln(2), which keeps the on-axis value finite.
+  if (q <= 1.0e-12) {
+    return amplitude * ln2;
+  }
+
+  return amplitude *
+         (Kokkos::Experimental::expint1(q) - Kokkos::Experimental::expint1(2.0 * q));
 }
 
 KOKKOS_INLINE_FUNCTION
