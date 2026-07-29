@@ -833,3 +833,430 @@ supported `rkl2` midpoint configuration.
   $\rightarrow S_{\mathrm{cool}}^{(m)} + S_{\Omega,\mathrm{pre}}$
 - midpoint thermal integration interval $\rightarrow \Delta t_{\mathrm{hydro}}$
 - absent `thermal_ae` term $\rightarrow$ no lagged hydro source in this branch
+
+## Mathematical Description of the Current `pulsed_reconnection` Driving
+
+This note describes the current implemented driver in
+`src/pgen/pulsed_reconnection.cpp`.
+
+The driver acts only in localized regions around the two wire centers at
+
+$$
+(x, y) = \left(0, \pm \frac{d}{2}\right),
+$$
+
+where
+
+$$
+d = \texttt{array\_separation}.
+$$
+
+It does not directly modify momentum. It modifies:
+
+- density $\rho$,
+- magnetic field components $B_x, B_y$,
+- total energy through the internal-energy part and the magnetic-energy part.
+
+The momentum densities $\rho v_x$, $\rho v_y$, $\rho v_z$ are left unchanged.
+
+### 1. Analytic Wire Target State
+
+At any cell center $(x,y)$, the code defines an analytic two-wire target state
+
+$$
+U_{\mathrm{target}}(x,y)
+=
+\left(
+\rho_{\mathrm{target}},
+P_{\mathrm{target}},
+v_{x,\mathrm{target}},
+v_{y,\mathrm{target}},
+B_{x,\mathrm{target}},
+B_{y,\mathrm{target}}
+\right)
+$$
+
+through `EvaluateSourceState(...)`.
+
+For each wire $A \in \{-1,+1\}$ with center
+
+$$
+y_A = A\frac{d}{2},
+$$
+
+define local coordinates
+
+$$
+y'_A = y - y_A,
+\qquad
+r_A^2 = x^2 + y_A'^2,
+\qquad
+r_A = \sqrt{r_A^2}.
+$$
+
+The thermal Gaussian is
+
+$$
+G_{\mathrm{th}}(r_A) = \exp\left(-\frac{r_A^2}{w^2}\right),
+$$
+
+and the magnetic/current Gaussian uses width $w_B$.
+
+The code constructs the target density as
+
+$$
+\rho_{\mathrm{target}}
+=
+\rho_{\mathrm{bg}}
++
+\rho_{\mathrm{wire}}
+\sum_A
+G_{\mathrm{th}}(r_A)\,
+\Pi_{\rho,A},
+$$
+
+where $\Pi_{\rho,A}$ is the azimuthal density perturbation factor
+$1 + p_\rho \cos(N\theta_A)$.
+
+The target temperature is
+
+$$
+T_{\mathrm{target}}
+=
+T_{\mathrm{bg}}
++
+T_{\mathrm{wire}}
+\sum_A
+G_{\mathrm{th}}(r_A)\,
+\Pi_{T,A},
+$$
+
+with $\Pi_{T,A} = 1 + p_T \cos(N\theta_A)$.
+
+The target pressure is then
+
+$$
+P_{\mathrm{target}}
+=
+\frac{k_B}{\bar m}\,
+\rho_{\mathrm{target}}\,T_{\mathrm{target}}
++
+f_{\mathrm{fb}}
+\sum_A
+P_{\mathrm{fb}}(r_A),
+$$
+
+where $f_{\mathrm{fb}} = \texttt{force\_balance}$ and $P_{\mathrm{fb}}$ is the
+analytic magnetic force-balance contribution already implemented in the problem
+generator.
+
+### 2. Target Current and Measured Current
+
+The user specifies a peak wire current through `current_peak_MA`. This is
+converted into the magnetic-field prefactor
+
+$$
+C_B = \texttt{current\_field\_prefac}.
+$$
+
+For one Gaussian wire, the implemented target peak axial current density is
+
+$$
+J_{\mathrm{target}} = \frac{2 C_B}{w_B^2}.
+$$
+
+This is what the driver tries to hold near each wire center.
+
+At the start of each drive application, the code measures the numerical
+$z$-current using
+
+$$
+J_z = (\nabla \times \mathbf{B})_z
+=
+\frac{\partial B_y}{\partial x} - \frac{\partial B_x}{\partial y},
+$$
+
+with centered finite differences on the mesh.
+
+For each wire, it does not use a single cell. Instead it forms a
+kernel-weighted average:
+
+$$
+\langle J_z \rangle_A
+=
+\frac{\sum_i W_A(x_i,y_i)\,J_z(x_i,y_i)\,V_i}
+     {\sum_i W_A(x_i,y_i)\,V_i},
+$$
+
+where $V_i$ is the cell volume and
+
+$$
+W_A(x,y)
+=
+\begin{cases}
+\exp\left(-\dfrac{r_A^2}{w_B^2}\right), & r_A \le r_{\mathrm{drive}}, \\
+0, & r_A > r_{\mathrm{drive}},
+\end{cases}
+$$
+
+with
+
+$$
+r_{\mathrm{drive}} = \texttt{drive\_radius\_factor}\,w_B.
+$$
+
+So the driver compares the measured current
+$\langle J_z \rangle_A$ to $J_{\mathrm{target}}$ for each wire separately.
+
+### 3. Magnetic Correction
+
+For each wire, define the current error
+
+$$
+\Delta J_A = J_{\mathrm{target}} - \langle J_z \rangle_A.
+$$
+
+The code converts this into a correction to the magnetic prefactor using the
+Gaussian on-axis relation:
+
+$$
+\Delta C_{B,A}^{\mathrm{raw}}
+=
+\frac{w_B^2}{2}\,\Delta J_A.
+$$
+
+This correction is relaxed over the magnetic drive timescale
+$\tau_B = \texttt{drive\_tau\_B}$:
+
+$$
+f_B = \min\left(\frac{\Delta t}{\tau_B}, 1\right),
+$$
+
+so that
+
+$$
+\Delta C_{B,A}^{\mathrm{relaxed}}
+=
+f_B\,\Delta C_{B,A}^{\mathrm{raw}}.
+$$
+
+The per-step correction is then capped:
+
+$$
+|\Delta C_{B,A}|
+\le
+f_{B,\max}\,C_B,
+$$
+
+where
+
+$$
+f_{B,\max}
+=
+\texttt{drive\_max\_fractional\_B\_change\_per\_step}.
+$$
+
+The applied magnetic increment is built from the same analytic single-wire field
+shape as the original problem:
+
+$$
+B_{\phi,A}(r_A)
+=
+\frac{C_{B,A}}{r_A}
+\left(1 - e^{-r_A^2/w_B^2}\right).
+$$
+
+In Cartesian form, the increment from wire $A$ is
+
+$$
+\delta B_{x,A}
+=
+-W_A \left(\frac{C_{B,A}}{r_A^2}\left(1-e^{-r_A^2/w_B^2}\right)\right) y_A',
+$$
+
+$$
+\delta B_{y,A}
+=
+W_A \left(\frac{C_{B,A}}{r_A^2}\left(1-e^{-r_A^2/w_B^2}\right)\right) x.
+$$
+
+The total magnetic update is the sum over the two wires:
+
+$$
+B_x^{n+1} = B_x^n + \sum_A \delta B_{x,A},
+\qquad
+B_y^{n+1} = B_y^n + \sum_A \delta B_{y,A}.
+$$
+
+The driver does not modify $B_z$.
+
+### 4. Density Replenishment
+
+After the magnetic correction is constructed, the code replenishes density
+toward the analytic target density from `EvaluateSourceState(...)`.
+
+Let the local support weight be
+
+$$
+W(x,y) = \max_A W_A(x,y).
+$$
+
+Then the raw density correction is
+
+$$
+\Delta \rho^{\mathrm{raw}}
+=
+\left(\rho_{\mathrm{target}} - \rho\right) W \, f_\rho,
+$$
+
+where
+
+$$
+f_\rho = \min\left(\frac{\Delta t}{\tau_\rho}, 1\right),
+\qquad
+\tau_\rho = \texttt{drive\_tau\_rho}.
+$$
+
+This is capped as
+
+$$
+|\Delta \rho|
+\le
+f_{\rho,\max}\,\rho_{\mathrm{target}},
+$$
+
+where
+
+$$
+f_{\rho,\max}
+=
+\texttt{drive\_max\_fractional\_rho\_change\_per\_step}.
+$$
+
+The updated density is
+
+$$
+\rho^{n+1}
+=
+\max\left(\rho_{\mathrm{bg}}, \rho^n + \Delta \rho\right).
+$$
+
+So density is explicitly replenished in the wire cores, but momentum is not.
+
+### 5. Pressure / Internal-Energy Relaxation
+
+The code next computes the current internal pressure from the conserved state:
+
+$$
+P
+=
+(\gamma - 1)\left(E - E_{\mathrm{kin}} - E_{\mathrm{mag}}\right).
+$$
+
+Because density changes while momentum is held fixed, the kinetic energy used in
+this step is
+
+$$
+E_{\mathrm{kin}}
+=
+\frac{1}{2}\frac{M_x^2 + M_y^2 + M_z^2}{\rho},
+$$
+
+with $M_i = \rho v_i$ unchanged by the driver.
+
+The pressure is relaxed toward the analytic target pressure
+$P_{\mathrm{target}}$ from `EvaluateSourceState(...)`:
+
+$$
+\Delta P^{\mathrm{raw}}
+=
+\left(P_{\mathrm{target}} - P\right) W \, f_P,
+$$
+
+where
+
+$$
+f_P = \min\left(\frac{\Delta t}{\tau_P}, 1\right),
+\qquad
+\tau_P = \texttt{drive\_tau\_p}.
+$$
+
+The pressure correction is capped:
+
+$$
+|\Delta P|
+\le
+f_{P,\max}\,P_{\mathrm{target}},
+$$
+
+where
+
+$$
+f_{P,\max}
+=
+\texttt{drive\_max\_fractional\_p\_change\_per\_step}.
+$$
+
+Then the new internal energy is
+
+$$
+e_{\mathrm{int}}^{n+1}
+=
+\frac{P + \Delta P}{\gamma - 1}.
+$$
+
+### 6. Total-Energy Update
+
+After the density and magnetic field are updated, the code recomputes kinetic
+energy using the new density but the same momentum:
+
+$$
+E_{\mathrm{kin}}^{n+1}
+=
+\frac{1}{2}\frac{M_x^2 + M_y^2 + M_z^2}{\rho^{n+1}}.
+$$
+
+It also recomputes magnetic energy from the updated magnetic field:
+
+$$
+E_{\mathrm{mag}}^{n+1}
+=
+\frac{1}{2}\left((B_x^{n+1})^2 + (B_y^{n+1})^2 + (B_z^n)^2\right).
+$$
+
+Finally, total energy is overwritten as
+
+$$
+E^{n+1}
+=
+e_{\mathrm{int}}^{n+1}
++
+E_{\mathrm{kin}}^{n+1}
++
+E_{\mathrm{mag}}^{n+1}.
+$$
+
+### 7. What Is and Is Not Being Driven
+
+The current driver does:
+
+- measure kernel-averaged wire-core current,
+- correct magnetic field to push that current toward the target,
+- replenish density toward the analytic wire-core profile,
+- replenish pressure/internal energy toward the analytic wire-core state.
+
+The current driver does not:
+
+- directly modify momentum,
+- directly modify the reconnection layer,
+- directly impose flow in the sheet.
+
+So mathematically it is a localized relaxation source of the form
+
+$$
+\partial_t U \sim \frac{U_{\mathrm{target}} - U}{\tau}
+$$
+
+for selected components of $U$, with per-step caps and with the magnetic part
+additionally constrained by the measured-current error rather than a direct
+state overwrite.
