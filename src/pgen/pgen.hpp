@@ -49,6 +49,14 @@ void PulsedDiodeOuterX1(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 void PulsedSourceInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 void PulsedSourceOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
 }
+namespace pulsed_reconnection_gaussian {
+using namespace parthenon::driver::prelude;
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+}
 namespace tophat_pulsed_reconnection {
 using namespace parthenon::driver::prelude;
 void InitUserMeshData(Mesh *mesh, ParameterInput *pin);

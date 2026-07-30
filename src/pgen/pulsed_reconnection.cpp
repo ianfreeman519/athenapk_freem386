@@ -71,6 +71,7 @@ struct PulsedSourceParams {
   bool drive_enable;
   Real drive_radius_factor;
   Real drive_density_radius_factor;
+  Real drive_density_width_factor;
   Real drive_tau_rho;
   Real drive_tau_B;
   Real drive_tau_p;
@@ -209,6 +210,8 @@ PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydr
   params.drive_density_radius_factor = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_density_radius_factor",
       params.drive_radius_factor);
+  params.drive_density_width_factor = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_density_width_factor", 1.0);
 
   PARTHENON_REQUIRE(params.width_thermo_cgs > 0.0,
                     "problem/pulsed_reconnection/w must be positive.");
@@ -253,6 +256,9 @@ PulsedSourceParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydr
   PARTHENON_REQUIRE(
       params.drive_density_radius_factor > 0.0,
       "problem/pulsed_reconnection/drive_density_radius_factor must be positive.");
+  PARTHENON_REQUIRE(
+      params.drive_density_width_factor > 0.0,
+      "problem/pulsed_reconnection/drive_density_width_factor must be positive.");
   PARTHENON_REQUIRE(params.drive_tau_rho > 0.0,
                     "problem/pulsed_reconnection/drive_tau_rho must be positive.");
   PARTHENON_REQUIRE(params.drive_tau_B > 0.0,
@@ -442,6 +448,8 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
   const Real drive_radius = params.drive_radius_factor * params.width_magnetic;
   const Real drive_density_radius =
       params.drive_density_radius_factor * params.width_magnetic;
+  const Real drive_density_width =
+      params.drive_density_width_factor * params.width_magnetic;
   const int i_tile = std::max(1, ib.e - ib.s - 1);
 
   Kokkos::Array<Real, 4> sums{{0.0, 0.0, 0.0, 0.0}};
@@ -523,7 +531,7 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
           const Real magnetic_weight =
               DriveSupportWeight(r2, params.width_magnetic, drive_radius);
           const Real density_weight =
-              DriveSupportWeight(r2, params.width_magnetic, drive_density_radius);
+              DriveSupportWeight(r2, drive_density_width, drive_density_radius);
           magnetic_support_weight = fmax(magnetic_support_weight, magnetic_weight);
           density_support_weight = fmax(density_support_weight, density_weight);
           AddSingleWireMagneticField(applied_prefac_lower, params.width_magnetic, x, y_local,
@@ -535,7 +543,7 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime & /*tm*/, const Real d
           const Real magnetic_weight =
               DriveSupportWeight(r2, params.width_magnetic, drive_radius);
           const Real density_weight =
-              DriveSupportWeight(r2, params.width_magnetic, drive_density_radius);
+              DriveSupportWeight(r2, drive_density_width, drive_density_radius);
           magnetic_support_weight = fmax(magnetic_support_weight, magnetic_weight);
           density_support_weight = fmax(density_support_weight, density_weight);
           AddSingleWireMagneticField(applied_prefac_upper, params.width_magnetic, x, y_local,

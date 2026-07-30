@@ -120,6 +120,12 @@ int main(int argc, char *argv[]) {
     pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x2,
                                               "pulsed_source_x2_outer",
                                               pulsed_reconnection::PulsedSourceOuterX2);
+  } else if (problem == "pulsed_reconnection_gaussian") {
+    pman.app_input->ProblemGenerator = pulsed_reconnection_gaussian::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput =
+        pulsed_reconnection_gaussian::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = pulsed_reconnection_gaussian::ProblemInitPackageData;
+    Hydro::ProblemSourceFirstOrder = pulsed_reconnection_gaussian::Driving;
   } else if (problem == "tophat_pulsed_reconnection") {
     pman.app_input->InitUserMeshData = tophat_pulsed_reconnection::InitUserMeshData;
     pman.app_input->ProblemGenerator = tophat_pulsed_reconnection::ProblemGenerator;
