@@ -85,6 +85,9 @@ int main(int argc, char *argv[]) {
     pman.app_input->ProblemGenerator = advection::ProblemGenerator;
   } else if (problem == "orszag_tang") {
     pman.app_input->ProblemGenerator = orszag_tang::ProblemGenerator;
+    Hydro::ProblemInitPackageData = orszag_tang::ProblemInitPackageData;
+  } else if (problem == "current_sheet") {
+    pman.app_input->ProblemGenerator = current_sheet::ProblemGenerator;
   } else if (problem == "diffusion") {
     pman.app_input->ProblemGenerator = diffusion::ProblemGenerator;
   } else if (problem == "field_loop") {
@@ -110,6 +113,10 @@ int main(int argc, char *argv[]) {
     pman.app_input->ProblemGenerator = shattering::ProblemGenerator;
   } else if (problem == "sod") {
     pman.app_input->ProblemGenerator = sod::ProblemGenerator;
+  } else if (problem == "smooth_mhd_vortex") {
+    pman.app_input->ProblemGenerator = smooth_mhd_vortex::ProblemGenerator;
+    Hydro::ProblemInitPackageData = smooth_mhd_vortex::ProblemInitPackageData;
+    pman.app_input->UserWorkAfterLoop = smooth_mhd_vortex::UserWorkAfterLoop;
   } else if (problem == "turbulence") {
     pman.app_input->MeshProblemGenerator = turbulence::ProblemGenerator;
     Hydro::ProblemInitPackageData = turbulence::ProblemInitPackageData;

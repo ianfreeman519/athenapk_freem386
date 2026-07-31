@@ -5,9 +5,12 @@ add_executable(
     athenaPK
         main.cpp
         eos/adiabatic_glmmhd.cpp
+        eos/adiabatic_ctmhd.cpp
         units.hpp
         bvals/boundary_conditions_apk.hpp
         eos/adiabatic_hydro.cpp
+        hydro/ctmhd/ctmhd.cpp
+        hydro/ctmhd/ucthlldmhd.cpp
         hydro/diffusion/conduction.cpp
         hydro/diffusion/diffusion.cpp
         hydro/diffusion/diffusion.hpp

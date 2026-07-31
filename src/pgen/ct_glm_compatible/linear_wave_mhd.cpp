@@ -3,8 +3,8 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file linear_wave.cpp
-//! \brief Linear wave problem generator for 1D/2D/3D problems.
+//! \file linear_wave_mhd.cpp
+//! \brief Linear wave mhd problem generator for 1D/2D/3D problems.
 //!
 //! In 1D, the problem is setup along one of the three coordinate axes (specified by
 //! setting [ang_2,ang_3] = 0.0 or PI/2 in the input file).  In 2D/3D this routine
@@ -28,11 +28,12 @@
 #include <parthenon/package.hpp>
 
 // Athena headers
-#include "../main.hpp"
+#include "../../main.hpp"
 
 namespace linear_wave_mhd {
 using namespace parthenon::driver::prelude;
 using namespace parthenon::package::prelude;
+using TE = parthenon::TopologicalElement;
 
 constexpr int NMHDWAVE = 7;
 // Parameters which define initial solution -- made global so that they can be shared
@@ -50,6 +51,8 @@ Real ev[NMHDWAVE], rem[NMHDWAVE][NMHDWAVE], lem[NMHDWAVE][NMHDWAVE];
 Real A1(const Real x1, const Real x2, const Real x3);
 Real A2(const Real x1, const Real x2, const Real x3);
 Real A3(const Real x1, const Real x2, const Real x3);
+template <typename ConsHost, typename BfaceHost>
+void Bface_Fill_Cons(MeshBlock *pmb, ConsHost &u, BfaceHost &Bface);
 
 // function to compute eigenvectors of linear waves
 void Eigensystem(const Real d, const Real v1, const Real v2, const Real v3, const Real h,
@@ -67,14 +70,14 @@ void Eigensystem(const Real d, const Real v1, const Real v2, const Real v3, cons
 
 void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
   // read global parameters
-  wave_flag = pin->GetInteger("problem/linear_wave", "wave_flag");
-  amp = pin->GetReal("problem/linear_wave", "amp");
-  vflow = pin->GetOrAddReal("problem/linear_wave", "vflow", 0.0);
-  ang_2 = pin->GetOrAddReal("problem/linear_wave", "ang_2", -999.9);
-  ang_3 = pin->GetOrAddReal("problem/linear_wave", "ang_3", -999.9);
+  wave_flag = pin->GetInteger("problem/linear_wave_mhd", "wave_flag");
+  amp = pin->GetReal("problem/linear_wave_mhd", "amp");
+  vflow = pin->GetOrAddReal("problem/linear_wave_mhd", "vflow", 0.0);
+  ang_2 = pin->GetOrAddReal("problem/linear_wave_mhd", "ang_2", -999.9);
+  ang_3 = pin->GetOrAddReal("problem/linear_wave_mhd", "ang_3", -999.9);
 
-  ang_2_vert = pin->GetOrAddBoolean("problem/linear_wave", "ang_2_vert", false);
-  ang_3_vert = pin->GetOrAddBoolean("problem/linear_wave", "ang_3_vert", false);
+  ang_2_vert = pin->GetOrAddBoolean("problem/linear_wave_mhd", "ang_2_vert", false);
+  ang_3_vert = pin->GetOrAddBoolean("problem/linear_wave_mhd", "ang_3_vert", false);
 
   // initialize global variables
   gam = pin->GetReal("hydro", "gamma");
@@ -160,7 +163,7 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
 
   // TODO(pgrete) see how to get access to the SimTime object outside the driver
   // if (pin->GetOrAddBoolean("problem/linear_wave", "test", false) && ncycle == 0) {
-  if (pin->GetOrAddBoolean("problem/linear_wave", "test", false)) {
+  if (pin->GetOrAddBoolean("problem/linear_wave_mhd", "test", false)) {
     // reinterpret tlim as the number of orbital periods
     Real tlim = pin->GetReal("parthenon/time", "tlim");
     Real ntlim = lambda / std::abs(ev[wave_flag]) * tlim;
@@ -175,19 +178,22 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
 //========================================================================================
 
 void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) {
-  if (!pin->GetOrAddBoolean("problem/linear_wave", "compute_error", false)) return;
+  if (!pin->GetOrAddBoolean("problem/linear_wave_mhd", "compute_error", false)) return;
 
-  constexpr int NGLMMHD = 8; // excluding psi
+  constexpr int NMHD = 8; // excluding psi
 
   // Initialize errors to zero
-  Real l1_err[NGLMMHD]{}, max_err[NGLMMHD]{};
+  Real l1_err[NMHD]{}, max_err[NMHD]{};
 
   for (auto &pmb : mesh->block_list) {
+    const auto fluid = pmb->packages.Get("Hydro")->Param<Fluid>("fluid");
+    const bool two_d = pmb->pmy_mesh->ndim < 3;
+
     IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
     IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
     IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
     // Even for MHD, there are only cell-centered mesh variables
-    int ncells4 = NGLMMHD;
+    int ncells4 = NMHD;
     // Save analytic solution of conserved variables in 4D scratch array on host
     Kokkos::View<Real ****, parthenon::LayoutWrapper, parthenon::HostMemSpace> cons_(
         "cons scratch", ncells4, pmb->cellbounds.ncellsk(IndexDomain::entire),
@@ -225,15 +231,51 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
           Real b1 = bx * cos_a2 * cos_a3 - by * sin_a3 - bz * sin_a2 * cos_a3;
           Real b2 = bx * cos_a2 * sin_a3 + by * cos_a3 - bz * sin_a2 * sin_a3;
           Real b3 = bx * sin_a2 + bz * cos_a2;
-          cons_(IB1, k, j, i) = b1;
-          cons_(IB2, k, j, i) = b2;
-          cons_(IB3, k, j, i) = b3;
+          if (fluid == Fluid::glmmhd){
+            cons_(IB1, k, j, i) = b1;
+            cons_(IB2, k, j, i) = b2;
+            cons_(IB3, k, j, i) = b3;
+          }
+          if (two_d && (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd)){
+            cons_(IB3,k,j,i) = bz0 + amp * sn * rem[6][wave_flag];
+          }
+
           cons_(IEN, k, j, i) = e0;
         }
       }
     }
 
     auto &rc = pmb->meshblock_data.Get(); // get base container
+
+    if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+      auto &u_dev_face = rc->Get("Bface").data;
+      auto Bface = u_dev_face.GetHostMirrorAndCopy();
+      Bface_Fill_Cons(pmb.get(), cons_, Bface); // dont do the deep copy   
+      for (int k = kb.s; k <= kb.e; k++) {
+        for (int j = jb.s; j <= jb.e; j++) {
+          for (int i = ib.s; i <= ib.e; i++) {
+            Real x = cos_a2 * (pmb->coords.Xc<1>(i) * cos_a3 +
+                               pmb->coords.Xc<2>(j) * sin_a3) +
+                     pmb->coords.Xc<3>(k) * sin_a2;
+            Real sn = std::sin(k_par * x);
+            Real e0 = p0 / gm1 + 0.5 * d0 * u0 * u0 + amp * sn * rem[4][wave_flag];
+            e0 += 0.5 * (bx0 * bx0 + by0 * by0 + bz0 * bz0);
+            Real bx = bx0;
+            Real by = by0 + amp * sn * rem[5][wave_flag];
+            Real bz = bz0 + amp * sn * rem[6][wave_flag];
+            Real b1 = bx * cos_a2 * cos_a3 - by * sin_a3 - bz * sin_a2 * cos_a3;
+            Real b2 = bx * cos_a2 * sin_a3 + by * cos_a3 - bz * sin_a2 * sin_a3;
+            Real b3 = bx * sin_a2 + bz * cos_a2;
+            Real analytic_me = 0.5 * (b1 * b1 + b2 * b2 + b3 * b3);
+            Real ct_me = 0.5 * (SQR(cons_(IB1, k, j, i)) +
+                                SQR(cons_(IB2, k, j, i)) +
+                                SQR(cons_(IB3, k, j, i)));
+            cons_(IEN, k, j, i) = e0 - analytic_me + ct_me;
+          }
+        }
+      }
+    }
+
     auto u = rc->Get("cons").data.GetHostMirrorAndCopy();
     for (int k = kb.s; k <= kb.e; ++k) {
       for (int j = jb.s; j <= jb.e; ++j) {
@@ -285,14 +327,14 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
 
 #ifdef MPI_PARALLEL
   if (parthenon::Globals::my_rank == 0) {
-    MPI_Reduce(MPI_IN_PLACE, &l1_err, (NGLMMHD), MPI_PARTHENON_REAL, MPI_SUM, 0,
+    MPI_Reduce(MPI_IN_PLACE, &l1_err, (NMHD), MPI_PARTHENON_REAL, MPI_SUM, 0,
                MPI_COMM_WORLD);
-    MPI_Reduce(MPI_IN_PLACE, &max_err, (NGLMMHD), MPI_PARTHENON_REAL, MPI_MAX, 0,
+    MPI_Reduce(MPI_IN_PLACE, &max_err, (NMHD), MPI_PARTHENON_REAL, MPI_MAX, 0,
                MPI_COMM_WORLD);
   } else {
-    MPI_Reduce(&l1_err, &l1_err, (NGLMMHD), MPI_PARTHENON_REAL, MPI_SUM, 0,
+    MPI_Reduce(&l1_err, &l1_err, (NMHD), MPI_PARTHENON_REAL, MPI_SUM, 0,
                MPI_COMM_WORLD);
-    MPI_Reduce(&max_err, &max_err, (NGLMMHD), MPI_PARTHENON_REAL, MPI_MAX, 0,
+    MPI_Reduce(&max_err, &max_err, (NMHD), MPI_PARTHENON_REAL, MPI_MAX, 0,
                MPI_COMM_WORLD);
   }
 #endif
@@ -304,10 +346,10 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
     const auto vol = (mesh_size.xmax(X1DIR) - mesh_size.xmin(X1DIR)) *
                      (mesh_size.xmax(X2DIR) - mesh_size.xmin(X2DIR)) *
                      (mesh_size.xmax(X3DIR) - mesh_size.xmin(X3DIR));
-    for (int i = 0; i < (NGLMMHD); ++i)
+    for (int i = 0; i < (NMHD); ++i)
       l1_err[i] = l1_err[i] / vol;
     // compute rms error
-    for (int i = 0; i < (NGLMMHD); ++i) {
+    for (int i = 0; i < (NMHD); ++i) {
       rms_err += SQR(l1_err[i]);
       max_max_over_l1 = std::max(max_max_over_l1, (max_err[i] / l1_err[i]));
     }
@@ -315,7 +357,7 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
 
     // open output file and write out errors
     std::string fname;
-    fname.assign("linearwave-errors.dat");
+    fname = "linearwave-errors-" + std::to_string(wave_flag) + ".dat";
     std::stringstream msg;
     FILE *pfile;
 
@@ -374,6 +416,15 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   // Initialize the magnetic fields.  Note wavevector, eigenvectors, and other variables
   // are set in InitUserMeshData
 
+  // gives us ctmhd ucthlldmhd or glmmhd
+  const bool two_d = pmb->pmy_mesh->ndim < 3;
+  const auto fluid = pmb->packages.Get("Hydro")->Param<Fluid>("fluid");
+
+  auto &coords = pmb->coords;
+  // wave amplitudes
+  dby = amp * rem[NMHDWAVE - 2][wave_flag];
+  dbz = amp * rem[NMHDWAVE - 1][wave_flag];
+
   Kokkos::View<Real ***, parthenon::LayoutWrapper, parthenon::HostMemSpace> a1(
       "a1", pmb->cellbounds.ncellsk(IndexDomain::entire),
       pmb->cellbounds.ncellsj(IndexDomain::entire),
@@ -387,14 +438,17 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
       pmb->cellbounds.ncellsj(IndexDomain::entire),
       pmb->cellbounds.ncellsi(IndexDomain::entire));
 
-  // wave amplitudes
-  dby = amp * rem[NMHDWAVE - 2][wave_flag];
-  dbz = amp * rem[NMHDWAVE - 1][wave_flag];
-
-  auto &coords = pmb->coords;
-
+  if (fluid == Fluid::glmmhd){
+  int kl, ku;
+  if (two_d) {
+    kl = kb.s;
+    ku = kb.e;
+  } else {
+    kl = kb.s - 1;
+    ku = kb.e + 1;
+  }
   // Initialize components of the vector potential
-  for (int k = kb.s - 1; k <= kb.e + 1; k++) {
+  for (int k = kl; k <= ku; k++) {
     for (int j = jb.s - 1; j <= jb.e + 1; j++) {
       for (int i = ib.s - 1; i <= ib.e + 1; i++) {
         a1(k, j, i) = A1(coords.Xc<1>(i), coords.Xc<2>(j), coords.Xc<3>(k));
@@ -403,12 +457,13 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
       }
     }
   }
-
+  }
   // initialize conserved variables
   auto &rc = pmb->meshblock_data.Get();
   auto &u_dev = rc->Get("cons").data;
-  // initializing on host
+    // initializing on host
   auto u = u_dev.GetHostMirrorAndCopy();
+
   for (int k = kb.s; k <= kb.e; k++) {
     for (int j = jb.s; j <= jb.e; j++) {
       for (int i = ib.s; i <= ib.e; i++) {
@@ -424,20 +479,72 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IM2, k, j, i) = mx * cos_a2 * sin_a3 + my * cos_a3 - mz * sin_a2 * sin_a3;
         u(IM3, k, j, i) = mx * sin_a2 + mz * cos_a2;
 
-        u(IB1, k, j, i) = (a3(k, j + 1, i) - a3(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0 -
-                          (a2(k + 1, j, i) - a2(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0;
-        u(IB2, k, j, i) = (a1(k + 1, j, i) - a1(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0 -
-                          (a3(k, j, i + 1) - a3(k, j, i - 1)) / coords.Dxc<1>(i) / 2.0;
-        u(IB3, k, j, i) = (a2(k, j, i + 1) - a2(k, j, i - 1)) / coords.Dxc<1>(i) / 2.0 -
-                          (a1(k, j + 1, i) - a1(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0;
+        if (fluid == Fluid::glmmhd){
+          if (two_d) {
+            u(IB1,k,j,i) =
+                (a3(k,j+1,i) - a3(k,j-1,i)) / coords.Dxc<2>(j) / 2.0;
 
+            u(IB2,k,j,i) =
+              -(a3(k,j,i+1) - a3(k,j,i-1)) / coords.Dxc<1>(i) / 2.0;
+
+            u(IB3,k,j,i) =
+                (a2(k,j,i+1) - a2(k,j,i-1)) / coords.Dxc<1>(i) / 2.0
+              - (a1(k,j+1,i) - a1(k,j-1,i)) / coords.Dxc<2>(j) / 2.0;
+          } else {
+            u(IB1, k, j, i) = (a3(k, j + 1, i) - a3(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0 -
+                              (a2(k + 1, j, i) - a2(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0;
+            u(IB2, k, j, i) = (a1(k + 1, j, i) - a1(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0 -
+                              (a3(k, j, i + 1) - a3(k, j, i - 1)) / coords.Dxc<1>(i) / 2.0;
+            u(IB3, k, j, i) = (a2(k, j, i + 1) - a2(k, j, i - 1)) / coords.Dxc<1>(i) / 2.0 -
+                              (a1(k, j + 1, i) - a1(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0;
+                            }
+          u(IPS, k, j, i) = 0.0;
+        }
+        if (two_d && (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd)){
+          u(IB3,k,j,i) = bz0 + amp * sn * rem[6][wave_flag];
+        }
+
+        
         u(IEN, k, j, i) = p0 / gm1 + 0.5 * d0 * u0 * u0 + amp * sn * rem[4][wave_flag];
         u(IEN, k, j, i) += 0.5 * (bx0 * bx0 + by0 * by0 + bz0 * bz0);
       }
     }
   }
+  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+    // fills u_cons() with the cell-averaged b values from
+    // the face centered values made via the discrete
+    // curl of the vector potential
+    // Also deep copies the Bface vector for later evolution
+    auto &u_dev_face = rc->Get("Bface").data;
+    auto Bface = u_dev_face.GetHostMirrorAndCopy();
+
+    Bface_Fill_Cons(pmb, u, Bface); 
+    u_dev_face.DeepCopy(Bface);
+    for (int k = kb.s; k <= kb.e; k++) {
+      for (int j = jb.s; j <= jb.e; j++) {
+        for (int i = ib.s; i <= ib.e; i++) {
+          Real x = cos_a2 * (coords.Xc<1>(i) * cos_a3 + coords.Xc<2>(j) * sin_a3) +
+                   coords.Xc<3>(k) * sin_a2;
+          Real sn = std::sin(k_par * x);
+          Real e0 = p0 / gm1 + 0.5 * d0 * u0 * u0 + amp * sn * rem[4][wave_flag];
+          e0 += 0.5 * (bx0 * bx0 + by0 * by0 + bz0 * bz0);
+          Real bx = bx0;
+          Real by = by0 + amp * sn * rem[5][wave_flag];
+          Real bz = bz0 + amp * sn * rem[6][wave_flag];
+          Real b1 = bx * cos_a2 * cos_a3 - by * sin_a3 - bz * sin_a2 * cos_a3;
+          Real b2 = bx * cos_a2 * sin_a3 + by * cos_a3 - bz * sin_a2 * sin_a3;
+          Real b3 = bx * sin_a2 + bz * cos_a2;
+          Real analytic_me = 0.5 * (b1 * b1 + b2 * b2 + b3 * b3);
+          Real ct_me = 0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
+                              SQR(u(IB3, k, j, i)));
+          u(IEN, k, j, i) = e0 - analytic_me + ct_me;
+        }
+      }
+    }
+  }
   // copy initialized vars to device
   u_dev.DeepCopy(u);
+  
 }
 
 //----------------------------------------------------------------------------------------
@@ -736,11 +843,129 @@ Real HstMaxV2(MeshData<Real> *md) {
 }
 
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg) {
-  if (pin->GetOrAddBoolean("problem/linear_wave", "dump_max_v2", false)) {
+  if (pin->GetOrAddBoolean("problem/linear_wave_mhd", "dump_max_v2", false)) {
     auto hst_vars = pkg->Param<parthenon::HstVar_list>(parthenon::hist_param_key);
     hst_vars.emplace_back(parthenon::HistoryOutputVar(
         parthenon::UserHistoryOperation::max, HstMaxV2, "MaxAbsV2"));
     pkg->UpdateParam(parthenon::hist_param_key, hst_vars);
   }
 }
+
+template <typename ConsHost, typename BfaceHost>
+void Bface_Fill_Cons(MeshBlock *pmb, ConsHost &u, BfaceHost &Bface) {
+
+  IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+ 
+  // always needed
+  Kokkos::View<Real ***, parthenon::LayoutWrapper, parthenon::HostMemSpace> ax(
+      "ax", pmb->cellbounds.ncellsk(IndexDomain::entire),
+      pmb->cellbounds.ncellsj(IndexDomain::entire),
+      pmb->cellbounds.ncellsi(IndexDomain::entire));
+  Kokkos::View<Real ***, parthenon::LayoutWrapper, parthenon::HostMemSpace> ay(
+      "ay", pmb->cellbounds.ncellsk(IndexDomain::entire),
+      pmb->cellbounds.ncellsj(IndexDomain::entire),
+      pmb->cellbounds.ncellsi(IndexDomain::entire));
+  Kokkos::View<Real ***, parthenon::LayoutWrapper, parthenon::HostMemSpace> az(
+      "az", pmb->cellbounds.ncellsk(IndexDomain::entire),
+      pmb->cellbounds.ncellsj(IndexDomain::entire),
+      pmb->cellbounds.ncellsi(IndexDomain::entire));
+
+
+  const bool two_d = pmb->pmy_mesh->ndim < 3;
+
+  // Use vector potential to initialize field loop
+  auto &coords = pmb->coords;
+
+  // create corner valued vector potential
+  int kl, ku;
+  if (two_d) {
+    kl = kb.s;
+    ku = kb.e;
+  } else {
+    kl = kb.s - 1;
+    ku = kb.e + 1;
+  }
+  for (int k = kl; k <= ku; k++) {
+    for (int j = jb.s - 1; j <= jb.e + 1; j++) {
+      for (int i = ib.s - 1; i <= ib.e + 1; i++) {
+        // define az at the cell-corners or nodes
+        ax(k,j,i) = A1(coords.X<1, TE::E1>(k,j,i),
+                      coords.X<2, TE::E1>(k,j,i),
+                      coords.X<3, TE::E1>(k,j,i));
+
+        ay(k,j,i) = A2(coords.X<1, TE::E2>(k,j,i),
+                      coords.X<2, TE::E2>(k,j,i),
+                      coords.X<3, TE::E2>(k,j,i));
+
+        az(k,j,i) = A3(coords.X<1, TE::E3>(k,j,i),
+                      coords.X<2, TE::E3>(k,j,i),
+                      coords.X<3, TE::E3>(k,j,i));
+        }
+      }
+  }
+
+  auto &mbd = pmb->meshblock_data.Get();
+  // initializing on host
+  auto Bx_face = Bface.Get(IBF1, 0, 0, 0);
+  auto By_face = Bface.Get(IBF2, 0, 0, 0);
+  auto Bz_face = Bface.Get(IBF3, 0, 0, 0);
+
+  // fill Bface first (cell faces so +1 on the bounds)
+
+  // x-face
+  for (int k = kb.s; k <= kb.e; k++) {
+    for (int j = jb.s; j <= jb.e; j++) { 
+      for (int i = ib.s; i <= ib.e+1; i++) { // +1 here
+        // create face-fields with cell-corner defined az
+        Real aydz =
+            two_d ? 0.0 : (ay(k + 1, j, i) - ay(k, j, i)) / coords.Dxc<3>(k);
+        Bx_face(k, j, i) =
+            (az(k, j + 1, i) - az(k, j, i)) / coords.Dxc<2>(j) - aydz;
+      }
+    }
+  }
+  // y-face
+  for (int k = kb.s; k <= kb.e; k++) {
+    for (int j = jb.s; j <= jb.e+1; j++) { // +1 here
+      for (int i = ib.s; i <= ib.e; i++) { 
+        // create face-fields with cell-corner defined az
+        Real axdz =
+            two_d ? 0.0 : (ax(k + 1, j, i) - ax(k, j, i)) / coords.Dxc<3>(k);
+        By_face(k, j, i) =
+        axdz - (az(k, j, i + 1) - az(k, j, i)) / coords.Dxc<1>(i);
+      }
+    }
+  }
+  // z-face, filling with u_cons(IB3) value for consistency
+  // this is specific for 2D linear wave
+  for (int k = kb.s; k <= ku; k++) { // +1 here
+    for (int j = jb.s; j <= jb.e; j++) { 
+      for (int i = ib.s; i <= ib.e; i++) { 
+        Bz_face(k, j, i) = 
+            two_d ? 0.0 : (ay(k, j, i + 1) - ay(k, j, i)) / coords.Dxc<1>(i) -
+                          (ax(k, j + 1, i) - ax(k, j, i)) / coords.Dxc<2>(j);
+      }
+    }
+  }
+  // now good to fill up the Bx/By cons vector
+  for (int k = kb.s; k <= kb.e; k++) {
+    for (int j = jb.s; j <= jb.e; j++) { 
+      for (int i = ib.s; i <= ib.e; i++) {
+        // create cell-centered B from face-centered average
+        u(IB1, k, j, i) =
+            0.5 * (Bx_face(k, j, i) + Bx_face(k, j, i + 1));
+        u(IB2, k, j, i) =
+            0.5 * (By_face(k, j, i) + By_face(k, j + 1, i));
+        u(IB3, k, j, i) =
+            two_d ? (ay(k, j, i + 1) - ay(k, j, i)) / coords.Dxc<1>(i) -
+                        (ax(k, j + 1, i) - ax(k, j, i)) / coords.Dxc<2>(j)
+                  : 0.5 * (Bz_face(k, j, i) + Bz_face(k + 1, j, i));  
+      }
+    }
+  }
+}
+
+
 } // namespace linear_wave_mhd

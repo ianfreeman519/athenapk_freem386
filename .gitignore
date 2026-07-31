@@ -1,3 +1,6 @@
+# Snakemake workflow files
+.snakemake/
+
 # Object and binary directories
 build*/
 

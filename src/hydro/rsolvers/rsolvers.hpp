@@ -26,6 +26,8 @@ struct Riemann;
 // now include the specializations
 #include "glmmhd_dc_llf.hpp"
 #include "glmmhd_hlld.hpp"
+#include "ctmhd_hlld.hpp"
+#include "ucthlldmhd_hlld.hpp"
 #include "glmmhd_hlle.hpp"
 #include "hydro_dc_llf.hpp"
 #include "hydro_hllc.hpp"
@@ -56,6 +58,36 @@ struct Riemann<Fluid::glmmhd, RiemannSolver::none> {
         const AdiabaticGLMMHDEOS &eos, const Real c_h) {
     parthenon::par_for_inner(member, il, iu, [&](const int i) {
       for (size_t v = 0; v < Hydro::GetNVars<Fluid::glmmhd>(); v++) {
+        cons.flux(ivx, v, k, j, i) = 0.0;
+      }
+    });
+  }
+};
+
+template <>
+struct Riemann<Fluid::ctmhd, RiemannSolver::none> {
+  static KOKKOS_INLINE_FUNCTION void
+  Solve(parthenon::team_mbr_t const &member, const int k, const int j, const int il,
+        const int iu, const int ivx, const parthenon::ScratchPad2D<Real> &wl,
+        const parthenon::ScratchPad2D<Real> &wr, VariableFluxPack<Real> &cons,
+        const AdiabaticCTMHDEOS &eos, const Real c_h) {
+    parthenon::par_for_inner(member, il, iu, [&](const int i) {
+      for (size_t v = 0; v < Hydro::GetNVars<Fluid::ctmhd>(); v++) {
+        cons.flux(ivx, v, k, j, i) = 0.0;
+      }
+    });
+  }
+};
+
+template <>
+struct Riemann<Fluid::ucthlldmhd, RiemannSolver::none> {
+  static KOKKOS_INLINE_FUNCTION void
+  Solve(parthenon::team_mbr_t const &member, const int k, const int j, const int il,
+        const int iu, const int ivx, const parthenon::ScratchPad2D<Real> &wl,
+        const parthenon::ScratchPad2D<Real> &wr, VariableFluxPack<Real> &cons,
+        const AdiabaticCTMHDEOS &eos, const Real c_h) {
+    parthenon::par_for_inner(member, il, iu, [&](const int i) {
+      for (size_t v = 0; v < Hydro::GetNVars<Fluid::ctmhd>(); v++) {
         cons.flux(ivx, v, k, j, i) = 0.0;
       }
     });

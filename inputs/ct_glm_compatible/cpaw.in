@@ -14,8 +14,8 @@ compute_error = true  # set value to one to compute L1 error compared to initial
 b_par   = 1.0         # B parallel
 b_perp  = 0.1         # B perpendicular
 pres    = 0.1         # pressure
-v_par   = 0.0         # vpar = {0, 1} -> {traveling, standing} wave
-dir     = 1           # 1: right polarization (whistler wave), 2: left
+v_par   = 0.0         # vpar = 1 with dir=1 is traveling
+dir     = 1           # 1: right polarization 2: left
 
 <parthenon/mesh>
 refinement = none
@@ -57,9 +57,13 @@ eos = adiabatic
 reconstruction = plm
 riemann = hlld
 gamma = 1.666666666666667 # gamma = C_p/C_v
-scratch_level = 0 # 0 is actual scratch (tiny); 1 is HBM
+scratch_level = 1 # 0 is actual scratch (tiny); 1 is HBM
 
 <parthenon/output0>
 file_type = hdf5
 dt = 0.1
 variables = cons
+
+<parthenon/output1>
+file_type = hst
+dt = 0.01

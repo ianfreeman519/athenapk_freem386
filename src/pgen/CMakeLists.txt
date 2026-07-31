@@ -14,14 +14,16 @@ target_sources(athenaPK PRIVATE
     cluster/magnetic_tower.cpp
     cluster/snia_feedback.cpp
     cluster/stellar_feedback.cpp
-    cpaw.cpp
+    ct_glm_compatible/current_sheet.cpp
+    ct_glm_compatible/field_loop.cpp
+    ct_glm_compatible/linear_wave_mhd.cpp
+    ct_glm_compatible/orszag_tang.cpp
+    ct_glm_compatible/smooth_mhd_vortex.cpp
+    ct_glm_compatible/cpaw.cpp
     diffusion.cpp
-    field_loop.cpp
     kh.cpp
     linear_wave.cpp
-    linear_wave_mhd.cpp
     lw_implode.cpp
-    orszag_tang.cpp
     rand_blast.cpp
     sod.cpp
     shattering.cpp

@@ -63,6 +63,10 @@ void add_flux_fun(std::map<FluxFunKey_t, FluxFun_t *> &flux_functions) {
 template <Fluid fluid>
 constexpr size_t GetNVars();
 
+template <Fluid fluid>
+constexpr size_t GetAuxNVars();
+
+
 template <>
 constexpr size_t GetNVars<Fluid::euler>() {
   return 5; // rho, u_x, u_y, u_z, E
@@ -70,8 +74,19 @@ constexpr size_t GetNVars<Fluid::euler>() {
 
 template <>
 constexpr size_t GetNVars<Fluid::glmmhd>() {
-  return 9; // above plus B_x, B_y, B_z, psi
+  return 9; // euler plus B_x, B_y, B_z, psi
 }
+
+template <>
+constexpr size_t GetNVars<Fluid::ctmhd>() {
+  return 8; // euler plus B_x, B_y, B_z
+}
+
+template <>
+constexpr size_t GetAuxNVars<Fluid::ucthlldmhd>() {
+  return 6; // AL, AR, DL, DR, VBART1, VBART2
+}
+
 
 } // namespace Hydro
 

@@ -29,13 +29,20 @@ enum {
   IPS = 8
 };
 
+// face-centered magnetic field variables
+enum { IBF1 = 0, IBF2 = 1, IBF3 = 2 };
+
+// vars needed for UCT-HLLD calculations
+enum { AL = 0, AR = 1, DL = 2, DR = 3, VBART1 = 4, VBART2 = 5 };
+
+
 // array indices for 1D primitives: velocity, transverse components of field
 enum { IV1 = 1, IV2 = 2, IV3 = 3, IPR = 4 };
 
 enum class RiemannSolver { undefined, none, hlle, llf, hllc, hlld };
 enum class Reconstruction { undefined, dc, plm, ppm, wenoz, weno3, limo3 };
 enum class Integrator { undefined, rk1, rk2, vl2, rk3 };
-enum class Fluid { undefined, euler, glmmhd };
+enum class Fluid { undefined, euler, glmmhd, ctmhd, ucthlldmhd };
 enum class Cooling { none, tabular };
 enum class Conduction { none, isotropic, anisotropic };
 enum class ConductionCoeff { none, fixed, spitzer };
@@ -45,7 +52,7 @@ enum class Resistivity { none, ohmic };
 enum class ResistivityCoeff { none, fixed, spitzer };
 enum class DiffInt { none, unsplit, rkl2 };
 
-enum class Hst { idx, ekin, emag, divb };
+enum class Hst { idx, ekin, emag, divb, facedivb, maxfacedivb };
 
 enum class CartesianDir { x, y, z };
 

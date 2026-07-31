@@ -62,10 +62,17 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin);
 void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
 } // namespace advection
 
+namespace current_sheet {
+using namespace parthenon::driver::prelude;
+
+void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
+} // namespace current_sheet
+
 namespace orszag_tang {
 using namespace parthenon::driver::prelude;
 
 void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
 } // namespace orszag_tang
 
 namespace diffusion {
@@ -80,6 +87,15 @@ using namespace parthenon::driver::prelude;
 void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
 } // namespace field_loop
+
+namespace smooth_mhd_vortex {
+using namespace parthenon::driver::prelude;
+
+void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void UserWorkAfterLoop(Mesh *mesh, parthenon::ParameterInput *pin,
+                       parthenon::SimTime &tm);
+} // namespace smooth_mhd_vortex
 
 namespace kh {
 using namespace parthenon::driver::prelude;
