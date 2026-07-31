@@ -35,6 +35,19 @@ KOKKOS_INLINE_FUNCTION
 void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
                                   Real &dprofile_dr);
 
+// Thermal profile options only affect density and temperature. Velocity and magnetic
+// structure intentionally stay on their existing Gaussian paths so the thermodynamic
+// initialization can be changed independently from the field geometry.
+enum class ThermalProfileShape { gaussian, tophat };
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateThermalProfile(const ThermalProfileShape shape, const Real r,
+                            const Real gaussian_width, const Real tophat_core_width,
+                            const Real tophat_falloff_width);
+
+KOKKOS_INLINE_FUNCTION
+Real TophatProfile(const Real r, const Real core_width, const Real falloff_width);
+
 // Analytic pressure support that balances the Lorentz force from
 // B = z_hat x grad(A * exp(-(r / w_B)^2)) for a single wire, with the integration
 // constant chosen so the support vanishes at infinity.
@@ -74,6 +87,8 @@ struct PulsedGaussianParams {
   Real v0_cgs;
   Real array_separation_cgs;
   Real width_thermo_cgs;
+  Real thermal_tophat_core_width_cgs;
+  Real thermal_tophat_falloff_width_cgs;
   Real width_magnetic_cgs;
   int azimuthal_mode_number;
   Real density_perturb_amplitude;
@@ -85,10 +100,13 @@ struct PulsedGaussianParams {
   Real v0;
   Real array_separation;
   Real width_thermo;
+  Real thermal_tophat_core_width;
+  Real thermal_tophat_falloff_width;
   Real width_magnetic;
   Real peak_magnetic_field_strength;
   Real magnetic_profile_amplitude;
   Real velocity_normalization;
+  ThermalProfileShape thermal_profile_shape;
 };
 
 struct PulsedGaussianState {
@@ -224,6 +242,22 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
       pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "array_separation", 4.0);
   params.width_thermo_cgs =
       pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "w", 1.0);
+  const auto thermal_profile_name = pin->GetOrAddString(
+      "problem/pulsed_reconnection_gaussian", "thermal_profile", "gaussian");
+  if (thermal_profile_name == "gaussian") {
+    params.thermal_profile_shape = ThermalProfileShape::gaussian;
+  } else if (thermal_profile_name == "tophat") {
+    params.thermal_profile_shape = ThermalProfileShape::tophat;
+  } else {
+    PARTHENON_FAIL(
+        "problem/pulsed_reconnection_gaussian/thermal_profile must be either "
+        "'gaussian' or 'tophat'.");
+  }
+  params.thermal_tophat_core_width_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "core_width", params.width_thermo_cgs);
+  params.thermal_tophat_falloff_width_cgs =
+      pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "falloff_width",
+                        params.width_thermo_cgs);
   params.width_magnetic_cgs = pin->GetOrAddReal(
       "problem/pulsed_reconnection_gaussian", "w_B",
       pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "w_magnetic",
@@ -249,6 +283,12 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
 
   PARTHENON_REQUIRE(params.width_thermo_cgs > 0.0,
                     "problem/pulsed_reconnection_gaussian/w must be positive.");
+  PARTHENON_REQUIRE(
+      params.thermal_tophat_core_width_cgs > 0.0,
+      "problem/pulsed_reconnection_gaussian/core_width must be positive.");
+  PARTHENON_REQUIRE(
+      params.thermal_tophat_falloff_width_cgs > 0.0,
+      "problem/pulsed_reconnection_gaussian/falloff_width must be positive.");
   PARTHENON_REQUIRE(params.width_magnetic_cgs > 0.0,
                     "problem/pulsed_reconnection_gaussian/w_B must be positive.");
   PARTHENON_REQUIRE(params.drive_width_cgs > 0.0,
@@ -292,6 +332,9 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   params.v0 = params.v0_cgs * units.cm_s();
   params.array_separation = params.array_separation_cgs * units.cm();
   params.width_thermo = params.width_thermo_cgs * units.cm();
+  params.thermal_tophat_core_width = params.thermal_tophat_core_width_cgs * units.cm();
+  params.thermal_tophat_falloff_width =
+      params.thermal_tophat_falloff_width_cgs * units.cm();
   params.width_magnetic = params.width_magnetic_cgs * units.cm();
   params.drive_width = params.drive_width_cgs * units.cm();
   params.drive_t_peak = params.drive_t_peak_ns * 1.0e-9 / units.s();
@@ -336,10 +379,11 @@ PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, cons
   Real density_profile_sum = 0.0;
   Real magnetic_support_sum = 0.0;
 
-  // Each wire contributes a thermodynamic Gaussian, a radial expansion, an azimuthal
-  // magnetic field from the curl construction, and an analytic magnetic support term.
-  // The total state is the simple sum of the two wire-centered contributions plus the
-  // global background density/temperature.
+  // Each wire contributes a thermodynamic profile, a Gaussian radial expansion, an
+  // azimuthal magnetic field from the curl construction, and an analytic magnetic
+  // support term. Only density and temperature use the profile selector; velocity and
+  // magnetic structure deliberately stay on the existing Gaussian definitions so the
+  // thermal morphology can be changed without also changing the drive/field geometry.
   for (int A = -1; A <= 1; A += 2) {
     const Real y_center = A * d;
     const Real y_local = y - y_center;
@@ -347,9 +391,12 @@ PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, cons
     const Real r = sqrt(r2);
     const Real theta = atan2(y_local, x);
 
-    Real thermo_profile = 0.0;
+    const Real thermo_profile = EvaluateThermalProfile(
+        params.thermal_profile_shape, r, params.width_thermo,
+        params.thermal_tophat_core_width, params.thermal_tophat_falloff_width);
+    Real gaussian_velocity_profile_unused = 0.0;
     Real dthermo_profile_dr = 0.0;
-    GaussianProfileAndDerivative(r, params.width_thermo, thermo_profile,
+    GaussianProfileAndDerivative(r, params.width_thermo, gaussian_velocity_profile_unused,
                                  dthermo_profile_dr);
     const Real density_perturbation = AzimuthalThermoPerturbation(
         theta, params.density_perturb_amplitude, params.azimuthal_mode_number);
@@ -401,6 +448,38 @@ void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
   const Real exponent = -SQR(r / width);
   profile = exp(fmax(-700.0, exponent));
   dprofile_dr = (-2.0 * r / SQR(width)) * profile;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateThermalProfile(const ThermalProfileShape shape, const Real r,
+                            const Real gaussian_width, const Real tophat_core_width,
+                            const Real tophat_falloff_width) {
+  if (shape == ThermalProfileShape::tophat) {
+    return TophatProfile(r, tophat_core_width, tophat_falloff_width);
+  }
+  Real profile = 0.0;
+  Real derivative_unused = 0.0;
+  GaussianProfileAndDerivative(r, gaussian_width, profile, derivative_unused);
+  return profile;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real TophatProfile(const Real r, const Real core_width, const Real falloff_width) {
+  if (r <= core_width) {
+    return 1.0;
+  } else if (r >= core_width + falloff_width) {
+    return 0.0;
+  } else {
+    // Use the same quintic smoothstep taper already used by the existing top-hat
+    // problem generators so the thermal profile has a flat core with continuous
+    // derivatives through the shoulder region.
+    const Real x = (r - core_width) / falloff_width;
+    const Real x2 = x * x;
+    const Real x3 = x2 * x;
+    const Real x4 = x3 * x;
+    const Real x5 = x4 * x;
+    return 1.0 - 10.0 * x3 + 15.0 * x4 - 6.0 * x5;
+  }
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -761,6 +840,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "v0(peak) [cm/s] ======== " << params.v0_cgs << std::endl;
     std::cout << "array_separation [cm] == " << params.array_separation_cgs << std::endl;
     std::cout << "thermo width w [cm] ==== " << params.width_thermo_cgs << std::endl;
+    std::cout << "thermal profile ======== "
+              << (params.thermal_profile_shape == ThermalProfileShape::tophat ? "tophat"
+                                                                              : "gaussian")
+              << std::endl;
+    std::cout << "tophat core width [cm] = " << params.thermal_tophat_core_width_cgs
+              << std::endl;
+    std::cout << "tophat falloff [cm] === " << params.thermal_tophat_falloff_width_cgs
+              << std::endl;
     std::cout << "magnetic width w_B [cm]  " << params.width_magnetic_cgs << std::endl;
     std::cout << "drive width w_drive [cm] " << params.drive_width_cgs << std::endl;
     std::cout << "drive cutoff radius ==== "
@@ -786,12 +873,20 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "v0(peak) [code] ======== " << params.v0 << std::endl;
     std::cout << "array_separation [code]  " << params.array_separation << std::endl;
     std::cout << "thermo width w [code] == " << params.width_thermo << std::endl;
+    std::cout << "tophat core width [code] " << params.thermal_tophat_core_width
+              << std::endl;
+    std::cout << "tophat falloff [code] == " << params.thermal_tophat_falloff_width
+              << std::endl;
     std::cout << "magnetic width w_B [code]" << params.width_magnetic << std::endl;
-    std::cout << "thermo profile ========= exp(-(r / w)^2)" << std::endl;
+    std::cout << "thermo profile ========= "
+              << (params.thermal_profile_shape == ThermalProfileShape::tophat
+                      ? "top-hat core with quintic falloff"
+                      : "exp(-(r / w)^2)")
+              << std::endl;
     std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
     std::cout << "velocity =============== "
               << (params.drive_enable ? "disabled in driven mode"
-                                      : "normalized -grad(T_profile)")
+                                      : "normalized -grad(gaussian thermo profile)")
               << std::endl;
     std::cout << "magnetic field ========= "
               << (params.drive_enable ? "source-built from Az(t)"
