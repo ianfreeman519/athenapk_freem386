@@ -1,5 +1,11 @@
 # Snakemake workflow files
 .snakemake/
+workflow/logs/
+__pycache__/
+*.py[cod]
+
+# Emacs autosave files
+\#*\#
 
 # Object and binary directories
 build*/

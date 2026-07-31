@@ -1,0 +1,1 @@
+Magnetic field-line visualization for the 2D current sheet test. The background color shows ``B_y`` and the streamlines trace the in-plane magnetic field.
