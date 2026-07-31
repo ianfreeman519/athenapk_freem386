@@ -107,6 +107,27 @@ struct DriveFloorState {
   Real T_floor;
 };
 
+KOKKOS_INLINE_FUNCTION
+Real EvaluateDriveMagneticSupport(const PulsedGaussianParams &params, const Real x,
+                                  const Real y, const Real amplitude) {
+  // In driven mode we inject the magnetic field through a time-dependent Gaussian
+  // vector potential. The matching analytic pressure support must therefore be
+  // evaluated from that same instantaneous Gaussian amplitude so that the gas
+  // pressure grows in step with the magnetic pressure/tension.
+  Real support = 0.0;
+  const Real half_sep = 0.5 * params.array_separation;
+  const Real cutoff_radius = params.drive_cutoff_radius_factor * params.drive_width;
+  for (int sign = -1; sign <= 1; sign += 2) {
+    const Real y_local = y - sign * half_sep;
+    const Real r2 = SQR(x) + SQR(y_local);
+    if (r2 > SQR(cutoff_radius)) {
+      continue;
+    }
+    support += GaussianMagneticSupportProfile(sqrt(r2), params.drive_width, amplitude);
+  }
+  return support;
+}
+
 PulsedGaussianParams g_source_params{};
 bool g_source_params_initialized = false;
 
@@ -669,7 +690,13 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
         }
 
         const auto floors = EvaluateDriveFloorState(params, x, y);
-        if (floors.rho_floor <= 0.0 && floors.T_floor <= 0.0) {
+        const Real magnetic_support =
+            params.force_balance > 0.0
+                ? fmax(0.0, params.force_balance *
+                                  EvaluateDriveMagneticSupport(params, x, y, amplitude_new))
+                : 0.0;
+        if (floors.rho_floor <= 0.0 && floors.T_floor <= 0.0 &&
+            magnetic_support <= 0.0) {
           return;
         }
 
@@ -687,13 +714,22 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
         const Real internal_energy =
             fmax(0.0, cons(IEN, k, j, i) - kinetic_energy - magnetic_energy);
         const Real pressure = params.gm1 * internal_energy;
-        const Real temperature =
-            rho_new > 0.0 ? pressure * params.m_bar / (params.k_b * rho_new) : 0.0;
+        // The existing hydro support option already acts like a density/temperature
+        // floor inside the driven layer. Extend that logic so the total gas pressure
+        // also includes the analytic magnetic support required to counter the Lorentz
+        // force from the field that was just injected during this source-term step.
+        //
+        // This is intentionally framed as a floor on the thermal pressure rather than
+        // a direct overwrite. Cells that are already hotter or more pressurized keep
+        // their excess internal energy, while under-supported cells are lifted to the
+        // minimum pressure implied by:
+        //   1. the requested temperature floor at the updated density, and
+        //   2. the instantaneous analytic magnetic support profile.
+        const Real thermal_pressure_floor =
+            rho_new > 0.0 ? floors.T_floor * params.k_b * rho_new / params.m_bar : 0.0;
+        const Real target_pressure = thermal_pressure_floor + magnetic_support;
         const Real delta_internal_energy =
-            floors.T_floor > temperature
-                ? (floors.T_floor - temperature) * params.k_b * rho_new /
-                      (params.m_bar * params.gm1)
-                : 0.0;
+            target_pressure > pressure ? (target_pressure - pressure) / params.gm1 : 0.0;
         cons(IEN, k, j, i) += delta_internal_energy;
       });
 }
