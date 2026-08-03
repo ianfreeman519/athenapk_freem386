@@ -53,7 +53,7 @@ initial_force_balance = true
 drive_enable = true
 drive_peak_current_MA = 20
 drive_t_peak_ns = 200.0
-w_drive = 0.5
+w_drive = 0.8
 drive_thermal_profile = cubic
 drive_magnetic_profile = cubic
 drive_force_balance = true
@@ -69,15 +69,15 @@ nx3 = 1
 refinement = none
 nghost = 2
 
-nx1 = 1536
-x1min = -6.0
-x1max = 6.0
+nx1 = 3072
+x1min = -12.0
+x1max = 12.0
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 = 1536
-x2min = -6.0
-x2max = 6.0
+nx2 = 3072
+x2min = -12.0
+x2max = 12.0
 ix2_bc = outflow
 ox2_bc = outflow
 
