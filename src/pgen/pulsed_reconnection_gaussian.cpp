@@ -4,8 +4,8 @@
 // Licensed under the 3-Clause License (the "LICENSE")
 //========================================================================================
 //! \file pulsed_reconnection_gaussian.cpp
-//! \brief Problem generator for pulsed reconnection with Gaussian thermodynamics and a
-//! divergence-free Gaussian magnetic field.
+//! \brief Problem generator for pulsed reconnection with configurable thermal and
+//! magnetic radial profiles.
 //========================================================================================
 
 // Parthenon headers
@@ -17,6 +17,10 @@
 #include "utils/error_checking.hpp"
 #include <parthenon/driver.hpp>
 #include <parthenon/package.hpp>
+#include <algorithm>
+#include <limits>
+#include <string>
+#include <vector>
 
 // AthenaPK headers
 #include "../main.hpp"
@@ -29,31 +33,36 @@ namespace pulsed_reconnection_gaussian {
 using namespace parthenon::driver::prelude;
 using namespace parthenon::package::prelude;
 
-// Evaluate a Gaussian profile and its radial derivative in one place so the thermal and
-// magnetic initializers stay algebraically consistent.
-KOKKOS_INLINE_FUNCTION
-void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
-                                  Real &dprofile_dr);
+enum class ProfileShape { none, gaussian, tophat, cubic, wendland, quintic };
 
-// Thermal profile options only affect density and temperature. Velocity and magnetic
-// structure intentionally stay on their existing Gaussian paths so the thermodynamic
-// initialization can be changed independently from the field geometry.
-enum class ThermalProfileShape { gaussian, tophat };
+struct RadialProfileParams {
+  ProfileShape shape = ProfileShape::none;
+  Real width = 0.0;
+  Real tophat_core_width = 0.0;
+  Real tophat_falloff_width = 0.0;
+};
+
+struct SupportTable {
+  static constexpr int kMaxPoints = 2049;
+  int num_points = 0;
+  Real r_max = 0.0;
+  Real dr = 0.0;
+  Real values[kMaxPoints] = {};
+};
 
 KOKKOS_INLINE_FUNCTION
-Real EvaluateThermalProfile(const ThermalProfileShape shape, const Real r,
-                            const Real gaussian_width, const Real tophat_core_width,
-                            const Real tophat_falloff_width);
+void EvaluateGaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
+                                          Real &dprofile_dr);
 
 KOKKOS_INLINE_FUNCTION
-Real TophatProfile(const Real r, const Real core_width, const Real falloff_width);
+void EvaluateRadialProfileAndDerivative(const RadialProfileParams &params, const Real r,
+                                        Real &profile, Real &dprofile_dr);
 
-// Analytic pressure support that balances the Lorentz force from
-// B = z_hat x grad(A * exp(-(r / w_B)^2)) for a single wire, with the integration
-// constant chosen so the support vanishes at infinity.
 KOKKOS_INLINE_FUNCTION
-Real GaussianMagneticSupportProfile(const Real r, const Real width_magnetic,
-                                    const Real magnetic_profile_amplitude);
+Real EvaluateRadialProfile(const RadialProfileParams &params, const Real r);
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateSupportTable(const SupportTable &table, const Real r);
 
 // Only density and temperature inherit the azimuthal modulation.
 KOKKOS_INLINE_FUNCTION
@@ -61,9 +70,11 @@ Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_
 
 namespace {
 
-// Store both raw inputs and the derived code-unit quantities that the hot loops use.
-// In particular, `magnetic_profile_amplitude` is the amplitude A of the scalar profile
-// whose curl gives B; it is deliberately not the peak magnetic field itself.
+Real PeakNormalizedDerivativeMagnitude(const RadialProfileParams &params);
+Real ProfileSupportRadius(const RadialProfileParams &params);
+SupportTable BuildUnitAmplitudeSupportTable(const RadialProfileParams &params,
+                                            const std::string &label);
+
 struct PulsedGaussianParams {
   Real gm1;
   Real k_b;
@@ -73,10 +84,6 @@ struct PulsedGaussianParams {
   Real drive_peak_current_MA;
   Real drive_t_peak_ns;
   Real drive_t_peak;
-  Real drive_width_cgs;
-  Real drive_width;
-  Real drive_cutoff_radius_factor;
-  bool drive_hydro_support_enable;
   Real drive_rho_floor_cgs;
   Real drive_rho_floor;
   Real drive_T_floor;
@@ -86,27 +93,26 @@ struct PulsedGaussianParams {
   Real T_background;
   Real v0_cgs;
   Real array_separation_cgs;
-  Real width_thermo_cgs;
-  Real thermal_tophat_core_width_cgs;
-  Real thermal_tophat_falloff_width_cgs;
-  Real width_magnetic_cgs;
   int azimuthal_mode_number;
   Real density_perturb_amplitude;
   Real temperature_perturb_amplitude;
-  Real force_balance;
   Real current_field_prefac;
   Real rho_wire;
   Real rho_background;
   Real v0;
   Real array_separation;
-  Real width_thermo;
-  Real thermal_tophat_core_width;
-  Real thermal_tophat_falloff_width;
-  Real width_magnetic;
-  Real peak_magnetic_field_strength;
-  Real magnetic_profile_amplitude;
   Real velocity_normalization;
-  ThermalProfileShape thermal_profile_shape;
+  Real peak_magnetic_field_strength;
+  Real initial_magnetic_profile_amplitude;
+  Real drive_peak_magnetic_profile_amplitude;
+  bool initial_force_balance;
+  bool drive_force_balance;
+  RadialProfileParams initial_thermal_profile;
+  RadialProfileParams initial_magnetic_profile;
+  RadialProfileParams drive_thermal_profile;
+  RadialProfileParams drive_magnetic_profile;
+  SupportTable initial_support_table;
+  SupportTable drive_support_table;
 };
 
 struct PulsedGaussianState {
@@ -126,32 +132,27 @@ struct DriveFloorState {
 };
 
 KOKKOS_INLINE_FUNCTION
-Real EvaluateDriveMagneticSupport(const PulsedGaussianParams &params, const Real x,
-                                  const Real y, const Real amplitude) {
-  // In driven mode we inject the magnetic field through a time-dependent Gaussian
-  // vector potential. The matching analytic pressure support must therefore be
-  // evaluated from that same instantaneous Gaussian amplitude so that the gas
-  // pressure grows in step with the magnetic pressure/tension.
+Real EvaluateMagneticSupportSum(const PulsedGaussianParams &params,
+                                const SupportTable &table, const Real x, const Real y,
+                                const Real amplitude) {
+  if (table.num_points < 2 || amplitude == 0.0) {
+    return 0.0;
+  }
   Real support = 0.0;
   const Real half_sep = 0.5 * params.array_separation;
-  const Real cutoff_radius = params.drive_cutoff_radius_factor * params.drive_width;
   for (int sign = -1; sign <= 1; sign += 2) {
     const Real y_local = y - sign * half_sep;
-    const Real r2 = SQR(x) + SQR(y_local);
-    if (r2 > SQR(cutoff_radius)) {
-      continue;
-    }
-    support += GaussianMagneticSupportProfile(sqrt(r2), params.drive_width, amplitude);
+    support += EvaluateSupportTable(table, sqrt(SQR(x) + SQR(y_local)));
   }
-  return support;
+  return SQR(amplitude) * support;
 }
 
 PulsedGaussianParams g_source_params{};
 bool g_source_params_initialized = false;
 
 // The legacy single-wire ampere-loop field peaks at q = (r / w_B)^2 satisfying
-// exp(-q) * (2 q + 1) = 1. These constants let the new Gaussian curl field match that
-// old peak |B| exactly for the same `current_peak_MA`.
+// exp(-q) * (2 q + 1) = 1. These constants keep the current input roughly aligned with
+// the old peak-field scaling even as the profile families change.
 constexpr Real kOldAmpereLoopPeakQ = 1.2564312086261696770;
 constexpr Real kOldAmpereLoopPeakFactor = 0.6381726863389509616;
 constexpr Real kGaussianGradientPeakFactor = 0.8577638849607067968; // sqrt(2 / e)
@@ -173,51 +174,105 @@ Real DrivePotentialAmplitudeFromCurrent(const PulsedGaussianParams &params,
   if (peak_current_ampere <= 0.0) {
     return 0.0;
   }
-  return params.magnetic_profile_amplitude * current_ampere / peak_current_ampere;
-}
-
-KOKKOS_INLINE_FUNCTION
-Real EvaluateDriveAzSingleWire(const Real x, const Real y_local, const Real drive_width,
-                               const Real cutoff_radius, const Real amplitude) {
-  const Real r2 = SQR(x) + SQR(y_local);
-  if (r2 > SQR(cutoff_radius)) {
-    return 0.0;
-  }
-  return amplitude * exp(fmax(-700.0, -r2 / SQR(drive_width)));
+  return params.drive_peak_magnetic_profile_amplitude * current_ampere /
+         peak_current_ampere;
 }
 
 KOKKOS_INLINE_FUNCTION
 Real EvaluateDriveAz(const PulsedGaussianParams &params, const Real x, const Real y,
                      const Real amplitude) {
+  if (params.drive_magnetic_profile.shape == ProfileShape::none || amplitude == 0.0) {
+    return 0.0;
+  }
   const Real half_sep = 0.5 * params.array_separation;
-  const Real cutoff_radius = params.drive_cutoff_radius_factor * params.drive_width;
-  return EvaluateDriveAzSingleWire(x, y - half_sep, params.drive_width, cutoff_radius,
-                                   amplitude) +
-         EvaluateDriveAzSingleWire(x, y + half_sep, params.drive_width, cutoff_radius,
-                                   amplitude);
+  Real az = 0.0;
+  for (int sign = -1; sign <= 1; sign += 2) {
+    const Real y_local = y - sign * half_sep;
+    az += amplitude *
+          EvaluateRadialProfile(params.drive_magnetic_profile, sqrt(SQR(x) + SQR(y_local)));
+  }
+  return az;
 }
 
 KOKKOS_INLINE_FUNCTION
 DriveFloorState EvaluateDriveFloorState(const PulsedGaussianParams &params, const Real x,
                                         const Real y) {
   DriveFloorState floors{0.0, 0.0};
+  if (params.drive_thermal_profile.shape == ProfileShape::none) {
+    return floors;
+  }
   const Real half_sep = 0.5 * params.array_separation;
-  const Real cutoff_radius = params.drive_cutoff_radius_factor * params.drive_width;
   for (int sign = -1; sign <= 1; sign += 2) {
     const Real y_local = y - sign * half_sep;
-    const Real r2 = SQR(x) + SQR(y_local);
-    if (r2 > SQR(cutoff_radius)) {
-      continue;
-    }
-    const Real profile = exp(fmax(-700.0, -r2 / SQR(params.drive_width)));
+    const Real profile =
+        EvaluateRadialProfile(params.drive_thermal_profile, sqrt(SQR(x) + SQR(y_local)));
     floors.rho_floor += params.drive_rho_floor * profile;
     floors.T_floor += params.drive_T_floor * profile;
   }
   return floors;
 }
 
+ProfileShape ParseProfileShape(const std::string &name, const bool allow_none,
+                               const std::string &input_name) {
+  if (allow_none && name == "none") {
+    return ProfileShape::none;
+  }
+  if (name == "gaussian") {
+    return ProfileShape::gaussian;
+  }
+  if (name == "tophat") {
+    return ProfileShape::tophat;
+  }
+  if (name == "cubic") {
+    return ProfileShape::cubic;
+  }
+  if (name == "wendland") {
+    return ProfileShape::wendland;
+  }
+  if (name == "quintic") {
+    return ProfileShape::quintic;
+  }
+  const std::string allowed =
+      allow_none ? "'none', 'gaussian', 'tophat', 'cubic', 'wendland', or 'quintic'"
+                 : "'gaussian', 'tophat', 'cubic', 'wendland', or 'quintic'";
+  PARTHENON_FAIL("problem/pulsed_reconnection_gaussian/" + input_name +
+                 " must be one of " + allowed + ".");
+}
+
+const char *ProfileShapeName(const ProfileShape shape) {
+  switch (shape) {
+  case ProfileShape::none:
+    return "none";
+  case ProfileShape::gaussian:
+    return "gaussian";
+  case ProfileShape::tophat:
+    return "tophat";
+  case ProfileShape::cubic:
+    return "cubic";
+  case ProfileShape::wendland:
+    return "wendland";
+  case ProfileShape::quintic:
+    return "quintic";
+  }
+  return "unknown";
+}
+
+void RejectLegacyInputKeys(ParameterInput *pin) {
+  const char *block = "problem/pulsed_reconnection_gaussian";
+  for (const auto &key : std::vector<std::string>{"thermal_profile", "force_balance",
+                                                  "drive_hydro_support_enable",
+                                                  "drive_cutoff_radius_factor",
+                                                  "core_width", "falloff_width"}) {
+    if (pin->DoesParameterExist(block, key)) {
+      PARTHENON_FAIL("problem/pulsed_reconnection_gaussian/" + key +
+                     " has been replaced by the new profile schema.");
+    }
+  }
+}
+
 PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg,
                                       ParameterInput *pin) {
+  RejectLegacyInputKeys(pin);
   PulsedGaussianParams params{};
   params.gm1 = pin->GetReal("hydro", "gamma") - 1.0;
   params.current_peak_MA = pin->GetOrAddReal("problem/pulsed_reconnection_gaussian",
@@ -240,34 +295,60 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   params.v0_cgs = pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "v0", 1.0e6);
   params.array_separation_cgs =
       pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "array_separation", 4.0);
-  params.width_thermo_cgs =
+  params.initial_thermal_profile.width =
       pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "w", 1.0);
-  const auto thermal_profile_name = pin->GetOrAddString(
-      "problem/pulsed_reconnection_gaussian", "thermal_profile", "gaussian");
-  if (thermal_profile_name == "gaussian") {
-    params.thermal_profile_shape = ThermalProfileShape::gaussian;
-  } else if (thermal_profile_name == "tophat") {
-    params.thermal_profile_shape = ThermalProfileShape::tophat;
-  } else {
-    PARTHENON_FAIL(
-        "problem/pulsed_reconnection_gaussian/thermal_profile must be either "
-        "'gaussian' or 'tophat'.");
-  }
-  params.thermal_tophat_core_width_cgs = pin->GetOrAddReal(
-      "problem/pulsed_reconnection_gaussian", "core_width", params.width_thermo_cgs);
-  params.thermal_tophat_falloff_width_cgs =
-      pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "falloff_width",
-                        params.width_thermo_cgs);
-  params.width_magnetic_cgs = pin->GetOrAddReal(
+  params.initial_thermal_profile.shape =
+      ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection_gaussian",
+                                            "initial_thermal_profile", "gaussian"),
+                        false, "initial_thermal_profile");
+  params.initial_thermal_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "initial_thermal_core_width",
+      params.initial_thermal_profile.width);
+  params.initial_thermal_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "initial_thermal_falloff_width",
+      params.initial_thermal_profile.width);
+  params.initial_magnetic_profile.width = pin->GetOrAddReal(
       "problem/pulsed_reconnection_gaussian", "w_B",
       pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "w_magnetic",
-                        params.width_thermo_cgs));
-  params.drive_width_cgs = pin->GetOrAddReal("problem/pulsed_reconnection_gaussian",
-                                             "w_drive", params.width_magnetic_cgs);
-  params.drive_cutoff_radius_factor = pin->GetOrAddReal(
-      "problem/pulsed_reconnection_gaussian", "drive_cutoff_radius_factor", 3.0);
-  params.drive_hydro_support_enable = pin->GetOrAddBoolean(
-      "problem/pulsed_reconnection_gaussian", "drive_hydro_support_enable", false);
+                        params.initial_thermal_profile.width));
+  params.initial_magnetic_profile.shape =
+      ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection_gaussian",
+                                            "initial_magnetic_profile", "gaussian"),
+                        true, "initial_magnetic_profile");
+  params.initial_magnetic_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "initial_magnetic_core_width",
+      params.initial_magnetic_profile.width);
+  params.initial_magnetic_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "initial_magnetic_falloff_width",
+      params.initial_magnetic_profile.width);
+  params.initial_force_balance = pin->GetOrAddBoolean(
+      "problem/pulsed_reconnection_gaussian", "initial_force_balance", true);
+  params.drive_thermal_profile.width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "w_drive",
+      params.initial_magnetic_profile.width);
+  params.drive_thermal_profile.shape =
+      ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection_gaussian",
+                                            "drive_thermal_profile", "none"),
+                        true, "drive_thermal_profile");
+  params.drive_thermal_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "drive_thermal_core_width",
+      params.drive_thermal_profile.width);
+  params.drive_thermal_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "drive_thermal_falloff_width",
+      params.drive_thermal_profile.width);
+  params.drive_magnetic_profile = params.drive_thermal_profile;
+  params.drive_magnetic_profile.shape =
+      ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection_gaussian",
+                                            "drive_magnetic_profile", "gaussian"),
+                        true, "drive_magnetic_profile");
+  params.drive_magnetic_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "drive_magnetic_core_width",
+      params.drive_thermal_profile.width);
+  params.drive_magnetic_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection_gaussian", "drive_magnetic_falloff_width",
+      params.drive_thermal_profile.width);
+  params.drive_force_balance = pin->GetOrAddBoolean(
+      "problem/pulsed_reconnection_gaussian", "drive_force_balance", false);
   params.drive_rho_floor_cgs = pin->GetOrAddReal(
       "problem/pulsed_reconnection_gaussian", "drive_rho_floor", params.rho_wire_cgs);
   params.drive_T_floor = pin->GetOrAddReal("problem/pulsed_reconnection_gaussian",
@@ -278,20 +359,18 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
       "problem/pulsed_reconnection_gaussian", "density_perturb_amplitude", 0.0);
   params.temperature_perturb_amplitude = pin->GetOrAddReal(
       "problem/pulsed_reconnection_gaussian", "temperature_perturb_amplitude", 0.0);
-  params.force_balance =
-      pin->GetOrAddReal("problem/pulsed_reconnection_gaussian", "force_balance", 1.0);
-
-  PARTHENON_REQUIRE(params.width_thermo_cgs > 0.0,
+  PARTHENON_REQUIRE(params.initial_thermal_profile.width > 0.0,
                     "problem/pulsed_reconnection_gaussian/w must be positive.");
   PARTHENON_REQUIRE(
-      params.thermal_tophat_core_width_cgs > 0.0,
-      "problem/pulsed_reconnection_gaussian/core_width must be positive.");
+      params.initial_thermal_profile.tophat_core_width > 0.0,
+      "problem/pulsed_reconnection_gaussian/initial_thermal_core_width must be positive.");
   PARTHENON_REQUIRE(
-      params.thermal_tophat_falloff_width_cgs > 0.0,
-      "problem/pulsed_reconnection_gaussian/falloff_width must be positive.");
-  PARTHENON_REQUIRE(params.width_magnetic_cgs > 0.0,
+      params.initial_thermal_profile.tophat_falloff_width > 0.0,
+      "problem/pulsed_reconnection_gaussian/initial_thermal_falloff_width must be "
+      "positive.");
+  PARTHENON_REQUIRE(params.initial_magnetic_profile.width > 0.0,
                     "problem/pulsed_reconnection_gaussian/w_B must be positive.");
-  PARTHENON_REQUIRE(params.drive_width_cgs > 0.0,
+  PARTHENON_REQUIRE(params.drive_thermal_profile.width > 0.0,
                     "problem/pulsed_reconnection_gaussian/w_drive must be positive.");
   PARTHENON_REQUIRE(params.array_separation_cgs > 0.0,
                     "problem/pulsed_reconnection_gaussian/array_separation must be "
@@ -305,9 +384,6 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   PARTHENON_REQUIRE(params.drive_t_peak_ns > 0.0,
                     "problem/pulsed_reconnection_gaussian/drive_t_peak_ns must be "
                     "positive.");
-  PARTHENON_REQUIRE(
-      params.drive_cutoff_radius_factor > 0.0,
-      "problem/pulsed_reconnection_gaussian/drive_cutoff_radius_factor must be positive.");
   PARTHENON_REQUIRE(params.drive_rho_floor_cgs >= 0.0,
                     "problem/pulsed_reconnection_gaussian/drive_rho_floor must be "
                     "nonnegative.");
@@ -316,9 +392,6 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
                     "nonnegative.");
   PARTHENON_REQUIRE(params.azimuthal_mode_number >= 0,
                     "problem/pulsed_reconnection_gaussian/N must be nonnegative.");
-  PARTHENON_REQUIRE(params.force_balance >= 0.0,
-                    "problem/pulsed_reconnection_gaussian/force_balance must be "
-                    "nonnegative.");
 
   const auto units = hydro_pkg->Param<Units>("units");
   params.k_b = units.k_boltzmann();
@@ -331,33 +404,50 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   params.drive_rho_floor = params.drive_rho_floor_cgs * units.g_cm3();
   params.v0 = params.v0_cgs * units.cm_s();
   params.array_separation = params.array_separation_cgs * units.cm();
-  params.width_thermo = params.width_thermo_cgs * units.cm();
-  params.thermal_tophat_core_width = params.thermal_tophat_core_width_cgs * units.cm();
-  params.thermal_tophat_falloff_width =
-      params.thermal_tophat_falloff_width_cgs * units.cm();
-  params.width_magnetic = params.width_magnetic_cgs * units.cm();
-  params.drive_width = params.drive_width_cgs * units.cm();
+  params.initial_thermal_profile.width *= units.cm();
+  params.initial_thermal_profile.tophat_core_width *= units.cm();
+  params.initial_thermal_profile.tophat_falloff_width *= units.cm();
+  params.initial_magnetic_profile.width *= units.cm();
+  params.initial_magnetic_profile.tophat_core_width *= units.cm();
+  params.initial_magnetic_profile.tophat_falloff_width *= units.cm();
+  params.drive_thermal_profile.width *= units.cm();
+  params.drive_thermal_profile.tophat_core_width *= units.cm();
+  params.drive_thermal_profile.tophat_falloff_width *= units.cm();
+  params.drive_magnetic_profile.width *= units.cm();
+  params.drive_magnetic_profile.tophat_core_width *= units.cm();
+  params.drive_magnetic_profile.tophat_falloff_width *= units.cm();
   params.drive_t_peak = params.drive_t_peak_ns * 1.0e-9 / units.s();
 
-  // Match the peak magnitude of the legacy ampere-loop field, then back out the scalar
-  // Gaussian amplitude A required by B = z_hat x grad(A * exp(-(r / w_B)^2)).
   const Real drive_peak_current_ampere = params.drive_peak_current_MA * 1.0e6;
   const Real drive_current_field_prefac =
       0.2 * drive_peak_current_ampere * units.cm() * units.gauss();
   params.peak_magnetic_field_strength =
-      params.width_magnetic > 0.0
-          ? drive_current_field_prefac * kOldAmpereLoopPeakFactor / params.width_magnetic
+      params.initial_magnetic_profile.width > 0.0
+          ? params.current_field_prefac * kOldAmpereLoopPeakFactor /
+                params.initial_magnetic_profile.width
           : 0.0;
-  params.magnetic_profile_amplitude =
-      params.peak_magnetic_field_strength * params.width_magnetic /
-      kGaussianGradientPeakFactor;
-
-  // The thermal Gaussian gradient peaks at sqrt(2 / e) / w. This normalization keeps
-  // the per-wire outward expansion speed at the requested peak value v0.
+  const Real initial_peak_grad =
+      PeakNormalizedDerivativeMagnitude(params.initial_magnetic_profile);
+  params.initial_magnetic_profile_amplitude =
+      initial_peak_grad > 0.0 ? params.peak_magnetic_field_strength / initial_peak_grad
+                              : 0.0;
+  const Real drive_peak_field =
+      params.drive_magnetic_profile.width > 0.0
+          ? drive_current_field_prefac * kOldAmpereLoopPeakFactor /
+                params.drive_magnetic_profile.width
+          : 0.0;
+  const Real drive_peak_grad =
+      PeakNormalizedDerivativeMagnitude(params.drive_magnetic_profile);
+  params.drive_peak_magnetic_profile_amplitude =
+      drive_peak_grad > 0.0 ? drive_peak_field / drive_peak_grad : 0.0;
   params.velocity_normalization =
-      params.width_thermo > 0.0
-          ? params.v0 / (kGaussianGradientPeakFactor / params.width_thermo)
+      params.initial_thermal_profile.width > 0.0
+          ? params.v0 / (kGaussianGradientPeakFactor / params.initial_thermal_profile.width)
           : 0.0;
+  params.initial_support_table =
+      BuildUnitAmplitudeSupportTable(params.initial_magnetic_profile, "initial_support");
+  params.drive_support_table =
+      BuildUnitAmplitudeSupportTable(params.drive_magnetic_profile, "drive_support");
 
   return params;
 }
@@ -379,11 +469,6 @@ PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, cons
   Real density_profile_sum = 0.0;
   Real magnetic_support_sum = 0.0;
 
-  // Each wire contributes a thermodynamic profile, a Gaussian radial expansion, an
-  // azimuthal magnetic field from the curl construction, and an analytic magnetic
-  // support term. Only density and temperature use the profile selector; velocity and
-  // magnetic structure deliberately stay on the existing Gaussian definitions so the
-  // thermal morphology can be changed without also changing the drive/field geometry.
   for (int A = -1; A <= 1; A += 2) {
     const Real y_center = A * d;
     const Real y_local = y - y_center;
@@ -391,41 +476,36 @@ PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, cons
     const Real r = sqrt(r2);
     const Real theta = atan2(y_local, x);
 
-    const Real thermo_profile = EvaluateThermalProfile(
-        params.thermal_profile_shape, r, params.width_thermo,
-        params.thermal_tophat_core_width, params.thermal_tophat_falloff_width);
+    const Real thermo_profile = EvaluateRadialProfile(params.initial_thermal_profile, r);
     Real gaussian_velocity_profile_unused = 0.0;
     Real dthermo_profile_dr = 0.0;
-    GaussianProfileAndDerivative(r, params.width_thermo, gaussian_velocity_profile_unused,
-                                 dthermo_profile_dr);
+    EvaluateGaussianProfileAndDerivative(r, params.initial_thermal_profile.width,
+                                         gaussian_velocity_profile_unused,
+                                         dthermo_profile_dr);
     const Real density_perturbation = AzimuthalThermoPerturbation(
         theta, params.density_perturb_amplitude, params.azimuthal_mode_number);
     const Real temperature_perturbation = AzimuthalThermoPerturbation(
         theta, params.temperature_perturb_amplitude, params.azimuthal_mode_number);
     thermo_profile_sum += thermo_profile * temperature_perturbation;
     density_profile_sum += thermo_profile * density_perturbation;
-    magnetic_support_sum += GaussianMagneticSupportProfile(
-        r, params.width_magnetic, params.magnetic_profile_amplitude);
+    magnetic_support_sum += EvaluateSupportTable(params.initial_support_table, r);
 
     if (r > 0.0) {
       const Real inv_r = 1.0 / r;
       const Real xhat = x * inv_r;
       const Real yhat = y_local * inv_r;
 
-      // `dthermo_profile_dr` is negative, so `-dthermo_profile_dr` points outward.
       const Real radial_velocity =
           params.drive_enable ? 0.0 : -params.velocity_normalization * dthermo_profile_dr;
       state.v1 += radial_velocity * xhat;
       state.v2 += radial_velocity * yhat;
 
-      // The magnetic field comes from B = z_hat x grad(phi). For a radial phi(r),
-      // that produces a purely azimuthal field with no imposed azimuthal perturbation.
-      if (!params.drive_enable) {
+      if (params.initial_magnetic_profile.shape != ProfileShape::none) {
         Real magnetic_profile_unused = 0.0;
         Real dmagnetic_profile_dr = 0.0;
-        GaussianProfileAndDerivative(r, params.width_magnetic, magnetic_profile_unused,
-                                     dmagnetic_profile_dr);
-        dmagnetic_profile_dr *= params.magnetic_profile_amplitude;
+        EvaluateRadialProfileAndDerivative(params.initial_magnetic_profile, r,
+                                           magnetic_profile_unused, dmagnetic_profile_dr);
+        dmagnetic_profile_dr *= params.initial_magnetic_profile_amplitude;
         state.B1 += -dmagnetic_profile_dr * yhat;
         state.B2 += dmagnetic_profile_dr * xhat;
       }
@@ -436,62 +516,118 @@ PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, cons
   const Real T = params.T_background + params.T_wire * thermo_profile_sum;
   state.pressure =
       T * params.k_b * state.rho / params.m_bar +
-      (params.drive_enable ? 0.0 : params.force_balance * magnetic_support_sum);
+      (params.initial_force_balance
+           ? SQR(params.initial_magnetic_profile_amplitude) * magnetic_support_sum
+           : 0.0);
   return state;
 }
 
 } // namespace
 
 KOKKOS_INLINE_FUNCTION
-void GaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
-                                  Real &dprofile_dr) {
+void EvaluateGaussianProfileAndDerivative(const Real r, const Real width, Real &profile,
+                                          Real &dprofile_dr) {
   const Real exponent = -SQR(r / width);
   profile = exp(fmax(-700.0, exponent));
   dprofile_dr = (-2.0 * r / SQR(width)) * profile;
 }
 
 KOKKOS_INLINE_FUNCTION
-Real EvaluateThermalProfile(const ThermalProfileShape shape, const Real r,
-                            const Real gaussian_width, const Real tophat_core_width,
-                            const Real tophat_falloff_width) {
-  if (shape == ThermalProfileShape::tophat) {
-    return TophatProfile(r, tophat_core_width, tophat_falloff_width);
+void EvaluateRadialProfileAndDerivative(const RadialProfileParams &params, const Real r,
+                                        Real &profile, Real &dprofile_dr) {
+  if (params.shape == ProfileShape::none) {
+    profile = 0.0;
+    dprofile_dr = 0.0;
+    return;
   }
+  if (params.shape == ProfileShape::gaussian) {
+    EvaluateGaussianProfileAndDerivative(r, params.width, profile, dprofile_dr);
+    return;
+  }
+  if (params.shape == ProfileShape::tophat) {
+    if (r <= params.tophat_core_width) {
+      profile = 1.0;
+      dprofile_dr = 0.0;
+    } else if (r >= params.tophat_core_width + params.tophat_falloff_width) {
+      profile = 0.0;
+      dprofile_dr = 0.0;
+    } else {
+      const Real x = (r - params.tophat_core_width) / params.tophat_falloff_width;
+      const Real x2 = x * x;
+      const Real x3 = x2 * x;
+      const Real x4 = x3 * x;
+      const Real x5 = x4 * x;
+      profile = 1.0 - 10.0 * x3 + 15.0 * x4 - 6.0 * x5;
+      dprofile_dr =
+          (-30.0 * x2 + 60.0 * x3 - 30.0 * x4) / params.tophat_falloff_width;
+    }
+    return;
+  }
+  const Real q = r / params.width;
+  const Real inv_width = 1.0 / params.width;
+  if (params.shape == ProfileShape::cubic) {
+    if (q >= 2.0) {
+      profile = 0.0;
+      dprofile_dr = 0.0;
+    } else if (q <= 1.0) {
+      profile = 1.0 - 1.5 * q * q + 0.75 * q * q * q;
+      dprofile_dr = (-3.0 * q + 2.25 * q * q) * inv_width;
+    } else {
+      const Real s = 2.0 - q;
+      profile = 0.25 * s * s * s;
+      dprofile_dr = -0.75 * s * s * inv_width;
+    }
+    return;
+  }
+  if (params.shape == ProfileShape::wendland) {
+    if (q >= 2.0) {
+      profile = 0.0;
+      dprofile_dr = 0.0;
+    } else {
+      const Real s = 1.0 - 0.5 * q;
+      profile = s * s * s * (1.0 + 1.5 * q);
+      dprofile_dr = -3.0 * q * s * s * inv_width;
+    }
+    return;
+  }
+  if (q >= 3.0) {
+    profile = 0.0;
+    dprofile_dr = 0.0;
+  } else if (q <= 1.0) {
+    profile = (pow(3.0 - q, 5) - 6.0 * pow(2.0 - q, 5) + 15.0 * pow(1.0 - q, 5)) /
+              66.0;
+    dprofile_dr =
+        (-5.0 * pow(3.0 - q, 4) + 30.0 * pow(2.0 - q, 4) -
+         75.0 * pow(1.0 - q, 4)) *
+        inv_width / 66.0;
+  } else if (q <= 2.0) {
+    profile = (pow(3.0 - q, 5) - 6.0 * pow(2.0 - q, 5)) / 66.0;
+    dprofile_dr =
+        (-5.0 * pow(3.0 - q, 4) + 30.0 * pow(2.0 - q, 4)) * inv_width / 66.0;
+  } else {
+    profile = pow(3.0 - q, 5) / 66.0;
+    dprofile_dr = -5.0 * pow(3.0 - q, 4) * inv_width / 66.0;
+  }
+}
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateRadialProfile(const RadialProfileParams &params, const Real r) {
   Real profile = 0.0;
-  Real derivative_unused = 0.0;
-  GaussianProfileAndDerivative(r, gaussian_width, profile, derivative_unused);
+  Real dprofile_dr = 0.0;
+  EvaluateRadialProfileAndDerivative(params, r, profile, dprofile_dr);
   return profile;
 }
 
 KOKKOS_INLINE_FUNCTION
-Real TophatProfile(const Real r, const Real core_width, const Real falloff_width) {
-  if (r <= core_width) {
-    return 1.0;
-  } else if (r >= core_width + falloff_width) {
+Real EvaluateSupportTable(const SupportTable &table, const Real r) {
+  if (table.num_points < 2 || r >= table.r_max) {
     return 0.0;
-  } else {
-    // Use the same quintic smoothstep taper already used by the existing top-hat
-    // problem generators so the thermal profile has a flat core with continuous
-    // derivatives through the shoulder region.
-    const Real x = (r - core_width) / falloff_width;
-    const Real x2 = x * x;
-    const Real x3 = x2 * x;
-    const Real x4 = x3 * x;
-    const Real x5 = x4 * x;
-    return 1.0 - 10.0 * x3 + 15.0 * x4 - 6.0 * x5;
   }
-}
-
-KOKKOS_INLINE_FUNCTION
-Real GaussianMagneticSupportProfile(const Real r, const Real width_magnetic,
-                                    const Real magnetic_profile_amplitude) {
-  // For phi = A exp(-q), q = (r / w_B)^2:
-  //   B_phi = dphi/dr = -2 A r / w_B^2 * exp(-q)
-  // Integrating radial force balance with p_support(infinity) = 0 gives:
-  //   p_support = (A^2 / w_B^2) * (1 - 2 q) * exp(-2 q)
-  const Real q = SQR(r / width_magnetic);
-  const Real profile = exp(fmax(-700.0, -2.0 * q));
-  return SQR(magnetic_profile_amplitude / width_magnetic) * (1.0 - 2.0 * q) * profile;
+  const Real idx = r / table.dr;
+  const int i0 = static_cast<int>(
+      fmin(static_cast<Real>(table.num_points - 2), floor(idx)));
+  const Real frac = idx - static_cast<Real>(i0);
+  return (1.0 - frac) * table.values[i0] + frac * table.values[i0 + 1];
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -500,6 +636,84 @@ Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_
   const Real cos_phase = cos(phase);
   return 1 + p * cos_phase;
 }
+
+namespace {
+
+Real ProfileSupportRadius(const RadialProfileParams &params) {
+  switch (params.shape) {
+  case ProfileShape::none:
+    return 0.0;
+  case ProfileShape::gaussian:
+    return 6.0 * params.width;
+  case ProfileShape::tophat:
+    return params.tophat_core_width + params.tophat_falloff_width;
+  case ProfileShape::cubic:
+  case ProfileShape::wendland:
+    return 2.0 * params.width;
+  case ProfileShape::quintic:
+    return 3.0 * params.width;
+  }
+  return 0.0;
+}
+
+Real PeakNormalizedDerivativeMagnitude(const RadialProfileParams &params) {
+  if (params.shape == ProfileShape::none) {
+    return 0.0;
+  }
+  if (params.shape == ProfileShape::gaussian) {
+    return kGaussianGradientPeakFactor / params.width;
+  }
+  const int samples = 20000;
+  const Real r_max = ProfileSupportRadius(params);
+  Real peak = 0.0;
+  for (int i = 0; i <= samples; ++i) {
+    const Real r = r_max * static_cast<Real>(i) / static_cast<Real>(samples);
+    Real profile = 0.0;
+    Real dprofile_dr = 0.0;
+    EvaluateRadialProfileAndDerivative(params, r, profile, dprofile_dr);
+    peak = std::max(peak, std::abs(dprofile_dr));
+  }
+  return peak;
+}
+
+SupportTable BuildUnitAmplitudeSupportTable(const RadialProfileParams &params,
+                                            const std::string &label) {
+  SupportTable table;
+  if (params.shape == ProfileShape::none) {
+    return table;
+  }
+  table.num_points = SupportTable::kMaxPoints;
+  table.r_max = ProfileSupportRadius(params);
+  table.dr = table.r_max / static_cast<Real>(table.num_points - 1);
+  std::vector<Real> bphi(table.num_points, 0.0);
+  std::vector<Real> rhs(table.num_points, 0.0);
+  std::vector<Real> support(table.num_points, 0.0);
+
+  for (int i = 0; i < table.num_points; ++i) {
+    const Real r = table.dr * static_cast<Real>(i);
+    Real profile = 0.0;
+    Real dprofile_dr = 0.0;
+    EvaluateRadialProfileAndDerivative(params, r, profile, dprofile_dr);
+    bphi[i] = dprofile_dr;
+  }
+  for (int i = 1; i < table.num_points; ++i) {
+    const Real db_dr =
+        i == table.num_points - 1 ? (bphi[i] - bphi[i - 1]) / table.dr
+                                  : (bphi[i + 1] - bphi[i - 1]) / (2.0 * table.dr);
+    const Real r = table.dr * static_cast<Real>(i);
+    rhs[i] = -(SQR(bphi[i]) / r + bphi[i] * db_dr);
+  }
+  support[table.num_points - 1] = 0.0;
+  for (int i = table.num_points - 2; i >= 0; --i) {
+    support[i] = support[i + 1] - 0.5 * (rhs[i] + rhs[i + 1]) * table.dr;
+  }
+  for (int i = 0; i < table.num_points; ++i) {
+    table.values[i] = support[i];
+  }
+  return table;
+}
+
+} // namespace
 
 void ProblemInitPackageData(ParameterInput * /*pin*/,
                             parthenon::StateDescriptor *hydro_pkg) {
@@ -764,15 +978,11 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
         cons(IEN, k, j, i) += old_B1 * delta_B1 + old_B2 * delta_B2 +
                               0.5 * (SQR(delta_B1) + SQR(delta_B2));
 
-        if (!params.drive_hydro_support_enable) {
-          return;
-        }
-
         const auto floors = EvaluateDriveFloorState(params, x, y);
         const Real magnetic_support =
-            params.force_balance > 0.0
-                ? fmax(0.0, params.force_balance *
-                                  EvaluateDriveMagneticSupport(params, x, y, amplitude_new))
+            params.drive_force_balance
+                ? fmax(0.0, EvaluateMagneticSupportSum(params, params.drive_support_table, x,
+                                                       y, amplitude_new))
                 : 0.0;
         if (floors.rho_floor <= 0.0 && floors.T_floor <= 0.0 &&
             magnetic_support <= 0.0) {
@@ -839,21 +1049,17 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "T_background [K] ======= " << params.T_background << std::endl;
     std::cout << "v0(peak) [cm/s] ======== " << params.v0_cgs << std::endl;
     std::cout << "array_separation [cm] == " << params.array_separation_cgs << std::endl;
-    std::cout << "thermo width w [cm] ==== " << params.width_thermo_cgs << std::endl;
-    std::cout << "thermal profile ======== "
-              << (params.thermal_profile_shape == ThermalProfileShape::tophat ? "tophat"
-                                                                              : "gaussian")
+    std::cout << "initial thermo profile == "
+              << ProfileShapeName(params.initial_thermal_profile.shape) << std::endl;
+    std::cout << "initial magnetic profile "
+              << ProfileShapeName(params.initial_magnetic_profile.shape) << std::endl;
+    std::cout << "drive thermal profile == "
+              << ProfileShapeName(params.drive_thermal_profile.shape) << std::endl;
+    std::cout << "drive magnetic profile = "
+              << ProfileShapeName(params.drive_magnetic_profile.shape) << std::endl;
+    std::cout << "initial_force_balance == " << params.initial_force_balance
               << std::endl;
-    std::cout << "tophat core width [cm] = " << params.thermal_tophat_core_width_cgs
-              << std::endl;
-    std::cout << "tophat falloff [cm] === " << params.thermal_tophat_falloff_width_cgs
-              << std::endl;
-    std::cout << "magnetic width w_B [cm]  " << params.width_magnetic_cgs << std::endl;
-    std::cout << "drive width w_drive [cm] " << params.drive_width_cgs << std::endl;
-    std::cout << "drive cutoff radius ==== "
-              << params.drive_cutoff_radius_factor * params.drive_width_cgs << std::endl;
-    std::cout << "drive hydro support ==== " << params.drive_hydro_support_enable
-              << std::endl;
+    std::cout << "drive_force_balance === " << params.drive_force_balance << std::endl;
     std::cout << "drive rho floor [g/cm^3] " << params.drive_rho_floor_cgs << std::endl;
     std::cout << "drive T floor [K] ====== " << params.drive_T_floor << std::endl;
     std::cout << "azimuthal mode N ======= " << params.azimuthal_mode_number
@@ -862,26 +1068,26 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
               << std::endl;
     std::cout << "temp perturb. amplitude =" << params.temperature_perturb_amplitude
               << std::endl;
-    std::cout << "force_balance ========= " << params.force_balance << std::endl;
     std::cout << "Converted code units:" << std::endl;
     std::cout << "matched |B|_peak [code] = " << params.peak_magnetic_field_strength
               << std::endl;
-    std::cout << "mag profile amp [code] = " << params.magnetic_profile_amplitude
+    std::cout << "initial mag amp [code] = " << params.initial_magnetic_profile_amplitude
+              << std::endl;
+    std::cout << "drive mag amp [code] === "
+              << params.drive_peak_magnetic_profile_amplitude
               << std::endl;
     std::cout << "rho_wire(core) [code] == " << params.rho_wire << std::endl;
     std::cout << "rho_background [code] == " << params.rho_background << std::endl;
     std::cout << "v0(peak) [code] ======== " << params.v0 << std::endl;
     std::cout << "array_separation [code]  " << params.array_separation << std::endl;
-    std::cout << "thermo width w [code] == " << params.width_thermo << std::endl;
-    std::cout << "tophat core width [code] " << params.thermal_tophat_core_width
+    std::cout << "thermo width w [code] == " << params.initial_thermal_profile.width
               << std::endl;
-    std::cout << "tophat falloff [code] == " << params.thermal_tophat_falloff_width
+    std::cout << "initial thermal core === "
+              << params.initial_thermal_profile.tophat_core_width
               << std::endl;
-    std::cout << "magnetic width w_B [code]" << params.width_magnetic << std::endl;
-    std::cout << "thermo profile ========= "
-              << (params.thermal_profile_shape == ThermalProfileShape::tophat
-                      ? "top-hat core with quintic falloff"
-                      : "exp(-(r / w)^2)")
+    std::cout << "initial thermal falloff "
+              << params.initial_thermal_profile.tophat_falloff_width << std::endl;
+    std::cout << "magnetic width w_B [code]" << params.initial_magnetic_profile.width
               << std::endl;
     std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
     std::cout << "velocity =============== "
@@ -889,8 +1095,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
                                       : "normalized -grad(gaussian thermo profile)")
               << std::endl;
     std::cout << "magnetic field ========= "
-              << (params.drive_enable ? "source-built from Az(t)"
-                                      : "B = z_hat x grad(A*exp(-(r/w_B)^2))")
+              << "B = z_hat x grad(profile)"
               << std::endl;
     std::cout << "old |B| peak match at q = " << kOldAmpereLoopPeakQ << std::endl;
   }
