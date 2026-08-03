@@ -1,0 +1,113 @@
+# AthenaPK - pulsed_reconnection_gaussian profile suite
+
+<comment>
+problem = pulsed_reconnection_gaussian gaussian suite case
+
+<job>
+problem_id = pulsed_reconnection_gaussian
+
+<diffusion>
+integrator = rkl2
+resistivity = ohmic
+resistivity_coeff = spitzer
+cfl_diff_heat = 0.5
+spitzer_log_lambda = 10.0
+spitzer_eta_max = 5e6
+
+<cooling>
+enable_cooling = tabular
+table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling
+lambda_units_cgs = 1.0
+integrator = rk12
+max_iter = 1000
+cfl = 0.45
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
+
+<thermal_source_solver>
+enabled = false
+
+<units>
+code_length_cgs = 1.0
+code_mass_cgs = 1.0
+code_time_cgs = 1.0
+
+<problem/pulsed_reconnection_gaussian>
+current_peak_MA = 20
+rho_wire = 2.7e-3
+T_wire = 5e6
+rho_background = 1e-6
+T_background = 1e3
+v0 = 0
+w = 1.0
+w_B = 1.0
+array_separation = 6
+N = 50
+density_perturb_amplitude = 0.01
+temperature_perturb_amplitude = 0.0
+
+initial_thermal_profile = gaussian
+initial_magnetic_profile = gaussian
+initial_force_balance = true
+
+drive_enable = true
+drive_peak_current_MA = 20
+drive_t_peak_ns = 500.0
+w_drive = 1.0
+drive_thermal_profile = gaussian
+drive_magnetic_profile = gaussian
+drive_force_balance = true
+drive_rho_floor = 2.7e-3
+drive_T_floor = 5e6
+
+<parthenon/meshblock>
+nx1 = 256
+nx2 = 256
+nx3 = 1
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+
+nx1 = 1536
+x1min = -6.0
+x1max = 6.0
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2 = 768
+x2min = -3.0
+x2max = 3.0
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<hydro>
+scratch_level = 1
+fluid = glmmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.6666666666666667
+first_order_flux_correct = true
+dfloor = 1e-8
+Tfloor = 1e3
+mean_molecular_weight = 6.25
+Z = 13
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.40
+tlim = 4e-7
+dt_max = 1e-8
+
+<parthenon/output0>
+file_type = hdf5
+dt = 1e-8
+id = out0
+variables = prim, curlBz, dt_heat_local, dt_cool_local, eta
