@@ -57,6 +57,18 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt);
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime &tm);
 }
+namespace flat_driven_reconnection {
+using namespace parthenon::driver::prelude;
+void InitUserMeshData(Mesh *mesh, ParameterInput *pin);
+void PreStepMeshUserWorkInLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm);
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin);
+void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+void DrivenOutflowInnerX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+void DrivenOutflowOuterX2(std::shared_ptr<MeshBlockData<Real>> &mbd, bool coarse);
+}
 namespace tophat_pulsed_reconnection {
 using namespace parthenon::driver::prelude;
 void InitUserMeshData(Mesh *mesh, ParameterInput *pin);

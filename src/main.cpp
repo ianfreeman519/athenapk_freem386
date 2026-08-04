@@ -126,6 +126,21 @@ int main(int argc, char *argv[]) {
         pulsed_reconnection_gaussian::UserWorkBeforeOutput;
     Hydro::ProblemInitPackageData = pulsed_reconnection_gaussian::ProblemInitPackageData;
     Hydro::ProblemSourceFirstOrder = pulsed_reconnection_gaussian::Driving;
+  } else if (problem == "flat_driven_reconnection") {
+    pman.app_input->InitUserMeshData = flat_driven_reconnection::InitUserMeshData;
+    pman.app_input->PreStepMeshUserWorkInLoop =
+        flat_driven_reconnection::PreStepMeshUserWorkInLoop;
+    pman.app_input->ProblemGenerator = flat_driven_reconnection::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput =
+        flat_driven_reconnection::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData = flat_driven_reconnection::ProblemInitPackageData;
+    Hydro::ProblemSourceFirstOrder = flat_driven_reconnection::Driving;
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::inner_x2,
+                                              "drivenoutflow",
+                                              flat_driven_reconnection::DrivenOutflowInnerX2);
+    pman.app_input->RegisterBoundaryCondition(parthenon::BoundaryFace::outer_x2,
+                                              "drivenoutflow",
+                                              flat_driven_reconnection::DrivenOutflowOuterX2);
   } else if (problem == "tophat_pulsed_reconnection") {
     pman.app_input->InitUserMeshData = tophat_pulsed_reconnection::InitUserMeshData;
     pman.app_input->ProblemGenerator = tophat_pulsed_reconnection::ProblemGenerator;

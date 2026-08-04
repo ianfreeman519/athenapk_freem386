@@ -30,6 +30,7 @@ target_sources(athenaPK PRIVATE
     periodic_reconnection.cpp
     pulsed_reconnection.cpp
     pulsed_reconnection_gaussian.cpp
+    flat_driven_reconnection.cpp
     tophat.cpp
     tophat_pulsed_reconnection.cpp
     MARZ.cpp
