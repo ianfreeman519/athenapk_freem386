@@ -172,7 +172,7 @@ ProfileEvaluation EvaluateProfiles(const FlatDrivenReconnectionParams &params, c
     const Real thermo_weight = InflowProfile(q, params.inflow_profile);
     const Real magnetic_weight = InflowProfile(y_local/params.h_inflow, params.inflow_profile);
     profile.thermo_weight += thermo_weight;
-    profile.magnetic_weight += A * magnetic_weight;
+    profile.magnetic_weight += magnetic_weight;
   }
 
   return profile;
