@@ -1,7 +1,7 @@
 # AthenaPK - pulsed_reconnection_gaussian profile suite
 
 <comment>
-problem = pulsed_reconnection_gaussian cubic suite case
+problem = pulsed_reconnection_gaussian quintic suite case
 
 <job>
 problem_id = pulsed_reconnection_gaussian
@@ -43,22 +43,22 @@ w = 0.8
 w_B = 0.8
 array_separation = 6
 N = 0
-density_perturb_amplitude = 0.00
+density_perturb_amplitude = 0.0
 temperature_perturb_amplitude = 0.0
 
-initial_thermal_profile = cubic
-initial_magnetic_profile = cubic
+initial_thermal_profile = quintic
+initial_magnetic_profile = quintic
 initial_force_balance = true
 
 drive_enable = true
 drive_peak_current_MA = 20
 drive_t_peak_ns = 200.0
-w_drive = 0.5
-drive_thermal_profile = cubic
-drive_magnetic_profile = cubic
+w_drive = 0.8
+drive_thermal_profile = quintic
+drive_magnetic_profile = quintic
 drive_force_balance = true
 drive_rho_floor = 2.7e-3
-drive_T_floor = 1e6
+drive_T_floor = 5e6
 
 <parthenon/meshblock>
 nx1 = 256
@@ -69,15 +69,15 @@ nx3 = 1
 refinement = none
 nghost = 2
 
-nx1 = 1536
-x1min = -6.0
-x1max = 6.0
+nx1 = 3072
+x1min = -12.0
+x1max = 12.0
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 = 1536
-x2min = -6.0
-x2max = 6.0
+nx2 = 3072
+x2min = -12.0
+x2max = 12.0
 ix2_bc = outflow
 ox2_bc = outflow
 
