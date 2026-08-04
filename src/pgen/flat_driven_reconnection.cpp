@@ -515,7 +515,7 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real /*dt*/
         const Real temperature_floor =
             params.T_background + params.T_inflow * profile.thermo_weight;
         const Real rho_new = fmax(rho_old, rho_floor);
-        const Real B1_new = B1_old + delta_amplitude * profile.magnetic_weight;
+        const Real B1_new = B1_old + A * delta_amplitude * profile.magnetic_weight;
 
         cons(IDN, k, j, i) = rho_new;
         cons(IB1, k, j, i) = B1_new;
