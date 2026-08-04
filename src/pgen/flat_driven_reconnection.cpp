@@ -170,9 +170,10 @@ ProfileEvaluation EvaluateProfiles(const FlatDrivenReconnectionParams &params, c
     const Real y_local = y - A * params.half_array_spacing;
     const Real q = sqrt(SQR(x) + SQR(y_local)) * params.inv_h_inflow;
     const Real thermo_weight = InflowProfile(q, params.inflow_profile);
-    const Real magnetic_weight = InflowProfile(y_local/params.h_inflow, params.inflow_profile);
+    const Real magnetic_weight =
+        InflowProfile(fabs(y_local) * params.inv_h_inflow, params.inflow_profile);
     profile.thermo_weight += thermo_weight;
-    profile.magnetic_weight += magnetic_weight;
+    profile.magnetic_weight += A * magnetic_weight;
   }
 
   return profile;
@@ -515,7 +516,7 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real /*dt*/
         const Real temperature_floor =
             params.T_background + params.T_inflow * profile.thermo_weight;
         const Real rho_new = fmax(rho_old, rho_floor);
-        const Real B1_new = B1_old + A * delta_amplitude * profile.magnetic_weight;
+        const Real B1_new = B1_old + delta_amplitude * profile.magnetic_weight;
 
         cons(IDN, k, j, i) = rho_new;
         cons(IB1, k, j, i) = B1_new;
