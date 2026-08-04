@@ -169,9 +169,10 @@ ProfileEvaluation EvaluateProfiles(const FlatDrivenReconnectionParams &params, c
   for (int A = -1; A <= 1; A += 2) {
     const Real y_local = y - A * params.half_array_spacing;
     const Real q = sqrt(SQR(x) + SQR(y_local)) * params.inv_h_inflow;
-    const Real weight = InflowProfile(q, params.inflow_profile);
-    profile.thermo_weight += weight;
-    profile.magnetic_weight += A * weight;
+    const Real thermo_weight = InflowProfile(q, params.inflow_profile);
+    const Real magnetic_weight = InflowProfile(y_local, params.inflow_profile);
+    profile.thermo_weight += thermo_weight;
+    profile.magnetic_weight += A * magnetic_weight;
   }
 
   return profile;
