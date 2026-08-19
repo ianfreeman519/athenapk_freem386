@@ -18,6 +18,7 @@
 #include "utils/error_checking.hpp"
 
 using namespace parthenon::package::prelude;
+using TE = parthenon::TopologicalElement;
 
 KOKKOS_INLINE_FUNCTION
 Real OhmicDiffusivity::Get(const Real pres, const Real rho) const {
@@ -51,29 +52,27 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
 
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
 
-  if (ohm_diff.GetType() == Resistivity::ohmic &&
-      ohm_diff.GetCoeffType() == ResistivityCoeff::fixed) {
-    // TODO(pgrete): once mindx is properly calculated before this loop, we can get rid of
-    // it entirely.
-    // Using 0.0 as parameters rho and p as they're not used anyway for a fixed coeff.
-    const auto ohm_diff_coeff = ohm_diff.Get(0.0, 0.0);
+  if (ohm_diff.GetType() == Resistivity::ohmic) {
     Kokkos::parallel_reduce(
-        "EstimateResistivityTimestep (ohmic fixed)",
+        "EstimateResistivityTimestep (ohmic)",
         Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
             DevExecSpace(), {0, kb.s, jb.s, ib.s},
             {prim_pack.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1},
             {1, 1, 1, ib.e + 1 - ib.s}),
         KOKKOS_LAMBDA(const int b, const int k, const int j, const int i, Real &min_dt) {
           const auto &coords = prim_pack.GetCoords(b);
+          const auto &prim = prim_pack(b);
+          const auto eta =
+              ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i));
           min_dt =
-              fmin(min_dt, SQR(coords.Dxc<1>(k, j, i)) / (ohm_diff_coeff + TINY_NUMBER));
+              fmin(min_dt, SQR(coords.Dxc<1>(k, j, i)) / (eta + TINY_NUMBER));
           if (ndim >= 2) {
             min_dt = fmin(min_dt,
-                          SQR(coords.Dxc<2>(k, j, i)) / (ohm_diff_coeff + TINY_NUMBER));
+                          SQR(coords.Dxc<2>(k, j, i)) / (eta + TINY_NUMBER));
           }
           if (ndim >= 3) {
             min_dt = fmin(min_dt,
-                          SQR(coords.Dxc<3>(k, j, i)) / (ohm_diff_coeff + TINY_NUMBER));
+                          SQR(coords.Dxc<3>(k, j, i)) / (eta + TINY_NUMBER));
           }
         },
         Kokkos::Min<Real>(min_dt_resist));
@@ -86,9 +85,9 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
 }
 
 //---------------------------------------------------------------------------------------
-//! Calculate isotropic resistivity with fixed coefficient
+//! Calculate isotropic Ohmic fluxes with a coefficient interpolated to each face.
 
-void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
+void OhmicDiffFlux(MeshData<Real> *md) {
   auto pmb = md->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
@@ -101,11 +100,10 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
   auto const &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
 
   const int ndim = pmb->pmy_mesh->ndim;
+  const auto fluid = hydro_pkg->Param<Fluid>("fluid");
+  const bool update_cell_centered_b = fluid != Fluid::ucthlldmhd;
 
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
-  // Using fixed and uniform coefficient so it's safe to get it outside the kernel.
-  // Using 0.0 as parameters rho and p as they're not used anyway for a fixed coeff.
-  const auto eta = ohm_diff.Get(0.0, 0.0);
 
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "Resist. X1 fluxes (ohmic)", DevExecSpace(), 0,
@@ -114,6 +112,9 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
+        const auto eta =
+            0.5 * (ohm_diff.Get(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1)) +
+                   ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
 
         // Face centered current densities
         // j2 = d3B1 - d1B3
@@ -140,8 +141,10 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 
         const auto j3 = d1B2 - d2B1;
 
-        cons.flux(X1DIR, IB2, k, j, i) += -eta * j3;
-        cons.flux(X1DIR, IB3, k, j, i) += eta * j2;
+        if (update_cell_centered_b) {
+          cons.flux(X1DIR, IB2, k, j, i) += -eta * j3;
+          cons.flux(X1DIR, IB3, k, j, i) += eta * j2;
+        }
         cons.flux(X1DIR, IEN, k, j, i) +=
             0.5 * eta *
             ((prim(IB3, k, j, i - 1) + prim(IB3, k, j, i)) * j2 -
@@ -159,6 +162,9 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
+        const auto eta =
+            0.5 * (ohm_diff.Get(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i)) +
+                   ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
 
         // Face centered current densities
         // j3 = d1B2 - d2B1
@@ -183,8 +189,10 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 
         const auto j1 = d2B3 - d3B2;
 
-        cons.flux(X2DIR, IB1, k, j, i) += eta * j3;
-        cons.flux(X2DIR, IB3, k, j, i) += -eta * j1;
+        if (update_cell_centered_b) {
+          cons.flux(X2DIR, IB1, k, j, i) += eta * j3;
+          cons.flux(X2DIR, IB3, k, j, i) += -eta * j1;
+        }
         cons.flux(X2DIR, IEN, k, j, i) +=
             0.5 * eta *
             ((prim(IB1, k, j - 1, i) + prim(IB1, k, j, i)) * j3 -
@@ -202,6 +210,9 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
+        const auto eta =
+            0.5 * (ohm_diff.Get(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i)) +
+                   ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
 
         // Face centered current densities
         // j1 = d2B3 - d3B2
@@ -224,8 +235,10 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 
         const auto j2 = d3B1 - d1B3;
 
-        cons.flux(X3DIR, IB1, k, j, i) += -eta * j2;
-        cons.flux(X3DIR, IB2, k, j, i) += eta * j1;
+        if (update_cell_centered_b) {
+          cons.flux(X3DIR, IB1, k, j, i) += -eta * j2;
+          cons.flux(X3DIR, IB2, k, j, i) += eta * j1;
+        }
         cons.flux(X3DIR, IEN, k, j, i) +=
             0.5 * eta *
             ((prim(IB2, k - 1, j, i) + prim(IB2, k, j, i)) * j1 -
@@ -234,7 +247,99 @@ void OhmicDiffFluxIsoFixed(MeshData<Real> *md) {
 }
 
 //---------------------------------------------------------------------------------------
-//! TODO(pgrete) Calculate Ohmic diffusion, general case, e.g., with varying (Spitzer)
-//! coefficient
+//! Add E_ohm = eta curl(B) to the edge-centered electric field used by CT.
 
-void OhmicDiffFluxGeneral(MeshData<Real> *md) { PARTHENON_THROW("Needs impl."); }
+TaskStatus AddOhmicEdgeEMF(MeshData<Real> *md) {
+  auto pmb = md->GetBlockData(0)->GetBlockPointer();
+  const int ndim = pmb->pmy_mesh->ndim;
+  IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+
+  auto bface_pack = md->PackVariablesAndFluxes(std::vector<std::string>{"Bface"});
+  const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
+  const auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+
+  // z-directed edges. In 1D only the x derivative and the two x-neighboring
+  // coefficient values contribute; in 2D/3D eta is bilinearly interpolated.
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Add Ohmic Ez edges", DevExecSpace(), 0,
+      bface_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e + 1, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        auto &bface = bface_pack(b);
+        const auto &prim = prim_pack(b);
+        const auto &coords = prim_pack.GetCoords(b);
+        const Real dby_dx =
+            (bface(TE::F2, 0, k, j, i) - bface(TE::F2, 0, k, j, i - 1)) /
+            coords.Dxc<1>(k, j, i);
+        const Real dbx_dy =
+            ndim > 1 ? (bface(TE::F1, 0, k, j, i) -
+                        bface(TE::F1, 0, k, j - 1, i)) /
+                           coords.Dxc<2>(k, j, i)
+                     : 0.0;
+        Real eta =
+            0.5 * (ohm_diff.Get(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1)) +
+                   ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
+        if (ndim > 1) {
+          eta = 0.25 *
+                (ohm_diff.Get(prim(IPR, k, j - 1, i - 1),
+                              prim(IDN, k, j - 1, i - 1)) +
+                 ohm_diff.Get(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i)) +
+                 ohm_diff.Get(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1)) +
+                 ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
+        }
+        bface.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) +=
+            eta * (dby_dx - dbx_dy);
+      });
+
+  if (ndim < 3) {
+    return TaskStatus::complete;
+  }
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Add Ohmic Ey edges", DevExecSpace(), 0,
+      bface_pack.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        auto &bface = bface_pack(b);
+        const auto &prim = prim_pack(b);
+        const auto &coords = prim_pack.GetCoords(b);
+        const Real dbx_dz =
+            (bface(TE::F1, 0, k, j, i) - bface(TE::F1, 0, k - 1, j, i)) /
+            coords.Dxc<3>(k, j, i);
+        const Real dbz_dx =
+            (bface(TE::F3, 0, k, j, i) - bface(TE::F3, 0, k, j, i - 1)) /
+            coords.Dxc<1>(k, j, i);
+        const Real eta = 0.25 *
+            (ohm_diff.Get(prim(IPR, k - 1, j, i - 1), prim(IDN, k - 1, j, i - 1)) +
+             ohm_diff.Get(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i)) +
+             ohm_diff.Get(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1)) +
+             ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
+        bface.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k, j, i) +=
+            eta * (dbx_dz - dbz_dx);
+      });
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Add Ohmic Ex edges", DevExecSpace(), 0,
+      bface_pack.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e + 1, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        auto &bface = bface_pack(b);
+        const auto &prim = prim_pack(b);
+        const auto &coords = prim_pack.GetCoords(b);
+        const Real dbz_dy =
+            (bface(TE::F3, 0, k, j, i) - bface(TE::F3, 0, k, j - 1, i)) /
+            coords.Dxc<2>(k, j, i);
+        const Real dby_dz =
+            (bface(TE::F2, 0, k, j, i) - bface(TE::F2, 0, k - 1, j, i)) /
+            coords.Dxc<3>(k, j, i);
+        const Real eta = 0.25 *
+            (ohm_diff.Get(prim(IPR, k - 1, j - 1, i), prim(IDN, k - 1, j - 1, i)) +
+             ohm_diff.Get(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i)) +
+             ohm_diff.Get(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i)) +
+             ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
+        bface.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k, j, i) +=
+            eta * (dbz_dy - dby_dz);
+      });
+
+  return TaskStatus::complete;
+}

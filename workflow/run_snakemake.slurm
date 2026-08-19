@@ -1,25 +1,28 @@
-#!/bin/bash --login
+#!/usr/bin/env bash
 #SBATCH --job-name=snmake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --time=01-08:00:00
-#SBATCH --output=/mnt/home/wysongj2/athenapk/workflow/logs/snakemake-controller.%j.out
-#SBATCH --error=/mnt/home/wysongj2/athenapk/workflow/logs/snakemake-controller.%j.err
+#SBATCH --output=snakemake-controller.%j.out
+#SBATCH --error=snakemake-controller.%j.err
 
-cd /mnt/home/wysongj2/athenapk
+set -euo pipefail
+
+repo_root="${ATHENAPK_ROOT:-${HOME}/uct-athenapk}"
+workflow_dir="${repo_root}/workflow"
+pixi_bin="${PIXI_BIN:-${HOME}/.pixi/bin/pixi}"
+pixi_manifest="${PIXI_MANIFEST:-${HOME}/pixi-env/pixi.toml}"
+
+mkdir -p "${workflow_dir}/logs/slurm"
+cd "${repo_root}"
 
 # dry run command for copy paste
 # snakemake -s workflow/Snakefile   --configfile workflow/config.yaml -n
 # snakemake -s workflow/Snakefile   --configfile workflow/config.yaml workflow/report_profiles/mhd_wave_static.yaml -n
 
-# activate conda env here if needed
-module purge
-module load Miniforge3/25.11.0-1
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate snakemake
-
-snakemake -s workflow/Snakefile \
+"${pixi_bin}" run --manifest-path "${pixi_manifest}" snakemake \
+  -s workflow/Snakefile \
   --configfile workflow/config.yaml \
   --executor slurm \
   --jobs 24 \
@@ -29,7 +32,7 @@ snakemake -s workflow/Snakefile \
   --slurm-logdir workflow/logs/slurm
 
 
-# /mnt/home/wysongj2/.conda/envs/snakemake/bin/snakemake \
+# "${pixi_bin}" run --manifest-path "${pixi_manifest}" snakemake \
 #   -s workflow/Snakefile \
 #   --configfile workflow/config.yaml \
 #   --report test-suite-uct-ct-glm/athenapk_3D_all_tests.zip

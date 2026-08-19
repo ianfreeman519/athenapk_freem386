@@ -81,12 +81,29 @@ using namespace parthenon::driver::prelude;
 void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
 } // namespace diffusion
 
+namespace resistive_diffusion {
+using namespace parthenon::driver::prelude;
+
+void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
+} // namespace resistive_diffusion
+
 namespace field_loop {
 using namespace parthenon::driver::prelude;
 
 void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
 } // namespace field_loop
+
+namespace pulsed_reconnection {
+using namespace parthenon::driver::prelude;
+
+void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg);
+void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin);
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+                          const parthenon::SimTime &tm);
+void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt);
+parthenon::AmrTag ProblemCheckRefinementBlock(MeshBlockData<Real> *mbd);
+} // namespace pulsed_reconnection
 
 namespace smooth_mhd_vortex {
 using namespace parthenon::driver::prelude;

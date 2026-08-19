@@ -820,6 +820,11 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       PARTHENON_FAIL("AthenaPK unknown integration method for diffusion processes. "
                      "Options are: none, unsplit, rkl2");
     }
+    PARTHENON_REQUIRE_THROWS(
+        !(fluid == Fluid::ucthlldmhd && resistivity != Resistivity::none &&
+          diffint == DiffInt::rkl2),
+        "Resistive ucthlldmhd currently supports only diffusion/integrator=unsplit; "
+        "RKL2 does not evolve the face-centered magnetic field.");
     if (diffint != DiffInt::none) {
       // As in Athena++ a cfl safety factor is also applied to the theoretical limit.
       // By default it is equal to the hyperbolic cfl.
@@ -1324,6 +1329,13 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
       DEFAULT_OUTER_LOOP_PATTERN, "x1 flux", DevExecSpace(), scratch_size_in_bytes,
       scratch_level, 0, cons_in.GetDim(5) - 1, kl, ku, jl, ju,
       KOKKOS_LAMBDA(parthenon::team_mbr_t member, const int b, const int k, const int j) {
+        // Force NVCC to capture packs outside if constexpr branches. Extended host-device
+        // lambdas cannot first-capture a variable from within a constexpr-if context.
+        const auto &Bface_pack_ = Bface_pack;
+        const auto &uct_hlld_pack_ = uct_hlld_pack;
+        const auto &riemann_ = riemann;
+        const auto &eos_ = eos;
+        const auto &c_h_ = c_h;
         const auto &prim = prim_in(b);
         auto &cons = cons_in(b);
         parthenon::ScratchPad2D<Real> wl(member.team_scratch(scratch_level),
@@ -1335,7 +1347,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
         // Sync all threads in the team so that scratch memory is consistent
         member.team_barrier();
         if constexpr (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
-          const auto &Bface = Bface_pack(b);
+          const auto &Bface = Bface_pack_(b);
           // force the evolved Bface vars to sit on both sides of the reconstructed face
           parthenon::par_for_inner(member, ib.s, ib.e + 1, [&](const int i) {
             wl(IB1, i) = Bface(TE::F1, 0, k, j, i);
@@ -1345,10 +1357,10 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
         }
 
         if constexpr (fluid == Fluid::ucthlldmhd) {
-          auto &uct_hlld = uct_hlld_pack(b);
-          riemann.Solve(member, k, j, ib.s, ib.e+1, IV1, wl, wr, cons, uct_hlld, eos, c_h);
+          auto &uct_hlld = uct_hlld_pack_(b);
+          riemann_.Solve(member, k, j, ib.s, ib.e+1, IV1, wl, wr, cons, uct_hlld, eos_, c_h_);
         } else {
-          riemann.Solve(member, k, j, ib.s, ib.e+1, IV1, wl, wr, cons, eos, c_h);
+          riemann_.Solve(member, k, j, ib.s, ib.e+1, IV1, wl, wr, cons, eos_, c_h_);
         }
         member.team_barrier();
 
@@ -1388,6 +1400,13 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
         DEFAULT_OUTER_LOOP_PATTERN, "x2 flux", DevExecSpace(), scratch_size_in_bytes,
         scratch_level, 0, cons_in.GetDim(5) - 1, kl, ku,
         KOKKOS_LAMBDA(parthenon::team_mbr_t member, const int b, const int k) {
+          // Force NVCC to capture packs outside if constexpr branches. Extended host-device
+          // lambdas cannot first-capture a variable from within a constexpr-if context.
+          const auto &Bface_pack_ = Bface_pack;
+          const auto &uct_hlld_pack_ = uct_hlld_pack;
+          const auto &riemann_ = riemann;
+          const auto &eos_ = eos;
+          const auto &c_h_ = c_h;
           const auto &prim = prim_in(b);
           auto &cons = cons_in(b);
           parthenon::ScratchPad2D<Real> wl(member.team_scratch(scratch_level),
@@ -1404,7 +1423,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
 
             if (j > jb.s - 1) {
               if constexpr (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
-                const auto &Bface = Bface_pack(b);
+                const auto &Bface = Bface_pack_(b);
                 parthenon::par_for_inner(member, il, iu, [&](const int i) {
                   wl(IB2, i) = Bface(TE::F2, 0, k, j, i);
                   wr(IB2, i) = Bface(TE::F2, 0, k, j, i);
@@ -1412,10 +1431,10 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
                 member.team_barrier();
               }
               if constexpr (fluid == Fluid::ucthlldmhd) {
-                auto &uct_hlld = uct_hlld_pack(b);
-                riemann.Solve(member, k, j, il, iu, IV2, wl, wr, cons, uct_hlld, eos, c_h);
+                auto &uct_hlld = uct_hlld_pack_(b);
+                riemann_.Solve(member, k, j, il, iu, IV2, wl, wr, cons, uct_hlld, eos_, c_h_);
               } else {
-                riemann.Solve(member, k, j, il, iu, IV2, wl, wr, cons, eos, c_h);
+                riemann_.Solve(member, k, j, il, iu, IV2, wl, wr, cons, eos_, c_h_);
               }member.team_barrier();
 
               // Passive scalar fluxes
@@ -1452,6 +1471,13 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
         DEFAULT_OUTER_LOOP_PATTERN, "x3 flux", DevExecSpace(), scratch_size_in_bytes,
         scratch_level, 0, cons_in.GetDim(5) - 1, jl, ju,
         KOKKOS_LAMBDA(parthenon::team_mbr_t member, const int b, const int j) {
+          // Force NVCC to capture packs outside if constexpr branches. Extended host-device
+          // lambdas cannot first-capture a variable from within a constexpr-if context.
+          const auto &Bface_pack_ = Bface_pack;
+          const auto &uct_hlld_pack_ = uct_hlld_pack;
+          const auto &riemann_ = riemann;
+          const auto &eos_ = eos;
+          const auto &c_h_ = c_h;
           const auto &prim = prim_in(b);
           auto &cons = cons_in(b);
           parthenon::ScratchPad2D<Real> wl(member.team_scratch(scratch_level),
@@ -1468,7 +1494,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
 
             if (k > kb.s - 1) {
               if constexpr (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
-                const auto &Bface = Bface_pack(b);
+                const auto &Bface = Bface_pack_(b);
                 parthenon::par_for_inner(member, il, iu, [&](const int i) {
                   wl(IB3, i) = Bface(TE::F3, 0, k, j, i);
                   wr(IB3, i) = Bface(TE::F3, 0, k, j, i);
@@ -1476,10 +1502,10 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
                 member.team_barrier();
               }
               if constexpr (fluid == Fluid::ucthlldmhd) {
-                auto &uct_hlld = uct_hlld_pack(b);
-                riemann.Solve(member, k, j, il, iu, IV3, wl, wr, cons, uct_hlld, eos, c_h);
+                auto &uct_hlld = uct_hlld_pack_(b);
+                riemann_.Solve(member, k, j, il, iu, IV3, wl, wr, cons, uct_hlld, eos_, c_h_);
               } else {
-                riemann.Solve(member, k, j, il, iu, IV3, wl, wr, cons, eos, c_h);
+                riemann_.Solve(member, k, j, il, iu, IV3, wl, wr, cons, eos_, c_h_);
               }
               member.team_barrier();
 

@@ -1,11 +1,11 @@
-plotting_python: /mnt/home/wysongj2/.conda/envs/mhd/bin/python
-gnuplot: /mnt/home/wysongj2/.conda/envs/mhd/bin/gnuplot
-athenapk: /mnt/home/wysongj2/athenapk/build-host/bin/athenaPK
+plotting_python: $HOME/pixi-env/.pixi/envs/default/bin/python
+gnuplot: $HOME/pixi-env/.pixi/envs/default/bin/gnuplot
+athenapk: $HOME/uct-athenapk/build-host/bin/athenaPK
 # cannot currently use mpi if want .pdhf's
 # h5py not compatible. But good for convergence test runs
-athenapk_mpi: /mnt/home/wysongj2/athenapk/build-mpi/bin/athenaPK
+athenapk_mpi: $HOME/uct-athenapk/build-mpi/bin/athenaPK
 
-results_root: /mnt/home/wysongj2/athenapk/test-suite-uct-ct-glm
+results_root: $HOME/uct-athenapk/test-suite-uct-ct-glm
 report_description: report/workflow.rst
 
 dimension: 2D
@@ -23,18 +23,32 @@ integrator: rk2
 
 
 tests:
+  resistive_ct_analytic:
+    enabled: true
+    # Relative paths are resolved from the AthenaPK repository root. Override the
+    # executable on another machine without editing the workflow rules.
+    executable: build-v100/bin/athenaPK
+    input: inputs/ct_glm_compatible/resistive_diffusion.in
+    results_root: workflow/results
+    dirname: resistive_ct_analytic
+    eta: 0.01
+    tlim: 0.1
+    amplitude: 1.0e-6
+    runtime: 30
+    mem_mb: 4000
+
   smooth_vortex:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/smooth_mhd_vortex.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/smooth_mhd_vortex.in
     dirname: smooth_mhd_vortex
-    order_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/compute_smooth_vortex_orders.py
+    order_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/compute_smooth_vortex_orders.py
     resolutions: [16, 32, 64, 128, 256]
 
   linear_wave:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/linear_mhd_wave.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/linear_mhd_wave.in
     dirname: linear_mhd_wave_unrefined
-    order_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/linear_mhd_wave_orders.py
+    order_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/linear_mhd_wave_orders.py
     waves: [0, 1, 2, 4, 5, 6]
     resolutions: [16, 32, 64, 128]
 
@@ -47,9 +61,9 @@ tests:
 
   linear_wave_static:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/linear_mhd_wave.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/linear_mhd_wave.in
     dirname: linear_mhd_wave_static
-    order_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/linear_mhd_wave_orders.py
+    order_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/linear_mhd_wave_orders.py
     waves: [0, 1, 2, 4, 5, 6]
     resolutions: [16, 32, 64, 128]
     mesh_plot_resolution: 16
@@ -81,9 +95,9 @@ tests:
 
   cpaw:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/cpaw.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/cpaw.in
     dirname: cpaw
-    order_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/cpaw_orders.py
+    order_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/cpaw_orders.py
     resolutions: [16, 32, 64, 128]
 
     mesh:
@@ -96,9 +110,9 @@ tests:
 
   cpaw_static:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/cpaw.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/cpaw.in
     dirname: cpaw_static
-    order_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/cpaw_orders.py
+    order_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/cpaw_orders.py
     resolutions: [16, 32, 64, 128]
     mesh_plot_resolution: 16
 
@@ -122,9 +136,9 @@ tests:
 
   cpaw_viz:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/cpaw.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/cpaw.in
     dirname: cpaw_viz
-    plotting_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/cpaw_viz.py
+    plotting_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/cpaw_viz.py
     dimension: 2D
     fluid: ctmhd
     resolution: 64
@@ -145,13 +159,13 @@ tests:
 
   field_loop:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/field_loop.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/field_loop.in
     dirname: field_loop
-    plotting_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/field_loop_video.py
+    plotting_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/field_loop_video.py
   
     paraview_movie:
         enabled: false
-        source: /mnt/home/wysongj2/athenapk/field_loop_3D_movie.mp4
+        source: $HOME/uct-athenapk/field_loop_3D_movie.mp4
         fluids: [ctmhd]
 
     mesh:
@@ -175,9 +189,9 @@ tests:
 
   field_loop_orientations:
     enabled: true
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/field_loop.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/field_loop.in
     dirname: field_loop_orientations
-    plotting_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/field_loop_video.py
+    plotting_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/field_loop_video.py
 
     mesh:
       2D:
@@ -217,9 +231,9 @@ tests:
 
   field_loop_refined:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/field_loop.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/field_loop.in
     dirname: field_loop_refined
-    plotting_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/field_loop_AMR.py
+    plotting_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/field_loop_AMR.py
 
     mesh:
       2D:
@@ -242,9 +256,9 @@ tests:
 
   field_loop_static_refined:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/field_loop.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/field_loop.in
     dirname: field_loop_static_refined
-    plotting_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/field_loop_AMR.py
+    plotting_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/field_loop_AMR.py
     problem_id: field_loop_static_centered
 
     mesh:
@@ -267,25 +281,25 @@ tests:
 
   orszag_tang:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/orszag_tang.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/orszag_tang.in
     dirname: orszag_tang
-    plotting_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/orszag_tang_video.py
+    plotting_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/orszag_tang_video.py
     resolution: [256, 256]
 
   orszag_tang_refined:
     enabled: false
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/orszag_tang.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/orszag_tang.in
     dirname: orszag_tang_refined
-    movie_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/orszang_tang_AMR.py
+    movie_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/orszang_tang_AMR.py
     resolution: [256, 256]
 
   orszag_tang_static:
     enabled: false
     fluids:
       - ctmhd
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/orszag_tang.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/orszag_tang.in
     dirname: orszag_tang_static
-    movie_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/orszang_tang_AMR.py
+    movie_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/orszang_tang_AMR.py
     resolution: [256, 256]
     meshblock: [64, 64]
     output_dt: 0.01
@@ -321,8 +335,8 @@ tests:
     fluids:
       - ctmhd
       - ucthlldmhd
-    input: /mnt/home/wysongj2/athenapk/inputs/ct_glm_compatible/current_sheet.in
+    input: $HOME/uct-athenapk/inputs/ct_glm_compatible/current_sheet.in
     dirname: current_sheet
-    plotting_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/current_sheet_movie.py
-    field_line_script: /mnt/home/wysongj2/athenapk/workflow/diagnostics_scripts/current_sheet_field_lines.py
+    plotting_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/current_sheet_movie.py
+    field_line_script: $HOME/uct-athenapk/workflow/diagnostics_scripts/current_sheet_field_lines.py
     resolution: [256, 256]

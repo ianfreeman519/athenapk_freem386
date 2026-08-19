@@ -90,6 +90,18 @@ int main(int argc, char *argv[]) {
     pman.app_input->ProblemGenerator = current_sheet::ProblemGenerator;
   } else if (problem == "diffusion") {
     pman.app_input->ProblemGenerator = diffusion::ProblemGenerator;
+  } else if (problem == "resistive_diffusion") {
+    pman.app_input->ProblemGenerator = resistive_diffusion::ProblemGenerator;
+  } else if (problem == "pulsed_reconnection") {
+    pman.app_input->ProblemGenerator =
+        pulsed_reconnection::ProblemGenerator;
+    pman.app_input->MeshBlockUserWorkBeforeOutput =
+        pulsed_reconnection::UserWorkBeforeOutput;
+    Hydro::ProblemInitPackageData =
+        pulsed_reconnection::ProblemInitPackageData;
+    Hydro::ProblemSourceFirstOrder = pulsed_reconnection::Driving;
+    Hydro::ProblemCheckRefinementBlock =
+        pulsed_reconnection::ProblemCheckRefinementBlock;
   } else if (problem == "field_loop") {
     pman.app_input->ProblemGenerator = field_loop::ProblemGenerator;
     Hydro::ProblemInitPackageData = field_loop::ProblemInitPackageData;

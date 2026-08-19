@@ -476,6 +476,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
   // Each RK stage will do this:
   // 1.  calc_flux                      (recon + riemann)    
   // 2.  Assemble_Corner_EMF            (make corner EMFs, depends on ct scheme)   
+  // 2.1 Add nonideal corner_EMF        (add resistivity to corner EMF using BFace())
   // 2.5 apply flux corrections         (automatically applies corrections for both cons.flux and bface.flux, aka emf edges)             
   // 3a. updateWithFluxDivergence       (RK update the flux)   
   // 3b. updateWithFaceMagDivergence    (RK update magnetic face varibles)
@@ -542,6 +543,12 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     if (fluid == Fluid::ucthlldmhd){
       ct_emf = tl.AddTask(calc_flux, Hydro::UCTHLLDMHD::Assemble_HLLD_Edge_EMF, mu0.get());
     }
+    if (fluid == Fluid::ucthlldmhd &&
+        hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none &&
+        hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
+      ct_emf = tl.AddTask(ct_emf, AddOhmicEdgeEMF, mu0.get());
+    }
+
     // TODO(pgrete) figure out what to do about the sources from the first stage
     // that are potentially disregarded when the (m)hd fluxes are corrected in the second
     // stage.

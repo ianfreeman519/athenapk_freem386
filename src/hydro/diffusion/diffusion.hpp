@@ -158,11 +158,11 @@ struct OhmicDiffusivity {
 
 Real EstimateResistivityTimestep(MeshData<Real> *md);
 
-//! Calculate isotropic resistivity with fixed coefficient
-void OhmicDiffFluxIsoFixed(MeshData<Real> *md);
+//! Calculate Ohmic face fluxes, evaluating the configured coefficient at each face.
+void OhmicDiffFlux(MeshData<Real> *md);
 
-//! Calculate resistivity (general case incl. Spitzer)
-void OhmicDiffFluxGeneral(MeshData<Real> *md);
+//! Add Ohmic electric fields to the edge EMFs used by constrained transport.
+TaskStatus AddOhmicEdgeEMF(MeshData<Real> *md);
 
 // Calculate all diffusion fluxes, i.e., update the .flux views in md
 TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md);

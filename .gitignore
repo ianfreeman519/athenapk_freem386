@@ -1,8 +1,12 @@
 # Snakemake workflow files
 .snakemake/
 workflow/logs/
+workflow/results/
 __pycache__/
 *.py[cod]
+
+# test run files
+test_runs/
 
 # Emacs autosave files
 \#*\#

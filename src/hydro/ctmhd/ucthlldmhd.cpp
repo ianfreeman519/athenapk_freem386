@@ -308,5 +308,9 @@ TaskStatus Assemble_HLLD_Edge_EMF(MeshData<Real> *md) {
     return TaskStatus::complete;
 }
 
+// TODO(freem386) add a function here for resistivity
+// make the function Assemble_HLLD_Edge_Resistive_EMF
+// Add
+
 
 } // namespace Hydro::UCTHLLDMHD

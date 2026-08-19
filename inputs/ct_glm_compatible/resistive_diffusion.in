@@ -1,0 +1,74 @@
+# AthenaPK - a performance portable block structured AMR MHD code
+# Copyright (c) 2026, Athena-Parthenon Collaboration. All rights reserved.
+# Licensed under the BSD 3-Clause License (the "LICENSE").
+
+<comment>
+problem = Analytic Ohmic diffusion tests for UCT-HLLD
+
+<job>
+problem_id = resistive_diffusion
+
+<problem/resistive_diffusion>
+iprob = 0
+rho = 1.0
+pressure = 1.0
+amp = 1.0e-6
+Bx = 0.25
+By = -0.125
+Bz = 0.0625
+mode_x = 1
+mode_y = 1
+mode_z = 1
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+nx1 = 16
+x1min = 0.0
+x1max = 1.0
+ix1_bc = periodic
+ox1_bc = periodic
+nx2 = 16
+x2min = 0.0
+x2max = 1.0
+ix2_bc = periodic
+ox2_bc = periodic
+nx3 = 16
+x3min = 0.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/meshblock>
+nx1 = 16
+nx2 = 16
+nx3 = 16
+
+<parthenon/time>
+integrator = rk2
+cfl = 0.3
+tlim = 0.1
+nlim = -1
+
+<hydro>
+fluid = ucthlldmhd
+eos = adiabatic
+riemann = hlld
+reconstruction = plm
+gamma = 1.666666666666667
+scratch_level = 1
+
+<diffusion>
+integrator = unsplit
+cfl = 0.3
+conduction = none
+viscosity = none
+resistivity = ohmic
+resistivity_coeff = fixed
+ohm_diff_coeff_code = 0.01
+
+<parthenon/output0>
+file_type = hdf5
+dt = 0.1
+variables = prim
+id = resistive_ct
