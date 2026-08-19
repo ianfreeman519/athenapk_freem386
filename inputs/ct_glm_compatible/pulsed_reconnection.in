@@ -6,17 +6,17 @@ problem_id = pulsed_reconnection
 <units>
 code_length_cgs = 1.0
 code_mass_cgs = 1.0
-code_time_cgs = 1.0
+code_time_cgs = 1e-7
 
 <problem/pulsed_reconnection>
-current_peak_MA = 20
+current_peak_MA = 10
 rho_wire = 2.7e-3
 T_wire = 1e6
-rho_background = 1e-6
+rho_background = 1e-7
 T_background = 1e3
 v0 = 0
 w = 0.8
-w_B = 0.8
+w_B = 3
 array_separation = 6
 N = 0
 density_perturb_amplitude = 0.0
@@ -25,9 +25,9 @@ initial_thermal_profile = wendland
 initial_magnetic_profile = wendland
 initial_force_balance = true
 drive_enable = true
-drive_peak_current_MA = 20
+drive_peak_current_MA = 10
 drive_t_peak_ns = 200.0
-w_drive = 5.0
+w_drive = 0.80
 drive_thermal_profile = wendland
 drive_magnetic_profile = wendland
 drive_force_balance = true
@@ -35,22 +35,22 @@ drive_rho_floor = 2.7e-3
 drive_T_floor = 5e6
 
 <parthenon/meshblock>
-nx1 = 32
-nx2 = 32
+nx1 = 128
+nx2 = 128
 nx3 = 1
 
 <parthenon/mesh>
-refinement = none
+refinement = static
 nghost = 2
-nx1 = 128
-x1min = -6.0
-x1max = 6.0
+nx1 = 512
+x1min = -12.0
+x1max = 12.0
 ix1_bc = outflow
 ox1_bc = outflow
 
-nx2 = 128
-x2min = -6.0
-x2max = 6.0
+nx2 = 512
+x2min = -12.0
+x2max = 12.0
 ix2_bc = outflow
 ox2_bc = outflow
 
@@ -60,9 +60,18 @@ x3max = 1.0
 ix3_bc = periodic
 ox3_bc = periodic
 
+<parthenon/static_refinement0>
+x1min = -4.0
+x1max =  4.0
+x2min = -0.1
+x2max =  0.1
+x3min = -0.0
+x3max =  0.0
+level =  2
+
 <hydro>
 scratch_level = 1
-fluid = ctmhd
+fluid = ucthlldmhd
 eos = adiabatic
 riemann = hlld
 reconstruction = plm
@@ -78,17 +87,26 @@ conduction = none
 viscosity = none
 resistivity = ohmic
 resistivity_coeff = fixed
-ohm_diff_coeff_code = 1e3
+ohm_diff_coeff_code = 1e-3
+
+<cooling>
+enable_cooling = tabular
+table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling
+lambda_units_cgs = 1.0
+integrator = rk12
+max_iter = 1000
+cfl = 0.45
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
 
 <parthenon/time>
 integrator = rk2
 cfl = 0.4
-tlim = 1e-8
-nlim = 1
+tlim = 10.0
 
 <parthenon/output0>
 file_type = hdf5
-dt = 1e-8
+dt = 0.1
 id = out0
 variables = prim, Bface, curlBz, divv, eta
 

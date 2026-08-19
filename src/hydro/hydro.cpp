@@ -5,6 +5,7 @@
 //========================================================================================
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <string>
@@ -617,15 +618,71 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     Real gamma = pin->GetReal("hydro", "gamma");
     pkg->AddParam<>("AdiabaticIndex", gamma);
 
-    if (pin->DoesParameterExist("hydro", "He_mass_fraction") &&
+    const bool has_he_mass_fraction =
+        pin->DoesParameterExist("hydro", "He_mass_fraction");
+    const bool has_mean_molecular_weight =
+        pin->DoesParameterExist("hydro", "mean_molecular_weight");
+    const bool has_mu = pin->DoesParameterExist("hydro", "mu");
+    const bool has_mean_ionization_state =
+        pin->DoesParameterExist("hydro", "mean_ionization_state");
+    const bool has_zbar = pin->DoesParameterExist("hydro", "zbar");
+    const bool has_metal_composition = has_mean_molecular_weight || has_mu ||
+                                       has_mean_ionization_state || has_zbar;
+
+    PARTHENON_REQUIRE_THROWS(
+        !(has_he_mass_fraction && has_metal_composition),
+        "Specify either hydro/He_mass_fraction or hydro/{mean_molecular_weight, "
+        "mean_ionization_state}, not both.");
+    PARTHENON_REQUIRE_THROWS(
+        !has_metal_composition || ((has_mean_molecular_weight || has_mu) &&
+                                   (has_mean_ionization_state || has_zbar)),
+        "A single-component plasma composition requires both "
+        "hydro/mean_molecular_weight (alias: mu) and hydro/mean_ionization_state "
+        "(alias: zbar).");
+
+    if ((has_he_mass_fraction || has_metal_composition) &&
         pkg->AllParams().hasKey("units")) {
       auto units = pkg->Param<Units>("units");
-      const auto He_mass_fraction = pin->GetReal("hydro", "He_mass_fraction");
-      const auto mu = 1 / (He_mass_fraction * 3. / 4. + (1 - He_mass_fraction) * 2);
-      const auto mu_e = 1 / (He_mass_fraction * 2. / 4. + (1 - He_mass_fraction));
+      Real mu;
+      Real mu_e;
+      if (has_he_mass_fraction) {
+        const auto He_mass_fraction = pin->GetReal("hydro", "He_mass_fraction");
+        PARTHENON_REQUIRE_THROWS(He_mass_fraction >= 0.0 && He_mass_fraction <= 1.0,
+                                 "hydro/He_mass_fraction must be in [0, 1].");
+        mu = 1 / (He_mass_fraction * 3. / 4. + (1 - He_mass_fraction) * 2);
+        mu_e = 1 / (He_mass_fraction * 2. / 4. + (1 - He_mass_fraction));
+        pkg->AddParam<>("He_mass_fraction", He_mass_fraction);
+      } else {
+        mu = pin->GetReal("hydro", has_mean_molecular_weight
+                                      ? "mean_molecular_weight"
+                                      : "mu");
+        const auto zbar = pin->GetReal("hydro", has_mean_ionization_state
+                                                   ? "mean_ionization_state"
+                                                   : "zbar");
+        if (has_mean_molecular_weight && has_mu) {
+          const auto mu_alias = pin->GetReal("hydro", "mu");
+          PARTHENON_REQUIRE_THROWS(
+              std::abs(mu - mu_alias) <=
+                  1.e-12 * std::max({1.0, std::abs(mu), std::abs(mu_alias)}),
+              "hydro/mean_molecular_weight and its alias hydro/mu must agree.");
+        }
+        if (has_mean_ionization_state && has_zbar) {
+          const auto zbar_alias = pin->GetReal("hydro", "zbar");
+          PARTHENON_REQUIRE_THROWS(
+              std::abs(zbar - zbar_alias) <=
+                  1.e-12 * std::max({1.0, std::abs(zbar), std::abs(zbar_alias)}),
+              "hydro/mean_ionization_state and its alias hydro/zbar must agree.");
+        }
+        PARTHENON_REQUIRE_THROWS(mu > 0.0,
+                                 "hydro/mean_molecular_weight (mu) must be positive.");
+        PARTHENON_REQUIRE_THROWS(
+            zbar > 0.0, "hydro/mean_ionization_state (zbar) must be positive.");
+        // For one ion species, mu = A / (1 + zbar) and mu_e = A / zbar.
+        mu_e = mu * (1.0 + zbar) / zbar;
+        pkg->AddParam<>("zbar", zbar);
+      }
       pkg->AddParam<>("mu", mu);
       pkg->AddParam<>("mu_e", mu_e);
-      pkg->AddParam<>("He_mass_fraction", He_mass_fraction);
       pkg->AddParam<>("mbar", mu * units.atomic_mass_unit());
       // Following convention in the astro community, we're using mh as unit for the mean
       // molecular weight
@@ -640,8 +697,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     if (efloor > 0.0) {
       if (!pkg->AllParams().hasKey("mbar_over_kb")) {
         PARTHENON_FAIL("Temperature floor requires units and gas composition. "
-                       "Either set a 'units' block and the 'hydro/He_mass_fraction' in "
-                       "input file or use a pressure floor "
+                       "Set a 'units' block and a gas composition in the input file, "
+                       "or use a pressure floor "
                        "(defined code units) instead.");
       }
       auto mbar_over_kb = pkg->Param<Real>("mbar_over_kb");
@@ -657,8 +714,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     if (eceil < std::numeric_limits<Real>::infinity()) {
       if (!pkg->AllParams().hasKey("mbar_over_kb")) {
         PARTHENON_FAIL("Temperature ceiling requires units and gas composition. "
-                       "Either set a 'units' block and the 'hydro/He_mass_fraction' in "
-                       "input file or use a pressure floor "
+                       "Set a 'units' block and a gas composition in the input file, "
+                       "or use a pressure floor "
                        "(defined code units) instead.");
       }
       auto mbar_over_kb = pkg->Param<Real>("mbar_over_kb");
@@ -696,8 +753,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       if (conduction_coeff_str == "spitzer") {
         if (!pkg->AllParams().hasKey("mbar")) {
           PARTHENON_FAIL("Spitzer thermal conduction requires units and gas composition. "
-                         "Please set a 'units' block and the 'hydro/He_mass_fraction' in "
-                         "the input file.");
+                         "Please set a 'units' block and a gas composition in the input "
+                         "file.");
         }
         conduction_coeff = ConductionCoeff::spitzer;
 

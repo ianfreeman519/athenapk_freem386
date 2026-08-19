@@ -71,6 +71,24 @@ conserved to primitive conversion if both are defined.
 
 See(here)[units.md].
 
+#### Gas composition
+
+When physical units and temperature-dependent features are used, the gas composition can
+be specified in the `<hydro>` block. A fully ionized hydrogen/helium mixture continues to use
+`He_mass_fraction`. Alternatively, a single-component plasma with a prescribed, fixed
+ionization state uses both:
+
+```
+mean_molecular_weight = 6.75 # mu = A / (1 + zbar); e.g., aluminum with A=27
+mean_ionization_state = 3.0  # zbar, the mean ionic charge
+```
+
+The shorter names `mu` and `zbar` are accepted as aliases. Do not combine these parameters
+with `He_mass_fraction`. For a single-component plasma the electron molecular weight is
+derived as `mu_e = mu * (1 + zbar) / zbar`. All composition values are assumed constant in
+space and time, and a `<units>` block is required for the derived physical quantities to be
+available.
+
 #### Diffusive processes
 
 Diffusive processes in AthenaPK can be configured in the `<diffusion>` block of the input file.

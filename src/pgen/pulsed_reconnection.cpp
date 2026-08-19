@@ -453,7 +453,9 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   params.drive_magnetic_profile.width *= units.cm();
   params.drive_magnetic_profile.tophat_core_width *= units.cm();
   params.drive_magnetic_profile.tophat_falloff_width *= units.cm();
-  params.drive_t_peak = params.drive_t_peak_ns * 1.0e-9 / units.s();
+  // drive_t_peak_ns is a physical time. units.s() is the number of code-time
+  // units per physical second, so multiply to convert seconds to code time.
+  params.drive_t_peak = params.drive_t_peak_ns * 1.0e-9 * units.s();
 
   const Real drive_peak_current_ampere = params.drive_peak_current_MA * 1.0e6;
   const Real drive_current_field_prefac =
@@ -850,9 +852,12 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto hydro_pkg = pmb->packages.Get("Hydro");
   const bool has_fixed_resistivity =
       hydro_pkg->Param<Resistivity>("resistivity") == Resistivity::ohmic;
-  const Real eta = has_fixed_resistivity
-                       ? pin->GetReal("diffusion", "ohm_diff_coeff_code")
-                       : 0.0;
+  const auto units = hydro_pkg->Param<Units>("units");
+  const Real eta_cgs =
+      has_fixed_resistivity
+          ? pin->GetReal("diffusion", "ohm_diff_coeff_code") *
+                SQR(units.code_length_cgs()) / units.code_time_cgs()
+          : 0.0;
 
   auto &curlBx = mbd->Get("curlBx").data;
   auto &curlBy = mbd->Get("curlBy").data;
@@ -927,7 +932,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                                SQR(CellCenteredB3(b3f, ndim, k, j, i));
         beta_field(k, j, i) = b_squared > 0.0 ? 2.0 * p / b_squared : 0.0;
 
-        eta_field(k, j, i) = eta;
+        eta_field(k, j, i) = eta_cgs;
       });
 }
 
