@@ -23,6 +23,7 @@
 #include <vector>
 
 // AthenaPK headers
+#include "../hydro/diffusion/diffusion.hpp"
 #include "../main.hpp"
 #include "../units.hpp"
 
@@ -839,7 +840,7 @@ parthenon::AmrTag ProblemCheckRefinementBlock(MeshBlockData<Real> *mbd) {
   return parthenon::AmrTag::same;
 }
 
-void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
+void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput * /*pin*/,
                           const parthenon::SimTime & /*tm*/) {
   auto &coords = pmb->coords;
   auto &mbd = pmb->meshblock_data.Get();
@@ -850,14 +851,16 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   const auto b2f = bface.Get(IBF2, 0, 0, 0);
   const auto b3f = bface.Get(IBF3, 0, 0, 0);
   auto hydro_pkg = pmb->packages.Get("Hydro");
-  const bool has_fixed_resistivity =
+  const bool has_resistivity =
       hydro_pkg->Param<Resistivity>("resistivity") == Resistivity::ohmic;
+  const auto ohm_diff =
+      has_resistivity
+          ? hydro_pkg->Param<OhmicDiffusivity>("ohm_diff")
+          : OhmicDiffusivity(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0,
+                             0.0, 0.0, -1.0);
   const auto units = hydro_pkg->Param<Units>("units");
-  const Real eta_cgs =
-      has_fixed_resistivity
-          ? pin->GetReal("diffusion", "ohm_diff_coeff_code") *
-                SQR(units.code_length_cgs()) / units.code_time_cgs()
-          : 0.0;
+  const Real eta_code_to_cgs =
+      SQR(units.code_length_cgs()) / units.code_time_cgs();
 
   auto &curlBx = mbd->Get("curlBx").data;
   auto &curlBy = mbd->Get("curlBy").data;
@@ -932,7 +935,8 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                                SQR(CellCenteredB3(b3f, ndim, k, j, i));
         beta_field(k, j, i) = b_squared > 0.0 ? 2.0 * p / b_squared : 0.0;
 
-        eta_field(k, j, i) = eta_cgs;
+        eta_field(k, j, i) =
+            has_resistivity ? ohm_diff.Get(p, rho) * eta_code_to_cgs : 0.0;
       });
 }
 
