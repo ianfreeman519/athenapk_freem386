@@ -133,18 +133,23 @@ void MomentumDiffFluxGeneral(MeshData<Real> *md);
 
 struct OhmicDiffusivity {
  private:
-  Real mbar_, me_, kb_;
   Resistivity resistivity_;
   ResistivityCoeff resistivity_coeff_type_;
   // "free" coefficient/prefactor. Value depends on resistivity set in the constructor.
   Real coeff_;
+  Real temperature_from_p_over_rho_;
+  Real zbar_;
+  Real eta_cgs_to_code_;
+  Real eta_max_;
 
  public:
   KOKKOS_INLINE_FUNCTION
   OhmicDiffusivity(Resistivity resistivity, ResistivityCoeff resistivity_coeff_type,
-                   Real coeff, Real mbar, Real me, Real kb)
+                   Real coeff, Real temperature_from_p_over_rho, Real zbar,
+                   Real eta_cgs_to_code, Real eta_max)
       : resistivity_(resistivity), resistivity_coeff_type_(resistivity_coeff_type),
-        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb) {}
+        coeff_(coeff), temperature_from_p_over_rho_(temperature_from_p_over_rho),
+        zbar_(zbar), eta_cgs_to_code_(eta_cgs_to_code), eta_max_(eta_max) {}
 
   KOKKOS_INLINE_FUNCTION
   Real Get(const Real pres, const Real rho) const;

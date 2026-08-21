@@ -25,7 +25,18 @@ Real OhmicDiffusivity::Get(const Real pres, const Real rho) const {
   if (resistivity_coeff_type_ == ResistivityCoeff::fixed) {
     return coeff_;
   } else if (resistivity_coeff_type_ == ResistivityCoeff::spitzer) {
-    PARTHENON_FAIL("needs impl");
+    // Convert p/rho from code units to temperature in kelvin.
+    const Real temperature_kelvin = temperature_from_p_over_rho_ * pres / rho;
+    PARTHENON_REQUIRE(temperature_kelvin > 0.0,
+                      "Spitzer resistivity requires positive temperature.");
+
+    // Magnetic diffusivity in Heaviside-Lorentz CGS [cm^2/s], then code units.
+    Real eta = 1.02688e12 * zbar_ * coeff_ / std::pow(temperature_kelvin, 1.5) *
+               eta_cgs_to_code_;
+    if (eta_max_ > 0.0) {
+      eta = std::min(eta, eta_max_);
+    }
+    return eta;
   } else {
     PARTHENON_FAIL("Unknown Resistivity coeff");
   }
@@ -81,7 +92,64 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
   }
 
   const auto &cfl_diff = hydro_pkg->Param<Real>("cfl_diff");
-  return cfl_diff * fac * min_dt_resist;
+  const Real dt_diffusion = cfl_diff * fac * min_dt_resist;
+
+  // Limit the fractional internal-energy increase from Ohmic heating,
+  // d(e_int)/dt = eta |curl(B)|^2. This restriction is independent of the
+  // dimensional factor used by the parabolic diffusion limit above.
+  const auto gm1 = hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
+  Real min_heating_time = std::numeric_limits<Real>::infinity();
+  const auto ohm_diff_val = ohm_diff;
+  Kokkos::parallel_reduce(
+      "EstimateResistivityTimestep (ohmic heating)",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+          DevExecSpace(), {0, kb.s, jb.s, ib.s},
+          {prim_pack.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1},
+          {1, 1, 1, ib.e + 1 - ib.s}),
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i,
+                    Real &min_time) {
+        const auto &coords = prim_pack.GetCoords(b);
+        const auto &prim = prim_pack(b);
+        const Real rho = prim(IDN, k, j, i);
+        const Real pres = prim(IPR, k, j, i);
+        const Real eta = ohm_diff_val.Get(pres, rho);
+
+        const Real d_bz_dy =
+            ndim > 1 ? (prim(IB3, k, j + 1, i) - prim(IB3, k, j - 1, i)) /
+                           (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                     : 0.0;
+        const Real d_by_dz =
+            ndim > 2 ? (prim(IB2, k + 1, j, i) - prim(IB2, k - 1, j, i)) /
+                           (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                     : 0.0;
+        const Real d_bx_dz =
+            ndim > 2 ? (prim(IB1, k + 1, j, i) - prim(IB1, k - 1, j, i)) /
+                           (coords.Xc<3>(k + 1) - coords.Xc<3>(k - 1))
+                     : 0.0;
+        const Real d_bz_dx =
+            (prim(IB3, k, j, i + 1) - prim(IB3, k, j, i - 1)) /
+            (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        const Real d_by_dx =
+            (prim(IB2, k, j, i + 1) - prim(IB2, k, j, i - 1)) /
+            (coords.Xc<1>(i + 1) - coords.Xc<1>(i - 1));
+        const Real d_bx_dy =
+            ndim > 1 ? (prim(IB1, k, j + 1, i) - prim(IB1, k, j - 1, i)) /
+                           (coords.Xc<2>(j + 1) - coords.Xc<2>(j - 1))
+                     : 0.0;
+
+        const Real j1 = d_bz_dy - d_by_dz;
+        const Real j2 = d_bx_dz - d_bz_dx;
+        const Real j3 = d_by_dx - d_bx_dy;
+        const Real heating_rate = eta * (SQR(j1) + SQR(j2) + SQR(j3));
+        if (heating_rate > 0.0) {
+          const Real internal_energy_density = pres / gm1;
+          min_time = fmin(min_time, internal_energy_density / heating_rate);
+        }
+      },
+      Kokkos::Min<Real>(min_heating_time));
+
+  const Real dt_heating = cfl_diff * min_heating_time;
+  return std::min(dt_diffusion, dt_heating);
 }
 
 //---------------------------------------------------------------------------------------

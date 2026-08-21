@@ -846,21 +846,56 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       auto resistivity_coeff = ResistivityCoeff::none;
 
       if (resistivity_coeff_str == "spitzer") {
-        // If this is implemented, check how the Spitzer coeff for thermal conduction is
-        // handled.
-        PARTHENON_FAIL("needs impl");
+        PARTHENON_REQUIRE_THROWS(
+            pkg->AllParams().hasKey("units") &&
+                pkg->AllParams().hasKey("mbar_over_kb"),
+            "Spitzer resistivity requires a <units> block and gas composition.");
+        resistivity_coeff = ResistivityCoeff::spitzer;
+
+        const auto units = pkg->Param<Units>("units");
+        const Real spitzer_log_lambda =
+            pin->GetOrAddReal("diffusion", "spitzer_log_lambda", 10.0);
+        PARTHENON_REQUIRE_THROWS(
+            spitzer_log_lambda > 0.0,
+            "diffusion/spitzer_log_lambda must be positive.");
+
+        Real zbar;
+        if (pin->DoesParameterExist("diffusion", "spitzer_zbar")) {
+          zbar = pin->GetReal("diffusion", "spitzer_zbar");
+        } else {
+          PARTHENON_REQUIRE_THROWS(
+              pkg->AllParams().hasKey("zbar"),
+              "Spitzer resistivity requires hydro/mean_ionization_state (zbar), "
+              "or an explicit diffusion/spitzer_zbar override.");
+          zbar = pkg->Param<Real>("zbar");
+        }
+        PARTHENON_REQUIRE_THROWS(zbar > 0.0,
+                                 "The Spitzer mean ionization state must be positive.");
+
+        // Convert CGS magnetic diffusivity [cm^2/s] to
+        // [code_length^2/code_time], including an optional cap in CGS.
+        const Real eta_cgs_to_code = SQR(units.cm()) / units.s();
+        const Real spitzer_eta_max_cgs =
+            pin->GetOrAddReal("diffusion", "spitzer_eta_max", -1.0);
+        const Real spitzer_eta_max = spitzer_eta_max_cgs > 0.0
+                                         ? spitzer_eta_max_cgs * eta_cgs_to_code
+                                         : -1.0;
+        auto ohm_diff = OhmicDiffusivity(
+            resistivity, resistivity_coeff, spitzer_log_lambda,
+            pkg->Param<Real>("mbar_over_kb"), zbar, eta_cgs_to_code,
+            spitzer_eta_max);
+        pkg->AddParam<>("ohm_diff", ohm_diff);
 
       } else if (resistivity_coeff_str == "fixed") {
         resistivity_coeff = ResistivityCoeff::fixed;
         Real ohm_diff_coeff_code = pin->GetReal("diffusion", "ohm_diff_coeff_code");
         auto ohm_diff = OhmicDiffusivity(resistivity, resistivity_coeff,
-                                         ohm_diff_coeff_code, 0.0, 0.0, 0.0);
+                                         ohm_diff_coeff_code, 0.0, 0.0, 0.0, -1.0);
         pkg->AddParam<>("ohm_diff", ohm_diff);
 
       } else {
         PARTHENON_FAIL("Resistivity is enabled but no coefficient is set. Please "
-                       "set diffusion/resistivity_coeff to 'fixed' and "
-                       "diffusion/ohm_diff_coeff_code to the desired value.");
+                       "set diffusion/resistivity_coeff to 'fixed' or 'spitzer'.");
       }
     }
     pkg->AddParam<>("resistivity", resistivity);
@@ -884,8 +919,13 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         "RKL2 does not evolve the face-centered magnetic field.");
     if (diffint != DiffInt::none) {
       // As in Athena++ a cfl safety factor is also applied to the theoretical limit.
-      // By default it is equal to the hyperbolic cfl.
-      auto cfl_diff = pin->GetOrAddReal("diffusion", "cfl", pkg->Param<Real>("cfl"));
+      // If no diffusion-specific value is provided, inherit parthenon/time/cfl.
+      const auto cfl_diff =
+          pin->DoesParameterExist("diffusion", "cfl")
+              ? pin->GetReal("diffusion", "cfl")
+              : pin->GetReal("parthenon/time", "cfl");
+      PARTHENON_REQUIRE_THROWS(cfl_diff > 0.0,
+                               "diffusion/cfl must be positive.");
       pkg->AddParam<>("cfl_diff", cfl_diff);
     }
     pkg->AddParam<Real>("dt_diff", std::numeric_limits<Real>::max(),

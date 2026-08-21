@@ -95,7 +95,7 @@ class CoolingTableObj {
    *  Lightweight object intended for inlined computation within kernels
    ************************************************************/
  private:
-  // Log cooling rate/ne^3
+  // Log cooling coefficient
   parthenon::ParArray1D<parthenon::Real> log_lambdas_;
 
   // Spacing of cooling table
@@ -106,23 +106,23 @@ class CoolingTableObj {
   // Mean molecular mass * ( adiabatic_index -1) / boltzmann_constant
   parthenon::Real mbar_gm1_over_k_B_;
 
-  // (Hydrogen mass fraction / hydrogen atomic mass)^2
-  parthenon::Real x_H_over_m_h2_;
+  // Square of the selected number density per unit mass, e.g. (n_e / rho)^2
+  parthenon::Real number_density_per_mass_squared_;
 
  public:
   CoolingTableObj()
       : log_lambdas_(), log_temp_start_(NAN), log_temp_final_(NAN), d_log_temp_(NAN),
-        n_temp_(0), mbar_gm1_over_k_B_(NAN), x_H_over_m_h2_(NAN) {}
+        n_temp_(0), mbar_gm1_over_k_B_(NAN), number_density_per_mass_squared_(NAN) {}
   CoolingTableObj(const parthenon::ParArray1D<parthenon::Real> log_lambdas,
                   const parthenon::Real log_temp_start,
                   const parthenon::Real log_temp_final, const parthenon::Real d_log_temp,
                   const unsigned int n_temp, const parthenon::Real mbar_over_kb,
-                  const parthenon::Real adiabatic_index, const parthenon::Real x_H,
-                  const Units units)
+                  const parthenon::Real adiabatic_index,
+                  const parthenon::Real number_density_per_mass_squared)
       : log_lambdas_(log_lambdas), log_temp_start_(log_temp_start),
         log_temp_final_(log_temp_final), d_log_temp_(d_log_temp), n_temp_(n_temp),
         mbar_gm1_over_k_B_(mbar_over_kb * (adiabatic_index - 1)),
-        x_H_over_m_h2_(SQR(x_H / units.mh())) {}
+        number_density_per_mass_squared_(number_density_per_mass_squared) {}
 
   // Interpolate a cooling rate from the table
   // from internal energy density and density
@@ -168,7 +168,7 @@ class CoolingTableObj {
     }
     // Return de/dt
     const Real lambda = pow(10., log_lambda);
-    const Real de_dt = -lambda * x_H_over_m_h2_ * rho;
+    const Real de_dt = -lambda * number_density_per_mass_squared_ * rho;
     return de_dt;
   }
 
@@ -205,6 +205,10 @@ class TabularCooling {
   // lowest temperature in the cooling table (assuming zero cooling below the
   // table), whichever temperature is higher
   parthenon::Real T_floor_;
+
+  // Square of the selected number density per unit mass. This converts the tabulated
+  // volumetric loss, n^2 Lambda(T), to a specific-energy loss rate.
+  parthenon::Real number_density_per_mass_squared_;
 
   // Maximum number of iterations/subcycles
   unsigned int max_iter_;

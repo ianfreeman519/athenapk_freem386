@@ -50,6 +50,30 @@ TabularCooling::TabularCooling(ParameterInput *pin,
   const Real lambda_units =
       lambda_units_cgs / (units.erg() * pow(units.cm(), 3) / units.s());
 
+  const auto density_normalization =
+      pin->GetOrAddString("cooling", "density_normalization", "hydrogen_nuclei");
+  if (density_normalization == "hydrogen_nuclei") {
+    PARTHENON_REQUIRE_THROWS(
+        hydro_pkg->AllParams().hasKey("He_mass_fraction"),
+        "cooling/density_normalization=hydrogen_nuclei requires "
+        "hydro/He_mass_fraction.");
+    const auto hydrogen_mass_fraction =
+        1.0 - hydro_pkg->Param<Real>("He_mass_fraction");
+    number_density_per_mass_squared_ =
+        std::pow(hydrogen_mass_fraction / units.mh(), 2);
+  } else if (density_normalization == "electron") {
+    PARTHENON_REQUIRE_THROWS(
+        hydro_pkg->AllParams().hasKey("mu_e"),
+        "cooling/density_normalization=electron requires a gas composition that "
+        "defines hydro/mu_e.");
+    const auto electron_molecular_weight = hydro_pkg->Param<Real>("mu_e");
+    number_density_per_mass_squared_ =
+        std::pow(1.0 / (electron_molecular_weight * units.atomic_mass_unit()), 2);
+  } else {
+    PARTHENON_FAIL("Unknown cooling/density_normalization. Options are: "
+                   "hydrogen_nuclei, electron");
+  }
+
   const auto integrator_str = pin->GetOrAddString("cooling", "integrator", "rk12");
   if (integrator_str == "rk12") {
     integrator_ = CoolIntegrator::rk12;
@@ -268,11 +292,11 @@ TabularCooling::TabularCooling(ParameterInput *pin,
   // Create a lightweight object for computing cooling rates within kernels
   const auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
   const auto adiabatic_index = hydro_pkg->Param<Real>("AdiabaticIndex");
-  const auto He_mass_fraction = hydro_pkg->Param<Real>("He_mass_fraction");
 
   cooling_table_obj_ = CoolingTableObj(log_lambdas_, log_temp_start_, log_temp_final_,
                                        d_log_temp_, n_temp_, mbar_over_kb,
-                                       adiabatic_index, 1.0 - He_mass_fraction, units);
+                                       adiabatic_index,
+                                       number_density_per_mass_squared_);
 }
 
 void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
@@ -494,11 +518,9 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
   // Grab member variables for compiler
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
 
-  const auto units = hydro_pkg->Param<Units>("units");
   const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
   const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
-  const Real X_by_mh2 =
-      std::pow((1 - hydro_pkg->Param<Real>("He_mass_fraction")) / units.mh(), 2);
+  const Real number_density_per_mass_squared = number_density_per_mass_squared_;
 
   const auto lambdas = lambdas_;
   const auto temps = temps_;
@@ -560,7 +582,8 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
         if (temp < temp_cool_floor) {
           return;
         }
-        const Real n_h2_by_rho = rho * X_by_mh2;
+        const Real number_density_squared_by_rho =
+            rho * number_density_per_mass_squared;
 
         // Get the index of the right temperature bin
         // TODO(?) this could be optimized for using a binary search
@@ -577,7 +600,8 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
 
         // Compute the adjusted TEF for new timestep (Eqn. 26) (term in brackets)
         const auto tef_adj =
-            tef + lambda_final * dt / temp_final * mbar_gm1_over_kb * n_h2_by_rho;
+            tef + lambda_final * dt / temp_final * mbar_gm1_over_kb *
+                      number_density_squared_by_rho;
 
         // TEF is a strictly decreasing function and new_tef > tef
         // Check if the new TEF falls into a lower bin, i.e., find the right bin for A7

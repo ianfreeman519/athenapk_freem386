@@ -96,7 +96,7 @@ Diffusive processes in AthenaPK can be configured in the `<diffusion>` block of 
 <diffusion>
 integrator = unsplit       # alternatively: rkl2 (for rkl2 integrator (operator split integrator)
 #rkl2_max_dt_ratio = 100.0 # limits the ratio between the parabolic and hyperbolic timesteps (only used for RKL2 operator split integrator)
-#cfl = 1.0                 # Additional safety factor applied in the caluclation of the diffusive timestep (used in both unsplit and RKL2 integration schemes). Defaults to hyperbolic cfl.
+#cfl = 1.0                 # Safety factor for diffusive and Ohmic-heating timestep limits. Defaults to parthenon/time/cfl.
 
 conduction = anisotropic               # none (disabled), or isotropic, or anisotropic
 conduction_coeff = fixed               # alternative: spitzer
@@ -110,8 +110,11 @@ viscosity_coeff = fixed
 mom_diff_coeff_code = 0.25  # fixed coefficent of the kinetmatic viscosity in code units (code_length^2/code_time)
 
 resistivity = none          # none (disabled) or ohmic
-resistivity_coeff = fixed
-ohm_diff_coeff_code = 0.25  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
+resistivity_coeff = fixed   # fixed or spitzer
+ohm_diff_coeff_code = 0.25  # fixed magnetic diffusivity in code_length^2/code_time
+#spitzer_log_lambda = 10.0  # Coulomb logarithm
+#spitzer_zbar = 3.0         # optional override of hydro/zbar
+#spitzer_eta_max = -1.0     # optional cap in CGS cm^2/s; <= 0 disables it
 ```
 (An)isotropic thermal conduction (with fixed or Spitzer coefficient), and isotropic viscosity and
 resistivity with fixed coefficient are currently implemented.
@@ -228,14 +231,29 @@ mom_diff_coeff_code = 0.25  # fixed coefficent of the kinetmatic viscosity in co
 
 #### Resistivity/Ohmic diffusion
 
-Only resistivity with a (spatially and temporally) fixed coefficient in code units
-(`code_length`^2/`code_time`)is currently implemented.
+Ohmic resistivity supports either a fixed magnetic diffusivity in code units or a
+temperature-dependent Spitzer magnetic diffusivity. Spitzer resistivity requires a `<units>`
+block and gas composition. Its value and optional cap are converted from CGS cm^2/s to
+`code_length`^2/`code_time`, so non-unity code units are supported.
 To enable set (in the `<diffusion>` block)
 ```
 resistivity = ohmic
 resistivity_coeff = fixed
 ohm_diff_coeff_code = 0.25  # fixed coefficent of the magnetic (ohmic) diffusivity code units (code_length^2/code_time)
 ```
+
+For Spitzer resistivity use:
+
+```
+resistivity = ohmic
+resistivity_coeff = spitzer
+spitzer_log_lambda = 10.0
+#spitzer_zbar = 3.0       # defaults to hydro/mean_ionization_state (zbar)
+#spitzer_eta_max = -1.0   # cap in CGS cm^2/s; <= 0 disables it
+```
+
+The implemented diffusivity is
+$\eta = 1.02688\times10^{12}\,\bar{Z}\ln\Lambda\,T^{-3/2}$ cm$^2$ s$^{-1}$.
 
 
 ### Additional MHD options in `<hydro>` block
@@ -316,7 +334,12 @@ than any other timestep constraint (e.g., the hyperbolic one).
 Tabular cooling (e.g., for optically thin cooling) is enabled through the `cooling` block in the input file.
 The tabulated table itself is a text file containing (apart from comments) only two columns (two floating
 point numbers per line with the first one being the log10 temperature and the second one the
-log10 cooling rate scaled to a source function with $S_{cool} = n_H^2 \Lambda(T)$).
+log10 cooling coefficient. The density convention is selected by `density_normalization`:
+
+- `hydrogen_nuclei` (default): $S_{cool} = n_H^2 \Lambda(T)$ and requires
+  `hydro/He_mass_fraction`.
+- `electron`: $S_{cool} = n_e^2 \Lambda(T)$, where
+  $n_e = \rho/(\mu_e m_u)$, and requires a gas composition that defines $\mu_e$.
 
 A possible block might look like:
 
@@ -325,6 +348,7 @@ A possible block might look like:
 enable_cooling = tabular                # To disable, set to `none`
 table_filename = schure.cooling_1.0Z    # Path to the cooling table (in a text file)
 lambda_units_cgs = 1                    # Conversion factor of the cooling rate relative to CGS units
+density_normalization = hydrogen_nuclei # hydrogen_nuclei (default) or electron
 
 integrator = townsend              # Other possible options are `rk12` and `rk45` for error bound subcycling
 #max_iter = 100                    # Max number of iteration for subcycling. Unsued for Townsend integrator
