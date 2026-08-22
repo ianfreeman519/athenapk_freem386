@@ -20,28 +20,6 @@
 using namespace parthenon::package::prelude;
 using TE = parthenon::TopologicalElement;
 
-KOKKOS_INLINE_FUNCTION
-Real OhmicDiffusivity::Get(const Real pres, const Real rho) const {
-  if (resistivity_coeff_type_ == ResistivityCoeff::fixed) {
-    return coeff_;
-  } else if (resistivity_coeff_type_ == ResistivityCoeff::spitzer) {
-    // Convert p/rho from code units to temperature in kelvin.
-    const Real temperature_kelvin = temperature_from_p_over_rho_ * pres / rho;
-    PARTHENON_REQUIRE(temperature_kelvin > 0.0,
-                      "Spitzer resistivity requires positive temperature.");
-
-    // Magnetic diffusivity in Heaviside-Lorentz CGS [cm^2/s], then code units.
-    Real eta = 1.02688e12 * zbar_ * coeff_ / std::pow(temperature_kelvin, 1.5) *
-               eta_cgs_to_code_;
-    if (eta_max_ > 0.0) {
-      eta = std::min(eta, eta_max_);
-    }
-    return eta;
-  } else {
-    PARTHENON_FAIL("Unknown Resistivity coeff");
-  }
-}
-
 Real EstimateResistivityTimestep(MeshData<Real> *md) {
   // get to package via first block in Meshdata (which exists by construction)
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
