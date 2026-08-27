@@ -764,6 +764,7 @@ void ProblemInitPackageData(ParameterInput *pin,
   hydro_pkg->AddField("curlBx", m);
   hydro_pkg->AddField("curlBy", m);
   hydro_pkg->AddField("curlBz", m);
+  hydro_pkg->AddField("divB", m);
   hydro_pkg->AddField("divv", m);
   hydro_pkg->AddField("beta", m);
   hydro_pkg->AddField("eta", m);
@@ -865,6 +866,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput * /*pin*/,
   auto &curlBx = mbd->Get("curlBx").data;
   auto &curlBy = mbd->Get("curlBy").data;
   auto &curlBz = mbd->Get("curlBz").data;
+  auto &divB = mbd->Get("divB").data;
   auto &divv = mbd->Get("divv").data;
   auto &eta_field = mbd->Get("eta").data;
   auto &beta_field = mbd->Get("beta").data;
@@ -914,6 +916,18 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput * /*pin*/,
         curlBx(k, j, i) = dBz_dy - dBy_dz;
         curlBy(k, j, i) = dBx_dz - dBz_dx;
         curlBz(k, j, i) = dBy_dx - dBx_dy;
+
+        const Real dBx_dx =
+            (b1f(k, j, i + 1) - b1f(k, j, i)) / coords.Dxc<1>(k, j, i);
+        const Real dBy_dy =
+            ndim > 1 ? (b2f(k, j + 1, i) - b2f(k, j, i)) /
+                           coords.Dxc<2>(k, j, i)
+                     : 0.0;
+        const Real dBz_dz =
+            ndim > 2 ? (b3f(k + 1, j, i) - b3f(k, j, i)) /
+                           coords.Dxc<3>(k, j, i)
+                     : 0.0;
+        divB(k, j, i) = dBx_dx + dBy_dy + dBz_dz;
 
         const Real dvx_dx = (w(IV1, k, j, ip) - w(IV1, k, j, im)) /
                             (coords.Xc<1>(ip) - coords.Xc<1>(im));
