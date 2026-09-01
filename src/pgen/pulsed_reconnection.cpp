@@ -4,8 +4,8 @@
 // Licensed under the 3-Clause License (the "LICENSE")
 //========================================================================================
 //! \file pulsed_reconnection.cpp
-//! \brief Problem generator for pulsed reconnection with configurable thermal and
-//! magnetic radial profiles.
+//! \brief Problem generator for pulsed reconnection with independent density,
+//! temperature, and magnetic radial profiles.
 //========================================================================================
 
 // Parthenon headers
@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <string>
+#include <utility>
 #include <vector>
 
 // AthenaPK headers
@@ -33,6 +34,7 @@ using namespace parthenon::package::prelude;
 using TE = parthenon::TopologicalElement;
 
 enum class ProfileShape { none, gaussian, tophat, cubic, wendland, quintic };
+enum class TimeProfile { fixed, sin2 };
 
 struct RadialProfileParams {
   ProfileShape shape = ProfileShape::none;
@@ -63,9 +65,9 @@ Real EvaluateRadialProfile(const RadialProfileParams &params, const Real r);
 KOKKOS_INLINE_FUNCTION
 Real EvaluateSupportTable(const SupportTable &table, const Real r);
 
-// Only density and temperature inherit the azimuthal modulation.
+// Only the initial density and temperature profiles inherit azimuthal modulation.
 KOKKOS_INLINE_FUNCTION
-Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number);
+Real AzimuthalProfilePerturbation(const Real theta, const Real p, const int mode_number);
 
 namespace {
 
@@ -74,18 +76,21 @@ Real ProfileSupportRadius(const RadialProfileParams &params);
 SupportTable BuildUnitAmplitudeSupportTable(const RadialProfileParams &params,
                                             const std::string &label);
 
-struct PulsedGaussianParams {
+// All input-derived state used by initialization and the per-step source. Keeping it in
+// one trivially-copyable object allows the same definitions to be captured by device
+// kernels without repeatedly querying the package.
+struct PulsedReconnectionParams {
   Real gm1;
   Real k_b;
   Real m_bar;
-  Real current_peak_MA;
+  Real B_peak_gauss;
   bool drive_enable;
-  Real drive_peak_current_MA;
+  Real drive_B_peak_gauss;
   Real drive_t_peak_ns;
   Real drive_t_peak;
-  Real drive_rho_floor_cgs;
-  Real drive_rho_floor;
-  Real drive_T_floor;
+  Real drive_rho_profile_floor_cgs;
+  Real drive_rho_profile_floor;
+  Real drive_T_profile_floor;
   Real rho_wire_cgs;
   Real rho_background_cgs;
   Real T_wire;
@@ -95,27 +100,30 @@ struct PulsedGaussianParams {
   int azimuthal_mode_number;
   Real density_perturb_amplitude;
   Real temperature_perturb_amplitude;
-  Real current_field_prefac;
   Real rho_wire;
   Real rho_background;
   Real v0;
   Real array_separation;
   Real velocity_normalization;
-  Real peak_magnetic_field_strength;
+  Real initial_peak_magnetic_field_strength;
   Real amr_magnetic_field_reference;
   Real initial_magnetic_profile_amplitude;
   Real drive_peak_magnetic_profile_amplitude;
   bool initial_force_balance;
   bool drive_force_balance;
-  RadialProfileParams initial_thermal_profile;
+  TimeProfile drive_rho_time_profile;
+  TimeProfile drive_T_time_profile;
+  RadialProfileParams initial_rho_profile;
+  RadialProfileParams initial_T_profile;
   RadialProfileParams initial_magnetic_profile;
-  RadialProfileParams drive_thermal_profile;
+  RadialProfileParams drive_rho_profile;
+  RadialProfileParams drive_T_profile;
   RadialProfileParams drive_magnetic_profile;
   SupportTable initial_support_table;
   SupportTable drive_support_table;
 };
 
-struct PulsedGaussianState {
+struct PulsedReconnectionState {
   Real rho;
   Real pressure;
   Real v1;
@@ -123,13 +131,30 @@ struct PulsedGaussianState {
   Real v3;
 };
 
-struct DriveFloorState {
-  Real rho_floor;
+struct DriveSupportState {
+  Real rho_target;
   Real T_floor;
 };
 
+// These flags are derived from explicit output-variable requests. A field that is not
+// enrolled must never be retrieved by UserWorkBeforeOutput.
+struct DiagnosticSelection {
+  bool curlBx = false;
+  bool curlBy = false;
+  bool curlBz = false;
+  bool divB = false;
+  bool divv = false;
+  bool beta = false;
+  bool eta = false;
+  bool T = false;
+
+  bool Any() const {
+    return curlBx || curlBy || curlBz || divB || divv || beta || eta || T;
+  }
+};
+
 KOKKOS_INLINE_FUNCTION
-Real EvaluateMagneticSupportSum(const PulsedGaussianParams &params,
+Real EvaluateMagneticSupportSum(const PulsedReconnectionParams &params,
                                 const SupportTable &table, const Real x, const Real y,
                                 const Real amplitude) {
   if (table.num_points < 2 || amplitude == 0.0) {
@@ -144,39 +169,35 @@ Real EvaluateMagneticSupportSum(const PulsedGaussianParams &params,
   return SQR(amplitude) * support;
 }
 
-PulsedGaussianParams g_source_params{};
+PulsedReconnectionParams g_source_params{};
 bool g_source_params_initialized = false;
 
-// The legacy single-wire ampere-loop field peaks at q = (r / w_B)^2 satisfying
-// exp(-q) * (2 q + 1) = 1. These constants keep the current input roughly aligned with
-// the old peak-field scaling even as the profile families change.
-constexpr Real kOldAmpereLoopPeakQ = 1.2564312086261696770;
-constexpr Real kOldAmpereLoopPeakFactor = 0.6381726863389509616;
+// Exact peak of |d exp[-(r/w)^2]/dr|, used only for the Gaussian kernel.
 constexpr Real kGaussianGradientPeakFactor = 0.8577638849607067968; // sqrt(2 / e)
-
 KOKKOS_INLINE_FUNCTION
-Real DriveCurrentAtTime(const PulsedGaussianParams &params, const Real time) {
+Real PulseEnvelopeAtTime(const PulsedReconnectionParams &params, const Real time) {
   if (time <= 0.0 || params.drive_t_peak <= 0.0 || time >= 2.0 * params.drive_t_peak) {
     return 0.0;
   }
   const Real phase = M_PI * time / (2.0 * params.drive_t_peak);
   const Real s = sin(phase);
-  return params.drive_peak_current_MA * 1.0e6 * s * s;
+  return s * s;
 }
 
 KOKKOS_INLINE_FUNCTION
-Real DrivePotentialAmplitudeFromCurrent(const PulsedGaussianParams &params,
-                                        const Real current_ampere) {
-  const Real peak_current_ampere = params.drive_peak_current_MA * 1.0e6;
-  if (peak_current_ampere <= 0.0) {
-    return 0.0;
-  }
-  return params.drive_peak_magnetic_profile_amplitude * current_ampere /
-         peak_current_ampere;
+Real TimeProfileEnvelope(const PulsedReconnectionParams &params,
+                         const TimeProfile profile, const Real time) {
+  return profile == TimeProfile::fixed ? 1.0 : PulseEnvelopeAtTime(params, time);
 }
 
 KOKKOS_INLINE_FUNCTION
-Real EvaluateDriveAz(const PulsedGaussianParams &params, const Real x, const Real y,
+Real DrivePotentialAmplitudeAtTime(const PulsedReconnectionParams &params,
+                                   const Real time) {
+  return params.drive_peak_magnetic_profile_amplitude * PulseEnvelopeAtTime(params, time);
+}
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateDriveAz(const PulsedReconnectionParams &params, const Real x, const Real y,
                      const Real amplitude) {
   if (params.drive_magnetic_profile.shape == ProfileShape::none || amplitude == 0.0) {
     return 0.0;
@@ -192,7 +213,7 @@ Real EvaluateDriveAz(const PulsedGaussianParams &params, const Real x, const Rea
 }
 
 KOKKOS_INLINE_FUNCTION
-Real EvaluateInitialAz(const PulsedGaussianParams &params, const Real x, const Real y,
+Real EvaluateInitialAz(const PulsedReconnectionParams &params, const Real x, const Real y,
                        const Real /*z*/) {
   if (params.initial_magnetic_profile.shape == ProfileShape::none ||
       params.initial_magnetic_profile_amplitude == 0.0) {
@@ -228,22 +249,27 @@ KOKKOS_INLINE_FUNCTION Real CellCenteredB3(const B3Face &b3f, const int ndim,
                   : 0.0;
 }
 
+// Density support and temperature support are intentionally independent: they may use
+// different kernels, widths, and time envelopes.
 KOKKOS_INLINE_FUNCTION
-DriveFloorState EvaluateDriveFloorState(const PulsedGaussianParams &params, const Real x,
-                                        const Real y) {
-  DriveFloorState floors{0.0, 0.0};
-  if (params.drive_thermal_profile.shape == ProfileShape::none) {
-    return floors;
-  }
+DriveSupportState EvaluateDriveSupportState(const PulsedReconnectionParams &params,
+                                            const Real x, const Real y,
+                                            const Real time) {
+  DriveSupportState support{0.0, 0.0};
+  const Real rho_envelope =
+      TimeProfileEnvelope(params, params.drive_rho_time_profile, time);
+  const Real T_envelope =
+      TimeProfileEnvelope(params, params.drive_T_time_profile, time);
   const Real half_sep = 0.5 * params.array_separation;
   for (int sign = -1; sign <= 1; sign += 2) {
     const Real y_local = y - sign * half_sep;
-    const Real profile =
-        EvaluateRadialProfile(params.drive_thermal_profile, sqrt(SQR(x) + SQR(y_local)));
-    floors.rho_floor += params.drive_rho_floor * profile;
-    floors.T_floor += params.drive_T_floor * profile;
+    const Real r = sqrt(SQR(x) + SQR(y_local));
+    support.rho_target += params.drive_rho_profile_floor * rho_envelope *
+                          EvaluateRadialProfile(params.drive_rho_profile, r);
+    support.T_floor += params.drive_T_profile_floor * T_envelope *
+                       EvaluateRadialProfile(params.drive_T_profile, r);
   }
-  return floors;
+  return support;
 }
 
 ProfileShape ParseProfileShape(const std::string &name, const bool allow_none,
@@ -273,6 +299,14 @@ ProfileShape ParseProfileShape(const std::string &name, const bool allow_none,
                  " must be one of " + allowed + ".");
 }
 
+TimeProfile ParseTimeProfile(const std::string &name, const std::string &input_name) {
+  if (name == "fixed") return TimeProfile::fixed;
+  if (name == "sin2") return TimeProfile::sin2;
+  PARTHENON_FAIL("problem/pulsed_reconnection/" + input_name +
+                 " must be either 'fixed' or 'sin2'.");
+  return TimeProfile::sin2;
+}
+
 const char *ProfileShapeName(const ProfileShape shape) {
   switch (shape) {
   case ProfileShape::none:
@@ -291,31 +325,64 @@ const char *ProfileShapeName(const ProfileShape shape) {
   return "unknown";
 }
 
+const char *TimeProfileName(const TimeProfile profile) {
+  return profile == TimeProfile::fixed ? "fixed" : "sin2";
+}
+
 void RejectLegacyInputKeys(ParameterInput *pin) {
   const char *block = "problem/pulsed_reconnection";
+  const std::array<std::pair<const char *, const char *>, 11> replacements{{
+      {"w", "w_initial_rho and w_initial_T"},
+      {"initial_thermal_profile", "initial_rho_profile and initial_T_profile"},
+      {"initial_thermal_core_width",
+       "initial_rho_core_width and initial_T_core_width"},
+      {"initial_thermal_falloff_width",
+       "initial_rho_falloff_width and initial_T_falloff_width"},
+      {"w_drive", "w_drive_rho, w_drive_T, and w_drive_magnetic"},
+      {"w_drive_thermal", "w_drive_rho and w_drive_T"},
+      {"drive_thermal_profile", "drive_rho_profile and drive_T_profile"},
+      {"drive_thermal_core_width", "drive_rho_core_width and drive_T_core_width"},
+      {"drive_thermal_falloff_width",
+       "drive_rho_falloff_width and drive_T_falloff_width"},
+      {"drive_rho_floor", "drive_rho_profile_floor"},
+      {"drive_T_floor", "drive_T_profile_floor"},
+  }};
+  for (const auto &[old_key, new_keys] : replacements) {
+    if (pin->DoesParameterExist(block, old_key)) {
+      PARTHENON_FAIL("problem/pulsed_reconnection/" + std::string(old_key) +
+                     " has been replaced by " + new_keys + ".");
+    }
+  }
+  for (const auto &key : std::vector<std::string>{"current_peak_MA",
+                                                  "drive_peak_current_MA"}) {
+    if (pin->DoesParameterExist(block, key)) {
+      const std::string replacement =
+          key == "current_peak_MA" ? "B_peak_gauss" : "drive_B_peak_gauss";
+      PARTHENON_FAIL("problem/pulsed_reconnection/" + key +
+                     " has been replaced by " + replacement + ".");
+    }
+  }
   for (const auto &key : std::vector<std::string>{"thermal_profile", "force_balance",
                                                   "drive_hydro_support_enable",
                                                   "drive_cutoff_radius_factor",
                                                   "core_width", "falloff_width"}) {
-    if (pin->DoesParameterExist(block, key)) {
+    if (pin->DoesParameterExist(block, key))
       PARTHENON_FAIL("problem/pulsed_reconnection/" + key +
-                     " has been replaced by the new profile schema.");
-    }
+                     " belongs to an unsupported legacy schema.");
   }
 }
 
-PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg,
-                                      ParameterInput *pin) {
+PulsedReconnectionParams
+LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInput *pin) {
   RejectLegacyInputKeys(pin);
-  PulsedGaussianParams params{};
+  PulsedReconnectionParams params{};
   params.gm1 = pin->GetReal("hydro", "gamma") - 1.0;
-  params.current_peak_MA = pin->GetOrAddReal("problem/pulsed_reconnection",
-                                             "current_peak_MA", 1.0);
+  params.B_peak_gauss =
+      pin->GetOrAddReal("problem/pulsed_reconnection", "B_peak_gauss", 0.0);
   params.drive_enable =
       pin->GetOrAddBoolean("problem/pulsed_reconnection", "drive_enable", false);
-  params.drive_peak_current_MA = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "drive_peak_current_MA",
-      params.current_peak_MA);
+  params.drive_B_peak_gauss = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_B_peak_gauss", params.B_peak_gauss);
   params.drive_t_peak_ns = pin->GetOrAddReal("problem/pulsed_reconnection",
                                              "drive_t_peak_ns", 500.0);
   params.rho_wire_cgs =
@@ -329,22 +396,36 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   params.v0_cgs = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
   params.array_separation_cgs =
       pin->GetOrAddReal("problem/pulsed_reconnection", "array_separation", 4.0);
-  params.initial_thermal_profile.width =
-      pin->GetOrAddReal("problem/pulsed_reconnection", "w", 1.0);
-  params.initial_thermal_profile.shape =
+  // Initial density and temperature are independent fields. Their widths are required
+  // so no hidden length scale enters the physical initial condition.
+  params.initial_rho_profile.width =
+      pin->GetReal("problem/pulsed_reconnection", "w_initial_rho");
+  params.initial_rho_profile.shape =
       ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection",
-                                            "initial_thermal_profile", "gaussian"),
-                        false, "initial_thermal_profile");
-  params.initial_thermal_profile.tophat_core_width = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "initial_thermal_core_width",
-      params.initial_thermal_profile.width);
-  params.initial_thermal_profile.tophat_falloff_width = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "initial_thermal_falloff_width",
-      params.initial_thermal_profile.width);
+                                            "initial_rho_profile", "wendland"),
+                        false, "initial_rho_profile");
+  params.initial_rho_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_rho_core_width",
+      params.initial_rho_profile.width);
+  params.initial_rho_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_rho_falloff_width",
+      params.initial_rho_profile.width);
+  params.initial_T_profile.width =
+      pin->GetReal("problem/pulsed_reconnection", "w_initial_T");
+  params.initial_T_profile.shape =
+      ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection",
+                                            "initial_T_profile", "wendland"),
+                        false, "initial_T_profile");
+  params.initial_T_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_T_core_width",
+      params.initial_T_profile.width);
+  params.initial_T_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_T_falloff_width",
+      params.initial_T_profile.width);
   params.initial_magnetic_profile.width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "w_B",
       pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic",
-                        params.initial_thermal_profile.width));
+                        params.initial_rho_profile.width));
   params.initial_magnetic_profile.shape =
       ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection",
                                             "initial_magnetic_profile", "gaussian"),
@@ -357,72 +438,116 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
       params.initial_magnetic_profile.width);
   params.initial_force_balance = pin->GetOrAddBoolean(
       "problem/pulsed_reconnection", "initial_force_balance", true);
-  params.drive_thermal_profile.width = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "w_drive",
-      params.initial_magnetic_profile.width);
-  params.drive_thermal_profile.shape =
+  params.drive_rho_profile.width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "w_drive_rho", params.initial_rho_profile.width);
+  params.drive_rho_profile.shape =
       ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection",
-                                            "drive_thermal_profile", "none"),
-                        true, "drive_thermal_profile");
-  params.drive_thermal_profile.tophat_core_width = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "drive_thermal_core_width",
-      params.drive_thermal_profile.width);
-  params.drive_thermal_profile.tophat_falloff_width = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "drive_thermal_falloff_width",
-      params.drive_thermal_profile.width);
-  params.drive_magnetic_profile = params.drive_thermal_profile;
+                                            "drive_rho_profile", "none"),
+                        true, "drive_rho_profile");
+  params.drive_rho_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_rho_core_width",
+      params.drive_rho_profile.width);
+  params.drive_rho_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_rho_falloff_width",
+      params.drive_rho_profile.width);
+  params.drive_T_profile.width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "w_drive_T", params.initial_T_profile.width);
+  params.drive_T_profile.shape =
+      ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection",
+                                            "drive_T_profile", "none"),
+                        true, "drive_T_profile");
+  params.drive_T_profile.tophat_core_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_T_core_width", params.drive_T_profile.width);
+  params.drive_T_profile.tophat_falloff_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_T_falloff_width",
+      params.drive_T_profile.width);
+  params.drive_magnetic_profile.width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "w_drive_magnetic",
+      params.initial_magnetic_profile.width);
   params.drive_magnetic_profile.shape =
       ParseProfileShape(pin->GetOrAddString("problem/pulsed_reconnection",
                                             "drive_magnetic_profile", "gaussian"),
                         true, "drive_magnetic_profile");
   params.drive_magnetic_profile.tophat_core_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_magnetic_core_width",
-      params.drive_thermal_profile.width);
+      params.drive_magnetic_profile.width);
   params.drive_magnetic_profile.tophat_falloff_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_magnetic_falloff_width",
-      params.drive_thermal_profile.width);
+      params.drive_magnetic_profile.width);
   params.drive_force_balance = pin->GetOrAddBoolean(
       "problem/pulsed_reconnection", "drive_force_balance", false);
-  params.drive_rho_floor_cgs = pin->GetOrAddReal(
-      "problem/pulsed_reconnection", "drive_rho_floor", params.rho_wire_cgs);
-  params.drive_T_floor = pin->GetOrAddReal("problem/pulsed_reconnection",
-                                           "drive_T_floor", params.T_wire);
+  params.drive_rho_time_profile = ParseTimeProfile(
+      pin->GetOrAddString("problem/pulsed_reconnection", "drive_rho_time_profile",
+                          "sin2"),
+      "drive_rho_time_profile");
+  params.drive_T_time_profile = ParseTimeProfile(
+      pin->GetOrAddString("problem/pulsed_reconnection", "drive_T_time_profile", "sin2"),
+      "drive_T_time_profile");
+  if (params.drive_enable) {
+    params.drive_rho_profile_floor_cgs =
+        pin->GetReal("problem/pulsed_reconnection", "drive_rho_profile_floor");
+    params.drive_T_profile_floor =
+        pin->GetReal("problem/pulsed_reconnection", "drive_T_profile_floor");
+  } else {
+    params.drive_rho_profile_floor_cgs = 0.0;
+    params.drive_T_profile_floor = 0.0;
+  }
   params.azimuthal_mode_number =
       pin->GetOrAddInteger("problem/pulsed_reconnection", "N", 0);
   params.density_perturb_amplitude = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "density_perturb_amplitude", 0.0);
   params.temperature_perturb_amplitude = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "temperature_perturb_amplitude", 0.0);
-  PARTHENON_REQUIRE(params.initial_thermal_profile.width > 0.0,
-                    "problem/pulsed_reconnection/w must be positive.");
+  PARTHENON_REQUIRE(params.initial_rho_profile.width > 0.0,
+                    "problem/pulsed_reconnection/w_initial_rho must be positive.");
   PARTHENON_REQUIRE(
-      params.initial_thermal_profile.tophat_core_width > 0.0,
-      "problem/pulsed_reconnection/initial_thermal_core_width must be positive.");
+      params.initial_rho_profile.tophat_core_width > 0.0,
+      "problem/pulsed_reconnection/initial_rho_core_width must be positive.");
   PARTHENON_REQUIRE(
-      params.initial_thermal_profile.tophat_falloff_width > 0.0,
-      "problem/pulsed_reconnection/initial_thermal_falloff_width must be "
+      params.initial_rho_profile.tophat_falloff_width > 0.0,
+      "problem/pulsed_reconnection/initial_rho_falloff_width must be "
       "positive.");
+  PARTHENON_REQUIRE(params.initial_T_profile.width > 0.0,
+                    "problem/pulsed_reconnection/w_initial_T must be positive.");
+  PARTHENON_REQUIRE(params.initial_T_profile.tophat_core_width > 0.0,
+                    "problem/pulsed_reconnection/initial_T_core_width must be positive.");
+  PARTHENON_REQUIRE(
+      params.initial_T_profile.tophat_falloff_width > 0.0,
+      "problem/pulsed_reconnection/initial_T_falloff_width must be positive.");
   PARTHENON_REQUIRE(params.initial_magnetic_profile.width > 0.0,
                     "problem/pulsed_reconnection/w_B must be positive.");
-  PARTHENON_REQUIRE(params.drive_thermal_profile.width > 0.0,
-                    "problem/pulsed_reconnection/w_drive must be positive.");
+  PARTHENON_REQUIRE(params.drive_rho_profile.width > 0.0,
+                    "problem/pulsed_reconnection/w_drive_rho must be positive.");
+  PARTHENON_REQUIRE(params.drive_rho_profile.tophat_core_width > 0.0,
+                    "problem/pulsed_reconnection/drive_rho_core_width must be positive.");
+  PARTHENON_REQUIRE(
+      params.drive_rho_profile.tophat_falloff_width > 0.0,
+      "problem/pulsed_reconnection/drive_rho_falloff_width must be positive.");
+  PARTHENON_REQUIRE(params.drive_T_profile.width > 0.0,
+                    "problem/pulsed_reconnection/w_drive_T must be positive.");
+  PARTHENON_REQUIRE(params.drive_T_profile.tophat_core_width > 0.0,
+                    "problem/pulsed_reconnection/drive_T_core_width must be positive.");
+  PARTHENON_REQUIRE(params.drive_T_profile.tophat_falloff_width > 0.0,
+                    "problem/pulsed_reconnection/drive_T_falloff_width must be positive.");
+  PARTHENON_REQUIRE(params.drive_magnetic_profile.width > 0.0,
+                    "problem/pulsed_reconnection/w_drive_magnetic must be positive.");
   PARTHENON_REQUIRE(params.array_separation_cgs > 0.0,
                     "problem/pulsed_reconnection/array_separation must be "
                     "positive.");
-  PARTHENON_REQUIRE(params.current_peak_MA >= 0.0,
-                    "problem/pulsed_reconnection/current_peak_MA must be "
+  PARTHENON_REQUIRE(params.B_peak_gauss >= 0.0,
+                    "problem/pulsed_reconnection/B_peak_gauss must be "
                     "nonnegative.");
-  PARTHENON_REQUIRE(params.drive_peak_current_MA >= 0.0,
-                    "problem/pulsed_reconnection/drive_peak_current_MA must be "
+  PARTHENON_REQUIRE(params.drive_B_peak_gauss >= 0.0,
+                    "problem/pulsed_reconnection/drive_B_peak_gauss must be "
                     "nonnegative.");
   PARTHENON_REQUIRE(params.drive_t_peak_ns > 0.0,
                     "problem/pulsed_reconnection/drive_t_peak_ns must be "
                     "positive.");
-  PARTHENON_REQUIRE(params.drive_rho_floor_cgs >= 0.0,
-                    "problem/pulsed_reconnection/drive_rho_floor must be "
+  PARTHENON_REQUIRE(params.drive_rho_profile_floor_cgs >= 0.0,
+                    "problem/pulsed_reconnection/drive_rho_profile_floor must be "
                     "nonnegative.");
-  PARTHENON_REQUIRE(params.drive_T_floor >= 0.0,
-                    "problem/pulsed_reconnection/drive_T_floor must be "
+  PARTHENON_REQUIRE(params.drive_T_profile_floor >= 0.0,
+                    "problem/pulsed_reconnection/drive_T_profile_floor must be "
                     "nonnegative.");
   PARTHENON_REQUIRE(params.azimuthal_mode_number >= 0,
                     "problem/pulsed_reconnection/N must be nonnegative.");
@@ -435,22 +560,27 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   const auto units = hydro_pkg->Param<Units>("units");
   params.k_b = units.k_boltzmann();
   params.m_bar = hydro_pkg->Param<Real>("mbar");
-  const Real current_peak_ampere = params.current_peak_MA * 1.0e6;
-  params.current_field_prefac = 0.2 * current_peak_ampere * units.cm() * units.gauss();
   params.rho_wire = params.rho_wire_cgs * units.g_cm3();
   params.rho_background = params.rho_background_cgs * units.g_cm3();
-  params.drive_rho_floor = params.drive_rho_floor_cgs * units.g_cm3();
+  params.drive_rho_profile_floor =
+      params.drive_rho_profile_floor_cgs * units.g_cm3();
   params.v0 = params.v0_cgs * units.cm_s();
   params.array_separation = params.array_separation_cgs * units.cm();
-  params.initial_thermal_profile.width *= units.cm();
-  params.initial_thermal_profile.tophat_core_width *= units.cm();
-  params.initial_thermal_profile.tophat_falloff_width *= units.cm();
+  params.initial_rho_profile.width *= units.cm();
+  params.initial_rho_profile.tophat_core_width *= units.cm();
+  params.initial_rho_profile.tophat_falloff_width *= units.cm();
+  params.initial_T_profile.width *= units.cm();
+  params.initial_T_profile.tophat_core_width *= units.cm();
+  params.initial_T_profile.tophat_falloff_width *= units.cm();
   params.initial_magnetic_profile.width *= units.cm();
   params.initial_magnetic_profile.tophat_core_width *= units.cm();
   params.initial_magnetic_profile.tophat_falloff_width *= units.cm();
-  params.drive_thermal_profile.width *= units.cm();
-  params.drive_thermal_profile.tophat_core_width *= units.cm();
-  params.drive_thermal_profile.tophat_falloff_width *= units.cm();
+  params.drive_rho_profile.width *= units.cm();
+  params.drive_rho_profile.tophat_core_width *= units.cm();
+  params.drive_rho_profile.tophat_falloff_width *= units.cm();
+  params.drive_T_profile.width *= units.cm();
+  params.drive_T_profile.tophat_core_width *= units.cm();
+  params.drive_T_profile.tophat_falloff_width *= units.cm();
   params.drive_magnetic_profile.width *= units.cm();
   params.drive_magnetic_profile.tophat_core_width *= units.cm();
   params.drive_magnetic_profile.tophat_falloff_width *= units.cm();
@@ -458,40 +588,35 @@ PulsedGaussianParams LoadSourceParams(const std::shared_ptr<StateDescriptor> &hy
   // units per physical second, so multiply to convert seconds to code time.
   params.drive_t_peak = params.drive_t_peak_ns * 1.0e-9 * units.s();
 
-  const Real drive_peak_current_ampere = params.drive_peak_current_MA * 1.0e6;
-  const Real drive_current_field_prefac =
-      0.2 * drive_peak_current_ampere * units.cm() * units.gauss();
-  params.peak_magnetic_field_strength =
-      params.initial_magnetic_profile.width > 0.0
-          ? params.current_field_prefac * kOldAmpereLoopPeakFactor /
-                params.initial_magnetic_profile.width
-          : 0.0;
+  // A_z is the selected radial profile multiplied by an amplitude, so
+  // |B_phi| = |dA_z/dr|. Normalize independently for the initial and driven
+  // profiles so the requested values are their actual peak fields.
+  params.initial_peak_magnetic_field_strength = params.B_peak_gauss * units.gauss();
   const Real initial_peak_grad =
       PeakNormalizedDerivativeMagnitude(params.initial_magnetic_profile);
   params.initial_magnetic_profile_amplitude =
-      initial_peak_grad > 0.0 ? params.peak_magnetic_field_strength / initial_peak_grad
-                              : 0.0;
-  const Real drive_peak_field =
-      params.drive_magnetic_profile.width > 0.0
-          ? drive_current_field_prefac * kOldAmpereLoopPeakFactor /
-                params.drive_magnetic_profile.width
+      initial_peak_grad > 0.0
+          ? params.initial_peak_magnetic_field_strength / initial_peak_grad
           : 0.0;
+  const Real drive_peak_field = params.drive_B_peak_gauss * units.gauss();
   params.amr_magnetic_field_reference =
-      fmax(params.peak_magnetic_field_strength, drive_peak_field);
+      fmax(params.initial_peak_magnetic_field_strength, drive_peak_field);
   if (pin->GetString("refinement", "type") == "user") {
     PARTHENON_REQUIRE(
         params.amr_magnetic_field_reference > 0.0,
-        "Current-based AMR for pulsed_reconnection requires a positive "
+        "Magnetic-field-based AMR for pulsed_reconnection requires a positive "
         "initial or drive peak magnetic-field strength.");
   }
   const Real drive_peak_grad =
       PeakNormalizedDerivativeMagnitude(params.drive_magnetic_profile);
   params.drive_peak_magnetic_profile_amplitude =
       drive_peak_grad > 0.0 ? drive_peak_field / drive_peak_grad : 0.0;
+  // Normalize against the chosen rho kernel so v0 remains the peak speed for every
+  // supported profile family rather than silently retaining a Gaussian velocity shape.
+  const Real initial_rho_peak_grad =
+      PeakNormalizedDerivativeMagnitude(params.initial_rho_profile);
   params.velocity_normalization =
-      params.initial_thermal_profile.width > 0.0
-          ? params.v0 / (kGaussianGradientPeakFactor / params.initial_thermal_profile.width)
-          : 0.0;
+      initial_rho_peak_grad > 0.0 ? params.v0 / initial_rho_peak_grad : 0.0;
   params.initial_support_table =
       BuildUnitAmplitudeSupportTable(params.initial_magnetic_profile, "initial_support");
   params.drive_support_table =
@@ -509,12 +634,12 @@ void EnsureSourceParamsInitialized(const std::shared_ptr<StateDescriptor> &hydro
 }
 
 KOKKOS_INLINE_FUNCTION
-PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, const Real x,
-                                        const Real y) {
-  PulsedGaussianState state{};
+PulsedReconnectionState EvaluateSourceState(const PulsedReconnectionParams &params,
+                                            const Real x, const Real y) {
+  PulsedReconnectionState state{};
   const Real d = params.array_separation / 2.0;
-  Real thermo_profile_sum = 0.0;
-  Real density_profile_sum = 0.0;
+  Real T_profile_sum = 0.0;
+  Real rho_profile_sum = 0.0;
   Real magnetic_support_sum = 0.0;
 
   for (int A = -1; A <= 1; A += 2) {
@@ -524,18 +649,17 @@ PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, cons
     const Real r = sqrt(r2);
     const Real theta = atan2(y_local, x);
 
-    const Real thermo_profile = EvaluateRadialProfile(params.initial_thermal_profile, r);
-    Real gaussian_velocity_profile_unused = 0.0;
-    Real dthermo_profile_dr = 0.0;
-    EvaluateGaussianProfileAndDerivative(r, params.initial_thermal_profile.width,
-                                         gaussian_velocity_profile_unused,
-                                         dthermo_profile_dr);
-    const Real density_perturbation = AzimuthalThermoPerturbation(
+    Real rho_profile = 0.0;
+    Real drho_profile_dr = 0.0;
+    EvaluateRadialProfileAndDerivative(params.initial_rho_profile, r, rho_profile,
+                                       drho_profile_dr);
+    const Real T_profile = EvaluateRadialProfile(params.initial_T_profile, r);
+    const Real density_perturbation = AzimuthalProfilePerturbation(
         theta, params.density_perturb_amplitude, params.azimuthal_mode_number);
-    const Real temperature_perturbation = AzimuthalThermoPerturbation(
+    const Real temperature_perturbation = AzimuthalProfilePerturbation(
         theta, params.temperature_perturb_amplitude, params.azimuthal_mode_number);
-    thermo_profile_sum += thermo_profile * temperature_perturbation;
-    density_profile_sum += thermo_profile * density_perturbation;
+    T_profile_sum += T_profile * temperature_perturbation;
+    rho_profile_sum += rho_profile * density_perturbation;
     magnetic_support_sum += EvaluateSupportTable(params.initial_support_table, r);
 
     if (r > 0.0) {
@@ -544,15 +668,15 @@ PulsedGaussianState EvaluateSourceState(const PulsedGaussianParams &params, cons
       const Real yhat = y_local * inv_r;
 
       const Real radial_velocity =
-          params.drive_enable ? 0.0 : -params.velocity_normalization * dthermo_profile_dr;
+          params.drive_enable ? 0.0 : -params.velocity_normalization * drho_profile_dr;
       state.v1 += radial_velocity * xhat;
       state.v2 += radial_velocity * yhat;
 
     }
   }
 
-  state.rho = params.rho_background + params.rho_wire * density_profile_sum;
-  const Real T = params.T_background + params.T_wire * thermo_profile_sum;
+  state.rho = params.rho_background + params.rho_wire * rho_profile_sum;
+  const Real T = params.T_background + params.T_wire * T_profile_sum;
   state.pressure =
       T * params.k_b * state.rho / params.m_bar +
       (params.initial_force_balance
@@ -670,7 +794,7 @@ Real EvaluateSupportTable(const SupportTable &table, const Real r) {
 }
 
 KOKKOS_INLINE_FUNCTION
-Real AzimuthalThermoPerturbation(const Real theta, const Real p, const int mode_number) {
+Real AzimuthalProfilePerturbation(const Real theta, const Real p, const int mode_number) {
   const Real phase = static_cast<Real>(mode_number) * theta;
   const Real cos_phase = cos(phase);
   return 1 + p * cos_phase;
@@ -752,6 +876,26 @@ SupportTable BuildUnitAmplitudeSupportTable(const RadialProfileParams &params,
   return table;
 }
 
+DiagnosticSelection RequestedDiagnostics(ParameterInput *pin) {
+  DiagnosticSelection requested;
+  // Only an explicit appearance in an output block enrolls a problem diagnostic.
+  // Empty variable lists intentionally do not imply all optional diagnostics.
+  for (const auto &block : pin->GetBlockNamesWithPrefix("parthenon/output")) {
+    if (!pin->DoesParameterExist(block, "variables")) continue;
+    for (const auto &name : pin->GetVector<std::string>(block, "variables")) {
+      if (name == "curlBx") requested.curlBx = true;
+      if (name == "curlBy") requested.curlBy = true;
+      if (name == "curlBz") requested.curlBz = true;
+      if (name == "divB") requested.divB = true;
+      if (name == "divv") requested.divv = true;
+      if (name == "beta") requested.beta = true;
+      if (name == "eta") requested.eta = true;
+      if (name == "T") requested.T = true;
+    }
+  }
+  return requested;
+}
+
 } // namespace
 
 void ProblemInitPackageData(ParameterInput *pin,
@@ -760,15 +904,17 @@ void ProblemInitPackageData(ParameterInput *pin,
   PARTHENON_REQUIRE(fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd,
                     "pulsed_reconnection requires ctmhd or ucthlldmhd.");
 
+  const auto diagnostics = RequestedDiagnostics(pin);
+  hydro_pkg->AddParam<DiagnosticSelection>("pulsed_reconnection/diagnostics", diagnostics);
   auto m = Metadata({Metadata::Cell, Metadata::OneCopy}, std::vector<int>({1}));
-  hydro_pkg->AddField("curlBx", m);
-  hydro_pkg->AddField("curlBy", m);
-  hydro_pkg->AddField("curlBz", m);
-  hydro_pkg->AddField("divB", m);
-  hydro_pkg->AddField("divv", m);
-  hydro_pkg->AddField("beta", m);
-  hydro_pkg->AddField("eta", m);
-  hydro_pkg->AddField("T", m);
+  if (diagnostics.curlBx) hydro_pkg->AddField("curlBx", m);
+  if (diagnostics.curlBy) hydro_pkg->AddField("curlBy", m);
+  if (diagnostics.curlBz) hydro_pkg->AddField("curlBz", m);
+  if (diagnostics.divB) hydro_pkg->AddField("divB", m);
+  if (diagnostics.divv) hydro_pkg->AddField("divv", m);
+  if (diagnostics.beta) hydro_pkg->AddField("beta", m);
+  if (diagnostics.eta) hydro_pkg->AddField("eta", m);
+  if (diagnostics.T) hydro_pkg->AddField("T", m);
 
   if (pin->GetString("refinement", "type") == "user") {
     const Real refine_tol =
@@ -843,115 +989,188 @@ parthenon::AmrTag ProblemCheckRefinementBlock(MeshBlockData<Real> *mbd) {
 
 void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput * /*pin*/,
                           const parthenon::SimTime & /*tm*/) {
+  auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto diagnostics =
+      hydro_pkg->Param<DiagnosticSelection>("pulsed_reconnection/diagnostics");
+  if (!diagnostics.Any()) return;
+
   auto &coords = pmb->coords;
   auto &mbd = pmb->meshblock_data.Get();
-  auto &u = mbd->Get("cons").data;
-  auto &w = mbd->Get("prim").data;
-  auto &bface = mbd->Get("Bface").data;
-  const auto b1f = bface.Get(IBF1, 0, 0, 0);
-  const auto b2f = bface.Get(IBF2, 0, 0, 0);
-  const auto b3f = bface.Get(IBF3, 0, 0, 0);
-  auto hydro_pkg = pmb->packages.Get("Hydro");
-  const bool has_resistivity =
-      hydro_pkg->Param<Resistivity>("resistivity") == Resistivity::ohmic;
-  const auto ohm_diff =
-      has_resistivity
-          ? hydro_pkg->Param<OhmicDiffusivity>("ohm_diff")
-          : OhmicDiffusivity(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0,
-                             0.0, 0.0, -1.0);
-  const auto units = hydro_pkg->Param<Units>("units");
-  const Real eta_code_to_cgs =
-      SQR(units.code_length_cgs()) / units.code_time_cgs();
-
-  auto &curlBx = mbd->Get("curlBx").data;
-  auto &curlBy = mbd->Get("curlBy").data;
-  auto &curlBz = mbd->Get("curlBz").data;
-  auto &divB = mbd->Get("divB").data;
-  auto &divv = mbd->Get("divv").data;
-  auto &eta_field = mbd->Get("eta").data;
-  auto &beta_field = mbd->Get("beta").data;
-  auto &T_field = mbd->Get("T").data;
-  const Real mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
-  const auto ndim = pmb->pmy_mesh->ndim;
-
+  const int ndim = pmb->pmy_mesh->ndim;
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  pmb->par_for(
-      "pulsed_reconnection::UserWorkBeforeOutput", kb.s, kb.e, jb.s, jb.e,
-      ib.s, ib.e, KOKKOS_LAMBDA(const int k, const int j, const int i) {
-        const int im = i == ib.s ? i : i - 1;
-        const int ip = i == ib.e ? i : i + 1;
-        const int jm = j == jb.s ? j : j - 1;
-        const int jp = j == jb.e ? j : j + 1;
-        const int km = k == kb.s ? k : k - 1;
-        const int kp = k == kb.e ? k : k + 1;
-        const Real dBz_dy =
-            ndim > 1 ? (CellCenteredB3(b3f, ndim, k, jp, i) -
-                        CellCenteredB3(b3f, ndim, k, jm, i)) /
-                           (coords.Xc<2>(jp) - coords.Xc<2>(jm))
-                     : 0.0;
-        const Real dBy_dz =
-            ndim > 2 ? (CellCenteredB2(b2f, kp, j, i) -
-                        CellCenteredB2(b2f, km, j, i)) /
-                           (coords.Xc<3>(kp) - coords.Xc<3>(km))
-                     : 0.0;
-        const Real dBx_dz =
-            ndim > 2 ? (CellCenteredB1(b1f, kp, j, i) -
-                        CellCenteredB1(b1f, km, j, i)) /
-                           (coords.Xc<3>(kp) - coords.Xc<3>(km))
-                     : 0.0;
-        const Real dBz_dx = (CellCenteredB3(b3f, ndim, k, j, ip) -
-                             CellCenteredB3(b3f, ndim, k, j, im)) /
-                             (coords.Xc<1>(ip) - coords.Xc<1>(im));
-        const Real dBy_dx = (CellCenteredB2(b2f, k, j, ip) -
-                             CellCenteredB2(b2f, k, j, im)) /
-                             (coords.Xc<1>(ip) - coords.Xc<1>(im));
-        const Real dBx_dy =
-            ndim > 1 ? (CellCenteredB1(b1f, k, jp, i) -
-                        CellCenteredB1(b1f, k, jm, i)) /
-                           (coords.Xc<2>(jp) - coords.Xc<2>(jm))
-                     : 0.0;
-        curlBx(k, j, i) = dBz_dy - dBy_dz;
-        curlBy(k, j, i) = dBx_dz - dBz_dx;
-        curlBz(k, j, i) = dBy_dx - dBx_dy;
+  if (diagnostics.curlBx) {
+    auto &out = mbd->Get("curlBx").data;
+    auto &bface = mbd->Get("Bface").data;
+    const auto b2f = bface.Get(IBF2, 0, 0, 0);
+    const auto b3f = bface.Get(IBF3, 0, 0, 0);
+    pmb->par_for("pulsed_reconnection::curlBx", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   const int jm = j == jb.s ? j : j - 1;
+                   const int jp = j == jb.e ? j : j + 1;
+                   const int km = k == kb.s ? k : k - 1;
+                   const int kp = k == kb.e ? k : k + 1;
+                   const Real dBz_dy =
+                       ndim > 1 ? (CellCenteredB3(b3f, ndim, k, jp, i) -
+                                   CellCenteredB3(b3f, ndim, k, jm, i)) /
+                                      (coords.Xc<2>(jp) - coords.Xc<2>(jm))
+                                : 0.0;
+                   const Real dBy_dz =
+                       ndim > 2 ? (CellCenteredB2(b2f, kp, j, i) -
+                                   CellCenteredB2(b2f, km, j, i)) /
+                                      (coords.Xc<3>(kp) - coords.Xc<3>(km))
+                                : 0.0;
+                   out(k, j, i) = dBz_dy - dBy_dz;
+                 });
+  }
 
-        const Real dBx_dx =
-            (b1f(k, j, i + 1) - b1f(k, j, i)) / coords.Dxc<1>(k, j, i);
-        const Real dBy_dy =
-            ndim > 1 ? (b2f(k, j + 1, i) - b2f(k, j, i)) /
-                           coords.Dxc<2>(k, j, i)
-                     : 0.0;
-        const Real dBz_dz =
-            ndim > 2 ? (b3f(k + 1, j, i) - b3f(k, j, i)) /
-                           coords.Dxc<3>(k, j, i)
-                     : 0.0;
-        divB(k, j, i) = dBx_dx + dBy_dy + dBz_dz;
+  if (diagnostics.curlBy) {
+    auto &out = mbd->Get("curlBy").data;
+    auto &bface = mbd->Get("Bface").data;
+    const auto b1f = bface.Get(IBF1, 0, 0, 0);
+    const auto b3f = bface.Get(IBF3, 0, 0, 0);
+    pmb->par_for("pulsed_reconnection::curlBy", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   const int im = i == ib.s ? i : i - 1;
+                   const int ip = i == ib.e ? i : i + 1;
+                   const int km = k == kb.s ? k : k - 1;
+                   const int kp = k == kb.e ? k : k + 1;
+                   const Real dBx_dz =
+                       ndim > 2 ? (CellCenteredB1(b1f, kp, j, i) -
+                                   CellCenteredB1(b1f, km, j, i)) /
+                                      (coords.Xc<3>(kp) - coords.Xc<3>(km))
+                                : 0.0;
+                   const Real dBz_dx =
+                       (CellCenteredB3(b3f, ndim, k, j, ip) -
+                        CellCenteredB3(b3f, ndim, k, j, im)) /
+                       (coords.Xc<1>(ip) - coords.Xc<1>(im));
+                   out(k, j, i) = dBx_dz - dBz_dx;
+                 });
+  }
 
-        const Real dvx_dx = (w(IV1, k, j, ip) - w(IV1, k, j, im)) /
-                            (coords.Xc<1>(ip) - coords.Xc<1>(im));
-        const Real dvy_dy =
-            ndim > 1 ? (w(IV2, k, jp, i) - w(IV2, k, jm, i)) /
-                           (coords.Xc<2>(jp) - coords.Xc<2>(jm))
-                     : 0.0;
-        const Real dvz_dz =
-            ndim > 2 ? (w(IV3, kp, j, i) - w(IV3, km, j, i)) /
-                           (coords.Xc<3>(kp) - coords.Xc<3>(km))
-                     : 0.0;
-        divv(k, j, i) = dvx_dx + dvy_dy + dvz_dz;
+  if (diagnostics.curlBz) {
+    auto &out = mbd->Get("curlBz").data;
+    auto &bface = mbd->Get("Bface").data;
+    const auto b1f = bface.Get(IBF1, 0, 0, 0);
+    const auto b2f = bface.Get(IBF2, 0, 0, 0);
+    pmb->par_for("pulsed_reconnection::curlBz", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   const int im = i == ib.s ? i : i - 1;
+                   const int ip = i == ib.e ? i : i + 1;
+                   const int jm = j == jb.s ? j : j - 1;
+                   const int jp = j == jb.e ? j : j + 1;
+                   const Real dBy_dx =
+                       (CellCenteredB2(b2f, k, j, ip) -
+                        CellCenteredB2(b2f, k, j, im)) /
+                       (coords.Xc<1>(ip) - coords.Xc<1>(im));
+                   const Real dBx_dy =
+                       ndim > 1 ? (CellCenteredB1(b1f, k, jp, i) -
+                                   CellCenteredB1(b1f, k, jm, i)) /
+                                      (coords.Xc<2>(jp) - coords.Xc<2>(jm))
+                                : 0.0;
+                   out(k, j, i) = dBy_dx - dBx_dy;
+                 });
+  }
 
-        const Real rho = u(IDN, k, j, i);
-        const Real p = w(IPR, k, j, i);
-        T_field(k, j, i) = mbar_over_kb * p / rho;
-        const Real b_squared = SQR(CellCenteredB1(b1f, k, j, i)) +
-                               SQR(CellCenteredB2(b2f, k, j, i)) +
-                               SQR(CellCenteredB3(b3f, ndim, k, j, i));
-        beta_field(k, j, i) = b_squared > 0.0 ? 2.0 * p / b_squared : 0.0;
+  if (diagnostics.divB) {
+    auto &out = mbd->Get("divB").data;
+    auto &bface = mbd->Get("Bface").data;
+    const auto b1f = bface.Get(IBF1, 0, 0, 0);
+    const auto b2f = bface.Get(IBF2, 0, 0, 0);
+    const auto b3f = bface.Get(IBF3, 0, 0, 0);
+    pmb->par_for("pulsed_reconnection::divB", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   const Real dBx_dx =
+                       (b1f(k, j, i + 1) - b1f(k, j, i)) / coords.Dxc<1>(k, j, i);
+                   const Real dBy_dy =
+                       ndim > 1 ? (b2f(k, j + 1, i) - b2f(k, j, i)) /
+                                      coords.Dxc<2>(k, j, i)
+                                : 0.0;
+                   const Real dBz_dz =
+                       ndim > 2 ? (b3f(k + 1, j, i) - b3f(k, j, i)) /
+                                      coords.Dxc<3>(k, j, i)
+                                : 0.0;
+                   out(k, j, i) = dBx_dx + dBy_dy + dBz_dz;
+                 });
+  }
 
-        eta_field(k, j, i) =
-            has_resistivity ? ohm_diff.Get(p, rho) * eta_code_to_cgs : 0.0;
-      });
+  if (diagnostics.divv) {
+    auto &out = mbd->Get("divv").data;
+    auto &w = mbd->Get("prim").data;
+    pmb->par_for("pulsed_reconnection::divv", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   const int im = i == ib.s ? i : i - 1;
+                   const int ip = i == ib.e ? i : i + 1;
+                   const int jm = j == jb.s ? j : j - 1;
+                   const int jp = j == jb.e ? j : j + 1;
+                   const int km = k == kb.s ? k : k - 1;
+                   const int kp = k == kb.e ? k : k + 1;
+                   const Real dvx_dx = (w(IV1, k, j, ip) - w(IV1, k, j, im)) /
+                                       (coords.Xc<1>(ip) - coords.Xc<1>(im));
+                   const Real dvy_dy =
+                       ndim > 1 ? (w(IV2, k, jp, i) - w(IV2, k, jm, i)) /
+                                      (coords.Xc<2>(jp) - coords.Xc<2>(jm))
+                                : 0.0;
+                   const Real dvz_dz =
+                       ndim > 2 ? (w(IV3, kp, j, i) - w(IV3, km, j, i)) /
+                                      (coords.Xc<3>(kp) - coords.Xc<3>(km))
+                                : 0.0;
+                   out(k, j, i) = dvx_dx + dvy_dy + dvz_dz;
+                 });
+  }
+
+  if (diagnostics.T) {
+    auto &out = mbd->Get("T").data;
+    auto &u = mbd->Get("cons").data;
+    auto &w = mbd->Get("prim").data;
+    const Real mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
+    pmb->par_for("pulsed_reconnection::T", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   out(k, j, i) = mbar_over_kb * w(IPR, k, j, i) / u(IDN, k, j, i);
+                 });
+  }
+
+  if (diagnostics.beta) {
+    auto &out = mbd->Get("beta").data;
+    auto &w = mbd->Get("prim").data;
+    auto &bface = mbd->Get("Bface").data;
+    const auto b1f = bface.Get(IBF1, 0, 0, 0);
+    const auto b2f = bface.Get(IBF2, 0, 0, 0);
+    const auto b3f = bface.Get(IBF3, 0, 0, 0);
+    pmb->par_for("pulsed_reconnection::beta", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   const Real b_squared = SQR(CellCenteredB1(b1f, k, j, i)) +
+                                          SQR(CellCenteredB2(b2f, k, j, i)) +
+                                          SQR(CellCenteredB3(b3f, ndim, k, j, i));
+                   out(k, j, i) =
+                       b_squared > 0.0 ? 2.0 * w(IPR, k, j, i) / b_squared : 0.0;
+                 });
+  }
+
+  if (diagnostics.eta) {
+    auto &out = mbd->Get("eta").data;
+    auto &u = mbd->Get("cons").data;
+    auto &w = mbd->Get("prim").data;
+    const bool has_resistivity =
+        hydro_pkg->Param<Resistivity>("resistivity") == Resistivity::ohmic;
+    const auto ohm_diff =
+        has_resistivity
+            ? hydro_pkg->Param<OhmicDiffusivity>("ohm_diff")
+            : OhmicDiffusivity(Resistivity::none, ResistivityCoeff::none, 0.0, 0.0,
+                               0.0, 0.0, -1.0);
+    const auto units = hydro_pkg->Param<Units>("units");
+    const Real eta_code_to_cgs =
+        SQR(units.code_length_cgs()) / units.code_time_cgs();
+    pmb->par_for("pulsed_reconnection::eta", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                   out(k, j, i) = has_resistivity
+                                      ? ohm_diff.Get(w(IPR, k, j, i), u(IDN, k, j, i)) *
+                                            eta_code_to_cgs
+                                      : 0.0;
+                 });
+  }
 }
 
 void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
@@ -965,10 +1184,11 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
   IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
   IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
   IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
-  const Real amplitude_old =
-      DrivePotentialAmplitudeFromCurrent(params, DriveCurrentAtTime(params, tm.time));
-  const Real amplitude_new = DrivePotentialAmplitudeFromCurrent(
-      params, DriveCurrentAtTime(params, tm.time + dt));
+  const Real amplitude_old = DrivePotentialAmplitudeAtTime(params, tm.time);
+  const Real amplitude_new = DrivePotentialAmplitudeAtTime(params, tm.time + dt);
+  // The first-order source installs the end-of-step magnetic state, so rho and T
+  // support use the same end-of-step time when evaluating their independent envelopes.
+  const Real support_time = tm.time + dt;
 
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "pulsed_reconnection::DriveB1Faces",
@@ -1031,21 +1251,41 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
         const Real x = coords.Xc<1>(i);
         const Real y = coords.Xc<2>(j);
 
-        const auto floors = EvaluateDriveFloorState(params, x, y);
+        const auto support = EvaluateDriveSupportState(params, x, y, support_time);
         const Real magnetic_support =
             params.drive_force_balance
                 ? fmax(0.0, EvaluateMagneticSupportSum(params, params.drive_support_table, x,
                                                        y, amplitude_new))
                 : 0.0;
-        if (floors.rho_floor <= 0.0 && floors.T_floor <= 0.0 &&
+        if (support.rho_target <= 0.0 && support.T_floor <= 0.0 &&
             magnetic_support <= 0.0) {
           return;
         }
 
         const Real rho_old = cons(IDN, k, j, i);
-        const Real delta_rho = fmax(0.0, floors.rho_floor - rho_old);
+        // The envelope modulates a one-sided target. On the falling side of a sin2
+        // pulse, previously supplied mass remains and is transported by the equations.
+        const Real delta_rho = fmax(0.0, support.rho_target - rho_old);
         const Real rho_new = rho_old + delta_rho;
+
+        // Density support represents co-moving plasma, not stationary ballast. Add the
+        // matching momentum so top-up changes density without changing the cell velocity.
+        const Real v1_old = rho_old > 0.0 ? cons(IM1, k, j, i) / rho_old : 0.0;
+        const Real v2_old = rho_old > 0.0 ? cons(IM2, k, j, i) / rho_old : 0.0;
+        const Real v3_old = rho_old > 0.0 ? cons(IM3, k, j, i) / rho_old : 0.0;
         cons(IDN, k, j, i) = rho_new;
+        cons(IM1, k, j, i) += delta_rho * v1_old;
+        cons(IM2, k, j, i) += delta_rho * v2_old;
+        cons(IM3, k, j, i) += delta_rho * v3_old;
+
+        // Inject both the kinetic energy required by co-motion and the specific internal
+        // energy corresponding to the instantaneous local T profile floor. This term is
+        // separate from the minimum-pressure correction below.
+        const Real injected_kinetic_energy =
+            0.5 * delta_rho * (SQR(v1_old) + SQR(v2_old) + SQR(v3_old));
+        const Real injected_internal_energy =
+            delta_rho * params.k_b * support.T_floor / (params.m_bar * params.gm1);
+        cons(IEN, k, j, i) += injected_kinetic_energy + injected_internal_energy;
 
         const Real momentum_sq = SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
                                  SQR(cons(IM3, k, j, i));
@@ -1056,19 +1296,10 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
         const Real internal_energy =
             fmax(0.0, cons(IEN, k, j, i) - kinetic_energy - magnetic_energy);
         const Real pressure = params.gm1 * internal_energy;
-        // The existing hydro support option already acts like a density/temperature
-        // floor inside the driven layer. Extend that logic so the total gas pressure
-        // also includes the analytic magnetic support required to counter the Lorentz
-        // force from the field that was just injected during this source-term step.
-        //
-        // This is intentionally framed as a floor on the thermal pressure rather than
-        // a direct overwrite. Cells that are already hotter or more pressurized keep
-        // their excess internal energy, while under-supported cells are lifted to the
-        // minimum pressure implied by:
-        //   1. the requested temperature floor at the updated density, and
-        //   2. the instantaneous analytic magnetic support profile.
+        // Enforce, but never overwrite downward to, the sum of the independently
+        // profiled temperature floor and instantaneous magnetic force-balance support.
         const Real thermal_pressure_floor =
-            rho_new > 0.0 ? floors.T_floor * params.k_b * rho_new / params.m_bar : 0.0;
+            rho_new > 0.0 ? support.T_floor * params.k_b * rho_new / params.m_bar : 0.0;
         const Real target_pressure = thermal_pressure_floor + magnetic_support;
         const Real delta_internal_energy =
             target_pressure > pressure ? (target_pressure - pressure) / params.gm1 : 0.0;
@@ -1095,9 +1326,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "Input parameters:" << std::endl;
     std::cout << "gamma ================== " << pin->GetReal("hydro", "gamma")
               << std::endl;
-    std::cout << "current_peak [MA] ====== " << params.current_peak_MA << std::endl;
+    std::cout << "B_peak [gauss] ========= " << params.B_peak_gauss << std::endl;
     std::cout << "drive_enable =========== " << params.drive_enable << std::endl;
-    std::cout << "drive_peak_current [MA]  " << params.drive_peak_current_MA << std::endl;
+    std::cout << "drive_B_peak [gauss] === " << params.drive_B_peak_gauss << std::endl;
     std::cout << "drive_t_peak [ns] ====== " << params.drive_t_peak_ns << std::endl;
     std::cout << "rho_wire(core) [g/cm^3]= " << params.rho_wire_cgs << std::endl;
     std::cout << "rho_background [g/cm^3]= " << params.rho_background_cgs << std::endl;
@@ -1105,19 +1336,29 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "T_background [K] ======= " << params.T_background << std::endl;
     std::cout << "v0(peak) [cm/s] ======== " << params.v0_cgs << std::endl;
     std::cout << "array_separation [cm] == " << params.array_separation_cgs << std::endl;
-    std::cout << "initial thermo profile == "
-              << ProfileShapeName(params.initial_thermal_profile.shape) << std::endl;
+    std::cout << "initial rho profile ==== "
+              << ProfileShapeName(params.initial_rho_profile.shape) << std::endl;
+    std::cout << "initial T profile ====== "
+              << ProfileShapeName(params.initial_T_profile.shape) << std::endl;
     std::cout << "initial magnetic profile "
               << ProfileShapeName(params.initial_magnetic_profile.shape) << std::endl;
-    std::cout << "drive thermal profile == "
-              << ProfileShapeName(params.drive_thermal_profile.shape) << std::endl;
+    std::cout << "drive rho profile ====== "
+              << ProfileShapeName(params.drive_rho_profile.shape) << std::endl;
+    std::cout << "drive T profile ======== "
+              << ProfileShapeName(params.drive_T_profile.shape) << std::endl;
     std::cout << "drive magnetic profile = "
               << ProfileShapeName(params.drive_magnetic_profile.shape) << std::endl;
     std::cout << "initial_force_balance == " << params.initial_force_balance
               << std::endl;
     std::cout << "drive_force_balance === " << params.drive_force_balance << std::endl;
-    std::cout << "drive rho floor [g/cm^3] " << params.drive_rho_floor_cgs << std::endl;
-    std::cout << "drive T floor [K] ====== " << params.drive_T_floor << std::endl;
+    std::cout << "drive rho profile floor  " << params.drive_rho_profile_floor_cgs
+              << " g/cm^3" << std::endl;
+    std::cout << "drive T profile floor == " << params.drive_T_profile_floor << " K"
+              << std::endl;
+    std::cout << "drive rho time profile = "
+              << TimeProfileName(params.drive_rho_time_profile) << std::endl;
+    std::cout << "drive T time profile === "
+              << TimeProfileName(params.drive_T_time_profile) << std::endl;
     std::cout << "azimuthal mode N ======= " << params.azimuthal_mode_number
               << std::endl;
     std::cout << "dens. perturb. amplitude=" << params.density_perturb_amplitude
@@ -1125,7 +1366,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "temp perturb. amplitude =" << params.temperature_perturb_amplitude
               << std::endl;
     std::cout << "Converted code units:" << std::endl;
-    std::cout << "matched |B|_peak [code] = " << params.peak_magnetic_field_strength
+    std::cout << "initial |B|_peak [code] = "
+              << params.initial_peak_magnetic_field_strength
               << std::endl;
     std::cout << "initial mag amp [code] = " << params.initial_magnetic_profile_amplitude
               << std::endl;
@@ -1136,24 +1378,20 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "rho_background [code] == " << params.rho_background << std::endl;
     std::cout << "v0(peak) [code] ======== " << params.v0 << std::endl;
     std::cout << "array_separation [code]  " << params.array_separation << std::endl;
-    std::cout << "thermo width w [code] == " << params.initial_thermal_profile.width
+    std::cout << "initial rho width [code] " << params.initial_rho_profile.width
               << std::endl;
-    std::cout << "initial thermal core === "
-              << params.initial_thermal_profile.tophat_core_width
+    std::cout << "initial T width [code] == " << params.initial_T_profile.width
               << std::endl;
-    std::cout << "initial thermal falloff "
-              << params.initial_thermal_profile.tophat_falloff_width << std::endl;
     std::cout << "magnetic width w_B [code]" << params.initial_magnetic_profile.width
               << std::endl;
-    std::cout << "thermo perturbation ==== 1 + p*cos(N*theta)" << std::endl;
+    std::cout << "rho/T perturbation ===== 1 + p*cos(N*theta)" << std::endl;
     std::cout << "velocity =============== "
               << (params.drive_enable ? "disabled in driven mode"
-                                      : "normalized -grad(gaussian thermo profile)")
+                                      : "normalized -grad(initial rho profile)")
               << std::endl;
     std::cout << "magnetic field ========= "
-              << "B = z_hat x grad(profile)"
+              << "B = z_hat x grad(profile), peak-normalized"
               << std::endl;
-    std::cout << "old |B| peak match at q = " << kOldAmpereLoopPeakQ << std::endl;
   }
 
   auto &coords = pmb->coords;
