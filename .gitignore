@@ -51,6 +51,9 @@ compile_commands.json
 # CMake Test files
 Testing
 
+# Agents files for machines
+AGENTS.md
+
 # generate_cluster_input.ipynb files
 inputs/cluster/generate_cluster_input.ipynb
 inputs/cluster/my_cluster.input
