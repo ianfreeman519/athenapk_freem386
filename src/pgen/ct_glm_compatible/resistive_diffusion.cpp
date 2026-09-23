@@ -29,8 +29,8 @@ Real FourierAz(const Real x, const Real y, const Real amp, const Real kx,
 
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   const auto hydro_pkg = pmb->packages.Get("Hydro");
-  PARTHENON_REQUIRE_THROWS(hydro_pkg->Param<Fluid>("fluid") == Fluid::ucthlldmhd,
-                           "resistive_diffusion requires hydro/fluid=ucthlldmhd");
+  PARTHENON_REQUIRE_THROWS(IsUCTFluid(hydro_pkg->Param<Fluid>("fluid")),
+                           "resistive_diffusion requires a UCT fluid");
   const int ndim = pmb->pmy_mesh->ndim;
 
   const int iprob = pin->GetOrAddInteger("problem/resistive_diffusion", "iprob", 0);

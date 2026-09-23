@@ -33,14 +33,32 @@ using namespace parthenon::driver::prelude;
 using namespace parthenon::package::prelude;
 using TE = parthenon::TopologicalElement;
 
-enum class ProfileShape { none, gaussian, tophat, cubic, wendland, quintic };
+enum class ProfileShape {
+  none,
+  gaussian,
+  tophat,
+  annulus,
+  confined_current,
+  cubic,
+  wendland,
+  quintic
+};
 enum class TimeProfile { fixed, sin2 };
+enum class VelocityDriveMode { none, injected_mass };
 
 struct RadialProfileParams {
   ProfileShape shape = ProfileShape::none;
   Real width = 0.0;
   Real tophat_core_width = 0.0;
   Real tophat_falloff_width = 0.0;
+  Real annulus_inner_radius = 0.0;
+  Real annulus_outer_radius = 0.0;
+  Real annulus_transition_width = 0.0;
+  Real conductor_radius = 0.0;
+  Real conductor_transition_width = 0.0;
+  Real wire_inner_radius = 0.0;
+  Real wire_outer_radius = 0.0;
+  Real wire_transition_width = 0.0;
 };
 
 struct SupportTable {
@@ -75,6 +93,7 @@ Real PeakNormalizedDerivativeMagnitude(const RadialProfileParams &params);
 Real ProfileSupportRadius(const RadialProfileParams &params);
 SupportTable BuildUnitAmplitudeSupportTable(const RadialProfileParams &params,
                                             const std::string &label);
+SupportTable BuildConfinedCurrentPotentialTable(const RadialProfileParams &params);
 
 // All input-derived state used by initialization and the per-step source. Keeping it in
 // one trivially-copyable object allows the same definitions to be captured by device
@@ -86,14 +105,28 @@ struct PulsedReconnectionParams {
   Real B_peak_gauss;
   bool drive_enable;
   Real drive_B_peak_gauss;
+  Real drive_velocity_peak_cgs;
+  Real drive_velocity_peak;
+  Real drive_velocity_inner_radius_cgs;
+  Real drive_velocity_outer_radius_cgs;
+  Real drive_velocity_transition_width_cgs;
+  Real drive_velocity_inner_radius;
+  Real drive_velocity_outer_radius;
+  Real drive_velocity_transition_width;
   Real drive_t_peak_ns;
   Real drive_t_peak;
   Real drive_rho_profile_floor_cgs;
   Real drive_rho_profile_floor;
   Real drive_T_profile_floor;
+  Real drive_rho_inner_reservoir_floor_cgs;
+  Real drive_rho_inner_reservoir_floor;
+  Real drive_T_inner_reservoir_floor;
   Real rho_wire_cgs;
+  Real rho_inner_reservoir_cgs;
+  Real inner_reservoir_radius_cgs;
   Real rho_background_cgs;
   Real T_wire;
+  Real T_inner_reservoir;
   Real T_background;
   Real v0_cgs;
   Real array_separation_cgs;
@@ -101,6 +134,8 @@ struct PulsedReconnectionParams {
   Real density_perturb_amplitude;
   Real temperature_perturb_amplitude;
   Real rho_wire;
+  Real rho_inner_reservoir;
+  Real inner_reservoir_radius;
   Real rho_background;
   Real v0;
   Real array_separation;
@@ -111,8 +146,12 @@ struct PulsedReconnectionParams {
   Real drive_peak_magnetic_profile_amplitude;
   bool initial_force_balance;
   bool drive_force_balance;
+  bool inner_reservoir_support_enabled;
   TimeProfile drive_rho_time_profile;
   TimeProfile drive_T_time_profile;
+  TimeProfile drive_velocity_time_profile;
+  TimeProfile inner_reservoir_time_profile;
+  VelocityDriveMode drive_velocity_mode;
   RadialProfileParams initial_rho_profile;
   RadialProfileParams initial_T_profile;
   RadialProfileParams initial_magnetic_profile;
@@ -133,7 +172,13 @@ struct PulsedReconnectionState {
 
 struct DriveSupportState {
   Real rho_target;
+  Real rho_inner_target;
   Real T_floor;
+  Real T_inner_floor;
+  Real v1_target;
+  Real v2_target;
+  Real velocity_weight;
+  Real inner_reservoir_weight;
 };
 
 // These flags are derived from explicit output-variable requests. A field that is not
@@ -191,6 +236,50 @@ Real TimeProfileEnvelope(const PulsedReconnectionParams &params,
 }
 
 KOKKOS_INLINE_FUNCTION
+Real SmootherStep01(const Real x) {
+  const Real clamped = fmin(1.0, fmax(0.0, x));
+  return clamped * clamped * clamped *
+         (clamped * (clamped * 6.0 - 15.0) + 10.0);
+}
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateInnerReservoirProfile(const RadialProfileParams &params,
+                                   const Real reservoir_radius, const Real r) {
+  if (params.shape != ProfileShape::annulus || r >= reservoir_radius) {
+    return 0.0;
+  }
+  const Real transition_start = reservoir_radius - params.annulus_transition_width;
+  if (r <= transition_start) return 1.0;
+  return 1.0 - SmootherStep01((r - transition_start) /
+                              params.annulus_transition_width);
+}
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateVelocityAnnulus(const PulsedReconnectionParams &params, const Real r) {
+  if (params.drive_velocity_mode != VelocityDriveMode::injected_mass ||
+      r <= params.drive_velocity_inner_radius ||
+      r >= params.drive_velocity_outer_radius) {
+    return 0.0;
+  }
+  if (r < params.drive_velocity_inner_radius +
+              params.drive_velocity_transition_width) {
+    return SmootherStep01((r - params.drive_velocity_inner_radius) /
+                          params.drive_velocity_transition_width);
+  }
+  if (r > params.drive_velocity_outer_radius -
+              params.drive_velocity_transition_width) {
+    return SmootherStep01((params.drive_velocity_outer_radius - r) /
+                          params.drive_velocity_transition_width);
+  }
+  return 1.0;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real EvaluateConfinedCurrentPotential(const SupportTable &table, const Real r) {
+  return EvaluateSupportTable(table, r);
+}
+
+KOKKOS_INLINE_FUNCTION
 Real DrivePotentialAmplitudeAtTime(const PulsedReconnectionParams &params,
                                    const Real time) {
   return params.drive_peak_magnetic_profile_amplitude * PulseEnvelopeAtTime(params, time);
@@ -206,8 +295,11 @@ Real EvaluateDriveAz(const PulsedReconnectionParams &params, const Real x, const
   Real az = 0.0;
   for (int sign = -1; sign <= 1; sign += 2) {
     const Real y_local = y - sign * half_sep;
+    const Real r = sqrt(SQR(x) + SQR(y_local));
     az += amplitude *
-          EvaluateRadialProfile(params.drive_magnetic_profile, sqrt(SQR(x) + SQR(y_local)));
+          (params.drive_magnetic_profile.shape == ProfileShape::confined_current
+               ? EvaluateConfinedCurrentPotential(params.drive_support_table, r)
+               : EvaluateRadialProfile(params.drive_magnetic_profile, r));
   }
   return az;
 }
@@ -223,9 +315,11 @@ Real EvaluateInitialAz(const PulsedReconnectionParams &params, const Real x, con
   Real az = 0.0;
   for (int sign = -1; sign <= 1; sign += 2) {
     const Real y_local = y - sign * half_sep;
+    const Real r = sqrt(SQR(x) + SQR(y_local));
     az += params.initial_magnetic_profile_amplitude *
-          EvaluateRadialProfile(params.initial_magnetic_profile,
-                                sqrt(SQR(x) + SQR(y_local)));
+          (params.initial_magnetic_profile.shape == ProfileShape::confined_current
+               ? EvaluateConfinedCurrentPotential(params.initial_support_table, r)
+               : EvaluateRadialProfile(params.initial_magnetic_profile, r));
   }
   return az;
 }
@@ -249,17 +343,24 @@ KOKKOS_INLINE_FUNCTION Real CellCenteredB3(const B3Face &b3f, const int ndim,
                   : 0.0;
 }
 
-// Density support and temperature support are intentionally independent: they may use
-// different kernels, widths, and time envelopes.
+// Density and temperature supports use independent radial profiles. Injected velocity
+// is restricted to a smooth annulus around each array and applies only to replenished
+// mass, leaving density top-up elsewhere co-moving with the existing reservoir.
 KOKKOS_INLINE_FUNCTION
 DriveSupportState EvaluateDriveSupportState(const PulsedReconnectionParams &params,
                                             const Real x, const Real y,
                                             const Real time) {
-  DriveSupportState support{0.0, 0.0};
+  DriveSupportState support{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   const Real rho_envelope =
       TimeProfileEnvelope(params, params.drive_rho_time_profile, time);
   const Real T_envelope =
       TimeProfileEnvelope(params, params.drive_T_time_profile, time);
+  const Real velocity_envelope =
+      TimeProfileEnvelope(params, params.drive_velocity_time_profile, time);
+  const Real inner_reservoir_envelope =
+      params.inner_reservoir_support_enabled
+          ? TimeProfileEnvelope(params, params.inner_reservoir_time_profile, time)
+          : 0.0;
   const Real half_sep = 0.5 * params.array_separation;
   for (int sign = -1; sign <= 1; sign += 2) {
     const Real y_local = y - sign * half_sep;
@@ -268,6 +369,27 @@ DriveSupportState EvaluateDriveSupportState(const PulsedReconnectionParams &para
                           EvaluateRadialProfile(params.drive_rho_profile, r);
     support.T_floor += params.drive_T_profile_floor * T_envelope *
                        EvaluateRadialProfile(params.drive_T_profile, r);
+    if (params.inner_reservoir_support_enabled) {
+      const Real rho_inner_weight =
+          EvaluateInnerReservoirProfile(params.initial_rho_profile,
+                                        params.inner_reservoir_radius, r);
+      const Real T_inner_weight =
+          EvaluateInnerReservoirProfile(params.initial_T_profile,
+                                        params.inner_reservoir_radius, r);
+      support.rho_inner_target += params.drive_rho_inner_reservoir_floor *
+                                  inner_reservoir_envelope * rho_inner_weight;
+      support.T_inner_floor += params.drive_T_inner_reservoir_floor *
+                               inner_reservoir_envelope * T_inner_weight;
+      support.inner_reservoir_weight += fmax(rho_inner_weight, T_inner_weight);
+    }
+    if (r > 0.0) {
+      const Real velocity_weight = EvaluateVelocityAnnulus(params, r);
+      const Real radial_velocity =
+          params.drive_velocity_peak * velocity_envelope * velocity_weight;
+      support.v1_target += radial_velocity * x / r;
+      support.v2_target += radial_velocity * y_local / r;
+      support.velocity_weight += velocity_weight;
+    }
   }
   return support;
 }
@@ -283,6 +405,12 @@ ProfileShape ParseProfileShape(const std::string &name, const bool allow_none,
   if (name == "tophat") {
     return ProfileShape::tophat;
   }
+  if (name == "annulus") {
+    return ProfileShape::annulus;
+  }
+  if (name == "confined_current") {
+    return ProfileShape::confined_current;
+  }
   if (name == "cubic") {
     return ProfileShape::cubic;
   }
@@ -293,8 +421,11 @@ ProfileShape ParseProfileShape(const std::string &name, const bool allow_none,
     return ProfileShape::quintic;
   }
   const std::string allowed =
-      allow_none ? "'none', 'gaussian', 'tophat', 'cubic', 'wendland', or 'quintic'"
-                 : "'gaussian', 'tophat', 'cubic', 'wendland', or 'quintic'";
+      allow_none
+          ? "'none', 'gaussian', 'tophat', 'annulus', 'cubic', 'wendland', or "
+            "'quintic', or 'confined_current'"
+          : "'gaussian', 'tophat', 'annulus', 'cubic', 'wendland', 'quintic', or "
+            "'confined_current'";
   PARTHENON_FAIL("problem/pulsed_reconnection/" + input_name +
                  " must be one of " + allowed + ".");
 }
@@ -307,6 +438,18 @@ TimeProfile ParseTimeProfile(const std::string &name, const std::string &input_n
   return TimeProfile::sin2;
 }
 
+VelocityDriveMode ParseVelocityDriveMode(const std::string &name) {
+  if (name == "none") return VelocityDriveMode::none;
+  if (name == "injected_mass") return VelocityDriveMode::injected_mass;
+  PARTHENON_FAIL("problem/pulsed_reconnection/drive_velocity_mode must be either "
+                 "'none' or 'injected_mass'.");
+  return VelocityDriveMode::none;
+}
+
+const char *VelocityDriveModeName(const VelocityDriveMode mode) {
+  return mode == VelocityDriveMode::injected_mass ? "injected_mass" : "none";
+}
+
 const char *ProfileShapeName(const ProfileShape shape) {
   switch (shape) {
   case ProfileShape::none:
@@ -315,6 +458,10 @@ const char *ProfileShapeName(const ProfileShape shape) {
     return "gaussian";
   case ProfileShape::tophat:
     return "tophat";
+  case ProfileShape::annulus:
+    return "annulus";
+  case ProfileShape::confined_current:
+    return "confined_current";
   case ProfileShape::cubic:
     return "cubic";
   case ProfileShape::wendland:
@@ -331,7 +478,7 @@ const char *TimeProfileName(const TimeProfile profile) {
 
 void RejectLegacyInputKeys(ParameterInput *pin) {
   const char *block = "problem/pulsed_reconnection";
-  const std::array<std::pair<const char *, const char *>, 11> replacements{{
+  const std::array<std::pair<const char *, const char *>, 15> replacements{{
       {"w", "w_initial_rho and w_initial_T"},
       {"initial_thermal_profile", "initial_rho_profile and initial_T_profile"},
       {"initial_thermal_core_width",
@@ -346,6 +493,11 @@ void RejectLegacyInputKeys(ParameterInput *pin) {
        "drive_rho_falloff_width and drive_T_falloff_width"},
       {"drive_rho_floor", "drive_rho_profile_floor"},
       {"drive_T_floor", "drive_T_profile_floor"},
+      {"w_drive_velocity", "drive_velocity_inner_radius and drive_velocity_outer_radius"},
+      {"drive_velocity_profile", "drive_velocity_mode=injected_mass"},
+      {"drive_velocity_core_width", "drive_velocity_inner_radius"},
+      {"drive_velocity_falloff_width",
+       "drive_velocity_outer_radius and drive_velocity_transition_width"},
   }};
   for (const auto &[old_key, new_keys] : replacements) {
     if (pin->DoesParameterExist(block, old_key)) {
@@ -383,14 +535,33 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
       pin->GetOrAddBoolean("problem/pulsed_reconnection", "drive_enable", false);
   params.drive_B_peak_gauss = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_B_peak_gauss", params.B_peak_gauss);
+  params.drive_velocity_peak_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_velocity_peak", 0.0);
   params.drive_t_peak_ns = pin->GetOrAddReal("problem/pulsed_reconnection",
                                              "drive_t_peak_ns", 500.0);
   params.rho_wire_cgs =
       pin->GetOrAddReal("problem/pulsed_reconnection", "rho_wire", 1e-3);
+  params.rho_inner_reservoir_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "rho_inner_reservoir", 0.0);
   params.rho_background_cgs =
       pin->GetOrAddReal("problem/pulsed_reconnection", "rho_background", 1e-6);
   params.T_wire =
       pin->GetOrAddReal("problem/pulsed_reconnection", "T_wire", 1.1e4);
+  params.T_inner_reservoir = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "T_inner_reservoir", 0.0);
+  const std::string inner_reservoir_support = pin->GetOrAddString(
+      "problem/pulsed_reconnection", "inner_reservoir_support", "none");
+  params.inner_reservoir_support_enabled = inner_reservoir_support != "none";
+  params.inner_reservoir_time_profile =
+      params.inner_reservoir_support_enabled
+          ? ParseTimeProfile(inner_reservoir_support, "inner_reservoir_support")
+          : TimeProfile::fixed;
+  params.drive_rho_inner_reservoir_floor_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_rho_inner_reservoir_floor",
+      params.rho_inner_reservoir_cgs);
+  params.drive_T_inner_reservoir_floor = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_T_inner_reservoir_floor",
+      params.T_inner_reservoir);
   params.T_background =
       pin->GetOrAddReal("problem/pulsed_reconnection", "T_background", 1e2);
   params.v0_cgs = pin->GetOrAddReal("problem/pulsed_reconnection", "v0", 1.0e6);
@@ -410,6 +581,12 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.initial_rho_profile.tophat_falloff_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "initial_rho_falloff_width",
       params.initial_rho_profile.width);
+  params.initial_rho_profile.annulus_inner_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_rho_inner_radius", 0.0);
+  params.initial_rho_profile.annulus_outer_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_rho_outer_radius", 0.0);
+  params.initial_rho_profile.annulus_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_rho_transition_width", 0.0);
   params.initial_T_profile.width =
       pin->GetReal("problem/pulsed_reconnection", "w_initial_T");
   params.initial_T_profile.shape =
@@ -422,6 +599,15 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.initial_T_profile.tophat_falloff_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "initial_T_falloff_width",
       params.initial_T_profile.width);
+  params.initial_T_profile.annulus_inner_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_T_inner_radius", 0.0);
+  params.initial_T_profile.annulus_outer_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_T_outer_radius", 0.0);
+  params.initial_T_profile.annulus_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_T_transition_width", 0.0);
+  params.inner_reservoir_radius_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "inner_reservoir_radius",
+      params.initial_rho_profile.annulus_inner_radius);
   params.initial_magnetic_profile.width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "w_B",
       pin->GetOrAddReal("problem/pulsed_reconnection", "w_magnetic",
@@ -436,6 +622,19 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.initial_magnetic_profile.tophat_falloff_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "initial_magnetic_falloff_width",
       params.initial_magnetic_profile.width);
+  params.initial_magnetic_profile.conductor_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_magnetic_conductor_radius", 0.0);
+  params.initial_magnetic_profile.conductor_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_magnetic_conductor_transition_width",
+      params.initial_magnetic_profile.conductor_radius);
+  params.initial_magnetic_profile.wire_inner_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_magnetic_wire_inner_radius", 0.0);
+  params.initial_magnetic_profile.wire_outer_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_magnetic_wire_outer_radius", 0.0);
+  params.initial_magnetic_profile.wire_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "initial_magnetic_wire_transition_width",
+      params.initial_magnetic_profile.wire_outer_radius -
+          params.initial_magnetic_profile.wire_inner_radius);
   params.initial_force_balance = pin->GetOrAddBoolean(
       "problem/pulsed_reconnection", "initial_force_balance", true);
   params.drive_rho_profile.width = pin->GetOrAddReal(
@@ -450,6 +649,12 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.drive_rho_profile.tophat_falloff_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_rho_falloff_width",
       params.drive_rho_profile.width);
+  params.drive_rho_profile.annulus_inner_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_rho_inner_radius", 0.0);
+  params.drive_rho_profile.annulus_outer_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_rho_outer_radius", 0.0);
+  params.drive_rho_profile.annulus_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_rho_transition_width", 0.0);
   params.drive_T_profile.width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "w_drive_T", params.initial_T_profile.width);
   params.drive_T_profile.shape =
@@ -461,6 +666,20 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.drive_T_profile.tophat_falloff_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_T_falloff_width",
       params.drive_T_profile.width);
+  params.drive_T_profile.annulus_inner_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_T_inner_radius", 0.0);
+  params.drive_T_profile.annulus_outer_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_T_outer_radius", 0.0);
+  params.drive_T_profile.annulus_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_T_transition_width", 0.0);
+  params.drive_velocity_mode = ParseVelocityDriveMode(pin->GetOrAddString(
+      "problem/pulsed_reconnection", "drive_velocity_mode", "none"));
+  params.drive_velocity_inner_radius_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_velocity_inner_radius", 0.0);
+  params.drive_velocity_outer_radius_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_velocity_outer_radius", 0.0);
+  params.drive_velocity_transition_width_cgs = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_velocity_transition_width", 0.0);
   params.drive_magnetic_profile.width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "w_drive_magnetic",
       params.initial_magnetic_profile.width);
@@ -474,6 +693,19 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.drive_magnetic_profile.tophat_falloff_width = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "drive_magnetic_falloff_width",
       params.drive_magnetic_profile.width);
+  params.drive_magnetic_profile.conductor_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_magnetic_conductor_radius", 0.0);
+  params.drive_magnetic_profile.conductor_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_magnetic_conductor_transition_width",
+      params.drive_magnetic_profile.conductor_radius);
+  params.drive_magnetic_profile.wire_inner_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_magnetic_wire_inner_radius", 0.0);
+  params.drive_magnetic_profile.wire_outer_radius = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_magnetic_wire_outer_radius", 0.0);
+  params.drive_magnetic_profile.wire_transition_width = pin->GetOrAddReal(
+      "problem/pulsed_reconnection", "drive_magnetic_wire_transition_width",
+      params.drive_magnetic_profile.wire_outer_radius -
+          params.drive_magnetic_profile.wire_inner_radius);
   params.drive_force_balance = pin->GetOrAddBoolean(
       "problem/pulsed_reconnection", "drive_force_balance", false);
   params.drive_rho_time_profile = ParseTimeProfile(
@@ -483,6 +715,10 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.drive_T_time_profile = ParseTimeProfile(
       pin->GetOrAddString("problem/pulsed_reconnection", "drive_T_time_profile", "sin2"),
       "drive_T_time_profile");
+  params.drive_velocity_time_profile = ParseTimeProfile(
+      pin->GetOrAddString("problem/pulsed_reconnection",
+                          "drive_velocity_time_profile", "sin2"),
+      "drive_velocity_time_profile");
   if (params.drive_enable) {
     params.drive_rho_profile_floor_cgs =
         pin->GetReal("problem/pulsed_reconnection", "drive_rho_profile_floor");
@@ -498,6 +734,110 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
       "problem/pulsed_reconnection", "density_perturb_amplitude", 0.0);
   params.temperature_perturb_amplitude = pin->GetOrAddReal(
       "problem/pulsed_reconnection", "temperature_perturb_amplitude", 0.0);
+  const auto require_valid_annulus = [](const RadialProfileParams &profile,
+                                        const std::string &name) {
+    if (profile.shape != ProfileShape::annulus) return;
+    PARTHENON_REQUIRE(
+        profile.annulus_inner_radius >= 0.0,
+        "problem/pulsed_reconnection/" + name + "_inner_radius must be nonnegative.");
+    PARTHENON_REQUIRE(
+        profile.annulus_outer_radius > profile.annulus_inner_radius,
+        "problem/pulsed_reconnection/" + name +
+            "_outer_radius must exceed its inner radius.");
+    PARTHENON_REQUIRE(
+        profile.annulus_transition_width > 0.0 &&
+            2.0 * profile.annulus_transition_width <=
+                profile.annulus_outer_radius - profile.annulus_inner_radius,
+        "problem/pulsed_reconnection/" + name +
+            "_transition_width must be positive and no greater than half the annulus "
+            "width.");
+  };
+  require_valid_annulus(params.initial_rho_profile, "initial_rho");
+  require_valid_annulus(params.initial_T_profile, "initial_T");
+  require_valid_annulus(params.drive_rho_profile, "drive_rho");
+  require_valid_annulus(params.drive_T_profile, "drive_T");
+  PARTHENON_REQUIRE(
+      params.inner_reservoir_radius_cgs >= 0.0,
+      "problem/pulsed_reconnection/inner_reservoir_radius must be nonnegative.");
+  if (params.rho_inner_reservoir_cgs > 0.0 || params.T_inner_reservoir > 0.0 ||
+      params.inner_reservoir_support_enabled) {
+    PARTHENON_REQUIRE(
+        params.initial_rho_profile.shape == ProfileShape::annulus &&
+            params.initial_T_profile.shape == ProfileShape::annulus,
+        "A nonzero or supported inner reservoir requires annular initial density and "
+        "temperature profiles.");
+    PARTHENON_REQUIRE(
+        params.inner_reservoir_radius_cgs >=
+            params.initial_rho_profile.annulus_transition_width &&
+            params.inner_reservoir_radius_cgs >=
+                params.initial_T_profile.annulus_transition_width,
+        "problem/pulsed_reconnection/inner_reservoir_radius must be no smaller than "
+        "the initial density and temperature transition widths.");
+    PARTHENON_REQUIRE(
+        params.inner_reservoir_radius_cgs <=
+            params.initial_rho_profile.annulus_inner_radius &&
+            params.inner_reservoir_radius_cgs <=
+                params.initial_T_profile.annulus_inner_radius,
+        "problem/pulsed_reconnection/inner_reservoir_radius must not exceed either "
+        "initial annulus inner radius.");
+  }
+  if (params.inner_reservoir_support_enabled) {
+    PARTHENON_REQUIRE(
+        params.drive_enable,
+        "problem/pulsed_reconnection/inner_reservoir_support requires drive_enable = "
+        "true.");
+    PARTHENON_REQUIRE(
+        params.initial_rho_profile.shape == ProfileShape::annulus &&
+            params.initial_T_profile.shape == ProfileShape::annulus,
+        "problem/pulsed_reconnection/inner_reservoir_support requires annular initial "
+        "density and temperature profiles.");
+  }
+  PARTHENON_REQUIRE(
+      params.initial_magnetic_profile.shape != ProfileShape::annulus &&
+          params.drive_magnetic_profile.shape != ProfileShape::annulus,
+      "The annulus profile is currently supported for density and temperature only.");
+  PARTHENON_REQUIRE(
+      params.initial_rho_profile.shape != ProfileShape::confined_current &&
+          params.initial_T_profile.shape != ProfileShape::confined_current &&
+          params.drive_rho_profile.shape != ProfileShape::confined_current &&
+          params.drive_T_profile.shape != ProfileShape::confined_current,
+      "The confined_current profile is supported for magnetic fields only.");
+  const auto require_valid_confined_current = [](const RadialProfileParams &profile,
+                                                  const std::string &name) {
+    if (profile.shape != ProfileShape::confined_current) return;
+    PARTHENON_REQUIRE(
+        profile.conductor_radius > 0.0,
+        "problem/pulsed_reconnection/" + name + "_conductor_radius must be positive.");
+    PARTHENON_REQUIRE(
+        profile.wire_inner_radius > profile.conductor_radius,
+        "problem/pulsed_reconnection/" + name +
+            "_wire_inner_radius must exceed the conductor radius.");
+    PARTHENON_REQUIRE(
+        profile.wire_outer_radius > profile.wire_inner_radius,
+        "problem/pulsed_reconnection/" + name +
+            "_wire_outer_radius must exceed the wire inner radius.");
+    PARTHENON_REQUIRE(
+        profile.conductor_transition_width > 0.0 &&
+            profile.conductor_transition_width <= profile.conductor_radius,
+        "problem/pulsed_reconnection/" + name +
+            "_conductor_transition_width must be positive and no greater than the "
+            "conductor radius.");
+    PARTHENON_REQUIRE(
+        profile.wire_transition_width > 0.0 &&
+            profile.wire_transition_width <=
+                profile.wire_outer_radius - profile.wire_inner_radius,
+        "problem/pulsed_reconnection/" + name +
+            "_wire_transition_width must be positive and no greater than the wire "
+            "annulus width.");
+  };
+  require_valid_confined_current(params.initial_magnetic_profile, "initial_magnetic");
+  require_valid_confined_current(params.drive_magnetic_profile, "drive_magnetic");
+  PARTHENON_REQUIRE(
+      !(params.initial_force_balance &&
+        params.initial_magnetic_profile.shape == ProfileShape::confined_current) &&
+          !(params.drive_force_balance &&
+            params.drive_magnetic_profile.shape == ProfileShape::confined_current),
+      "Magnetic force-balance support is not implemented for confined_current.");
   PARTHENON_REQUIRE(params.initial_rho_profile.width > 0.0,
                     "problem/pulsed_reconnection/w_initial_rho must be positive.");
   PARTHENON_REQUIRE(
@@ -529,6 +869,27 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
                     "problem/pulsed_reconnection/drive_T_core_width must be positive.");
   PARTHENON_REQUIRE(params.drive_T_profile.tophat_falloff_width > 0.0,
                     "problem/pulsed_reconnection/drive_T_falloff_width must be positive.");
+  if (params.drive_velocity_mode == VelocityDriveMode::injected_mass) {
+    PARTHENON_REQUIRE(
+        params.drive_velocity_peak_cgs > 0.0,
+        "problem/pulsed_reconnection/drive_velocity_peak must be positive for "
+        "drive_velocity_mode=injected_mass.");
+    PARTHENON_REQUIRE(
+        params.drive_velocity_inner_radius_cgs >= 0.0,
+        "problem/pulsed_reconnection/drive_velocity_inner_radius must be nonnegative.");
+    PARTHENON_REQUIRE(
+        params.drive_velocity_outer_radius_cgs >
+            params.drive_velocity_inner_radius_cgs,
+        "problem/pulsed_reconnection/drive_velocity_outer_radius must exceed "
+        "drive_velocity_inner_radius.");
+    PARTHENON_REQUIRE(
+        params.drive_velocity_transition_width_cgs > 0.0 &&
+            2.0 * params.drive_velocity_transition_width_cgs <=
+                params.drive_velocity_outer_radius_cgs -
+                    params.drive_velocity_inner_radius_cgs,
+        "problem/pulsed_reconnection/drive_velocity_transition_width must be positive "
+        "and no greater than half the annulus width.");
+  }
   PARTHENON_REQUIRE(params.drive_magnetic_profile.width > 0.0,
                     "problem/pulsed_reconnection/w_drive_magnetic must be positive.");
   PARTHENON_REQUIRE(params.array_separation_cgs > 0.0,
@@ -540,6 +901,9 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   PARTHENON_REQUIRE(params.drive_B_peak_gauss >= 0.0,
                     "problem/pulsed_reconnection/drive_B_peak_gauss must be "
                     "nonnegative.");
+  PARTHENON_REQUIRE(params.drive_velocity_peak_cgs >= 0.0,
+                    "problem/pulsed_reconnection/drive_velocity_peak must be "
+                    "nonnegative.");
   PARTHENON_REQUIRE(params.drive_t_peak_ns > 0.0,
                     "problem/pulsed_reconnection/drive_t_peak_ns must be "
                     "positive.");
@@ -549,6 +913,19 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   PARTHENON_REQUIRE(params.drive_T_profile_floor >= 0.0,
                     "problem/pulsed_reconnection/drive_T_profile_floor must be "
                     "nonnegative.");
+  PARTHENON_REQUIRE(params.rho_inner_reservoir_cgs >= 0.0,
+                    "problem/pulsed_reconnection/rho_inner_reservoir must be "
+                    "nonnegative.");
+  PARTHENON_REQUIRE(params.T_inner_reservoir >= 0.0,
+                    "problem/pulsed_reconnection/T_inner_reservoir must be "
+                    "nonnegative.");
+  PARTHENON_REQUIRE(
+      params.drive_rho_inner_reservoir_floor_cgs >= 0.0,
+      "problem/pulsed_reconnection/drive_rho_inner_reservoir_floor must be "
+      "nonnegative.");
+  PARTHENON_REQUIRE(
+      params.drive_T_inner_reservoir_floor >= 0.0,
+      "problem/pulsed_reconnection/drive_T_inner_reservoir_floor must be nonnegative.");
   PARTHENON_REQUIRE(params.azimuthal_mode_number >= 0,
                     "problem/pulsed_reconnection/N must be nonnegative.");
 
@@ -561,29 +938,62 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   params.k_b = units.k_boltzmann();
   params.m_bar = hydro_pkg->Param<Real>("mbar");
   params.rho_wire = params.rho_wire_cgs * units.g_cm3();
+  params.rho_inner_reservoir = params.rho_inner_reservoir_cgs * units.g_cm3();
+  params.inner_reservoir_radius = params.inner_reservoir_radius_cgs * units.cm();
+  params.drive_rho_inner_reservoir_floor =
+      params.drive_rho_inner_reservoir_floor_cgs * units.g_cm3();
   params.rho_background = params.rho_background_cgs * units.g_cm3();
   params.drive_rho_profile_floor =
       params.drive_rho_profile_floor_cgs * units.g_cm3();
   params.v0 = params.v0_cgs * units.cm_s();
+  params.drive_velocity_peak = params.drive_velocity_peak_cgs * units.cm_s();
+  params.drive_velocity_inner_radius =
+      params.drive_velocity_inner_radius_cgs * units.cm();
+  params.drive_velocity_outer_radius =
+      params.drive_velocity_outer_radius_cgs * units.cm();
+  params.drive_velocity_transition_width =
+      params.drive_velocity_transition_width_cgs * units.cm();
   params.array_separation = params.array_separation_cgs * units.cm();
   params.initial_rho_profile.width *= units.cm();
   params.initial_rho_profile.tophat_core_width *= units.cm();
   params.initial_rho_profile.tophat_falloff_width *= units.cm();
+  params.initial_rho_profile.annulus_inner_radius *= units.cm();
+  params.initial_rho_profile.annulus_outer_radius *= units.cm();
+  params.initial_rho_profile.annulus_transition_width *= units.cm();
   params.initial_T_profile.width *= units.cm();
   params.initial_T_profile.tophat_core_width *= units.cm();
   params.initial_T_profile.tophat_falloff_width *= units.cm();
+  params.initial_T_profile.annulus_inner_radius *= units.cm();
+  params.initial_T_profile.annulus_outer_radius *= units.cm();
+  params.initial_T_profile.annulus_transition_width *= units.cm();
   params.initial_magnetic_profile.width *= units.cm();
   params.initial_magnetic_profile.tophat_core_width *= units.cm();
   params.initial_magnetic_profile.tophat_falloff_width *= units.cm();
+  params.initial_magnetic_profile.conductor_radius *= units.cm();
+  params.initial_magnetic_profile.conductor_transition_width *= units.cm();
+  params.initial_magnetic_profile.wire_inner_radius *= units.cm();
+  params.initial_magnetic_profile.wire_outer_radius *= units.cm();
+  params.initial_magnetic_profile.wire_transition_width *= units.cm();
   params.drive_rho_profile.width *= units.cm();
   params.drive_rho_profile.tophat_core_width *= units.cm();
   params.drive_rho_profile.tophat_falloff_width *= units.cm();
+  params.drive_rho_profile.annulus_inner_radius *= units.cm();
+  params.drive_rho_profile.annulus_outer_radius *= units.cm();
+  params.drive_rho_profile.annulus_transition_width *= units.cm();
   params.drive_T_profile.width *= units.cm();
   params.drive_T_profile.tophat_core_width *= units.cm();
   params.drive_T_profile.tophat_falloff_width *= units.cm();
+  params.drive_T_profile.annulus_inner_radius *= units.cm();
+  params.drive_T_profile.annulus_outer_radius *= units.cm();
+  params.drive_T_profile.annulus_transition_width *= units.cm();
   params.drive_magnetic_profile.width *= units.cm();
   params.drive_magnetic_profile.tophat_core_width *= units.cm();
   params.drive_magnetic_profile.tophat_falloff_width *= units.cm();
+  params.drive_magnetic_profile.conductor_radius *= units.cm();
+  params.drive_magnetic_profile.conductor_transition_width *= units.cm();
+  params.drive_magnetic_profile.wire_inner_radius *= units.cm();
+  params.drive_magnetic_profile.wire_outer_radius *= units.cm();
+  params.drive_magnetic_profile.wire_transition_width *= units.cm();
   // drive_t_peak_ns is a physical time. units.s() is the number of code-time
   // units per physical second, so multiply to convert seconds to code time.
   params.drive_t_peak = params.drive_t_peak_ns * 1.0e-9 * units.s();
@@ -592,12 +1002,18 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   // |B_phi| = |dA_z/dr|. Normalize independently for the initial and driven
   // profiles so the requested values are their actual peak fields.
   params.initial_peak_magnetic_field_strength = params.B_peak_gauss * units.gauss();
-  const Real initial_peak_grad =
-      PeakNormalizedDerivativeMagnitude(params.initial_magnetic_profile);
-  params.initial_magnetic_profile_amplitude =
-      initial_peak_grad > 0.0
-          ? params.initial_peak_magnetic_field_strength / initial_peak_grad
-          : 0.0;
+  if (params.initial_magnetic_profile.shape == ProfileShape::confined_current) {
+    // The tabulated potential is constructed so max(|dA_z/dr|) = 1.
+    params.initial_magnetic_profile_amplitude =
+        params.initial_peak_magnetic_field_strength;
+  } else {
+    const Real initial_peak_grad =
+        PeakNormalizedDerivativeMagnitude(params.initial_magnetic_profile);
+    params.initial_magnetic_profile_amplitude =
+        initial_peak_grad > 0.0
+            ? params.initial_peak_magnetic_field_strength / initial_peak_grad
+            : 0.0;
+  }
   const Real drive_peak_field = params.drive_B_peak_gauss * units.gauss();
   params.amr_magnetic_field_reference =
       fmax(params.initial_peak_magnetic_field_strength, drive_peak_field);
@@ -607,20 +1023,34 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
         "Magnetic-field-based AMR for pulsed_reconnection requires a positive "
         "initial or drive peak magnetic-field strength.");
   }
-  const Real drive_peak_grad =
-      PeakNormalizedDerivativeMagnitude(params.drive_magnetic_profile);
-  params.drive_peak_magnetic_profile_amplitude =
-      drive_peak_grad > 0.0 ? drive_peak_field / drive_peak_grad : 0.0;
+  if (params.drive_magnetic_profile.shape == ProfileShape::confined_current) {
+    params.drive_peak_magnetic_profile_amplitude = drive_peak_field;
+  } else {
+    const Real drive_peak_grad =
+        PeakNormalizedDerivativeMagnitude(params.drive_magnetic_profile);
+    params.drive_peak_magnetic_profile_amplitude =
+        drive_peak_grad > 0.0 ? drive_peak_field / drive_peak_grad : 0.0;
+  }
   // Normalize against the chosen rho kernel so v0 remains the peak speed for every
   // supported profile family rather than silently retaining a Gaussian velocity shape.
   const Real initial_rho_peak_grad =
       PeakNormalizedDerivativeMagnitude(params.initial_rho_profile);
   params.velocity_normalization =
       initial_rho_peak_grad > 0.0 ? params.v0 / initial_rho_peak_grad : 0.0;
-  params.initial_support_table =
-      BuildUnitAmplitudeSupportTable(params.initial_magnetic_profile, "initial_support");
-  params.drive_support_table =
-      BuildUnitAmplitudeSupportTable(params.drive_magnetic_profile, "drive_support");
+  if (params.initial_magnetic_profile.shape == ProfileShape::confined_current) {
+    params.initial_support_table =
+        BuildConfinedCurrentPotentialTable(params.initial_magnetic_profile);
+  } else {
+    params.initial_support_table = BuildUnitAmplitudeSupportTable(
+        params.initial_magnetic_profile, "initial_support");
+  }
+  if (params.drive_magnetic_profile.shape == ProfileShape::confined_current) {
+    params.drive_support_table =
+        BuildConfinedCurrentPotentialTable(params.drive_magnetic_profile);
+  } else {
+    params.drive_support_table =
+        BuildUnitAmplitudeSupportTable(params.drive_magnetic_profile, "drive_support");
+  }
 
   return params;
 }
@@ -640,6 +1070,8 @@ PulsedReconnectionState EvaluateSourceState(const PulsedReconnectionParams &para
   const Real d = params.array_separation / 2.0;
   Real T_profile_sum = 0.0;
   Real rho_profile_sum = 0.0;
+  Real T_inner_reservoir_sum = 0.0;
+  Real rho_inner_reservoir_sum = 0.0;
   Real magnetic_support_sum = 0.0;
 
   for (int A = -1; A <= 1; A += 2) {
@@ -660,6 +1092,12 @@ PulsedReconnectionState EvaluateSourceState(const PulsedReconnectionParams &para
         theta, params.temperature_perturb_amplitude, params.azimuthal_mode_number);
     T_profile_sum += T_profile * temperature_perturbation;
     rho_profile_sum += rho_profile * density_perturbation;
+    T_inner_reservoir_sum +=
+        EvaluateInnerReservoirProfile(params.initial_T_profile,
+                                      params.inner_reservoir_radius, r);
+    rho_inner_reservoir_sum +=
+        EvaluateInnerReservoirProfile(params.initial_rho_profile,
+                                      params.inner_reservoir_radius, r);
     magnetic_support_sum += EvaluateSupportTable(params.initial_support_table, r);
 
     if (r > 0.0) {
@@ -667,16 +1105,24 @@ PulsedReconnectionState EvaluateSourceState(const PulsedReconnectionParams &para
       const Real xhat = x * inv_r;
       const Real yhat = y_local * inv_r;
 
-      const Real radial_velocity =
-          params.drive_enable ? 0.0 : -params.velocity_normalization * drho_profile_dr;
+      Real radial_velocity = 0.0;
+      if (params.initial_rho_profile.shape == ProfileShape::annulus) {
+        // For an annulus, -grad(rho) points inward on the inner transition and
+        // outward on the outer transition. Initialize only the outward ablation flow.
+        radial_velocity = fmax(0.0, -params.velocity_normalization * drho_profile_dr);
+      } else if (!params.drive_enable) {
+        radial_velocity = -params.velocity_normalization * drho_profile_dr;
+      }
       state.v1 += radial_velocity * xhat;
       state.v2 += radial_velocity * yhat;
 
     }
   }
 
-  state.rho = params.rho_background + params.rho_wire * rho_profile_sum;
-  const Real T = params.T_background + params.T_wire * T_profile_sum;
+  state.rho = params.rho_background + params.rho_wire * rho_profile_sum +
+              params.rho_inner_reservoir * rho_inner_reservoir_sum;
+  const Real T = params.T_background + params.T_wire * T_profile_sum +
+                 params.T_inner_reservoir * T_inner_reservoir_sum;
   state.pressure =
       T * params.k_b * state.rho / params.m_bar +
       (params.initial_force_balance
@@ -724,6 +1170,34 @@ void EvaluateRadialProfileAndDerivative(const RadialProfileParams &params, const
       dprofile_dr =
           (-30.0 * x2 + 60.0 * x3 - 30.0 * x4) / params.tophat_falloff_width;
     }
+    return;
+  }
+  if (params.shape == ProfileShape::annulus) {
+    const Real inner = params.annulus_inner_radius;
+    const Real outer = params.annulus_outer_radius;
+    const Real transition = params.annulus_transition_width;
+    if (r <= inner || r >= outer) {
+      profile = 0.0;
+      dprofile_dr = 0.0;
+    } else if (r < inner + transition) {
+      const Real q = (r - inner) / transition;
+      profile = SmootherStep01(q);
+      dprofile_dr = 30.0 * q * q * SQR(1.0 - q) / transition;
+    } else if (r <= outer - transition) {
+      profile = 1.0;
+      dprofile_dr = 0.0;
+    } else {
+      const Real q = (outer - r) / transition;
+      profile = SmootherStep01(q);
+      dprofile_dr = -30.0 * q * q * SQR(1.0 - q) / transition;
+    }
+    return;
+  }
+  if (params.shape == ProfileShape::confined_current) {
+    // Confined-current A_z is stored in a radial lookup table and evaluated by the
+    // magnetic potential routines, which also carry that table on device.
+    profile = 0.0;
+    dprofile_dr = 0.0;
     return;
   }
   const Real q = r / params.width;
@@ -810,6 +1284,10 @@ Real ProfileSupportRadius(const RadialProfileParams &params) {
     return 6.0 * params.width;
   case ProfileShape::tophat:
     return params.tophat_core_width + params.tophat_falloff_width;
+  case ProfileShape::annulus:
+    return params.annulus_outer_radius;
+  case ProfileShape::confined_current:
+    return params.wire_outer_radius;
   case ProfileShape::cubic:
   case ProfileShape::wendland:
     return 2.0 * params.width;
@@ -837,6 +1315,58 @@ Real PeakNormalizedDerivativeMagnitude(const RadialProfileParams &params) {
     peak = std::max(peak, std::abs(dprofile_dr));
   }
   return peak;
+}
+
+SupportTable BuildConfinedCurrentPotentialTable(const RadialProfileParams &params) {
+  SupportTable table;
+  if (params.shape != ProfileShape::confined_current) return table;
+
+  table.num_points = SupportTable::kMaxPoints;
+  table.r_max = params.wire_outer_radius;
+  table.dr = table.r_max / static_cast<Real>(table.num_points - 1);
+  std::vector<Real> bphi(table.num_points, 0.0);
+  const Real conductor_transition_start =
+      params.conductor_radius - params.conductor_transition_width;
+  const Real wire_transition_start =
+      params.wire_outer_radius - params.wire_transition_width;
+
+  // bphi is normalized to its peak. The central post interior is field-free, its
+  // surface current is represented by a finite smootherstep layer immediately inside
+  // the conductor radius, and the current-free gap follows 1/r. The return current is
+  // represented by an independently sized smootherstep layer immediately inside the
+  // wire outer radius.
+  for (int i = 0; i < table.num_points; ++i) {
+    const Real r = table.dr * static_cast<Real>(i);
+    if (r <= conductor_transition_start || r >= params.wire_outer_radius) {
+      bphi[i] = 0.0;
+    } else if (r < params.conductor_radius) {
+      const Real q = (r - conductor_transition_start) /
+                     params.conductor_transition_width;
+      bphi[i] = SmootherStep01(q);
+    } else if (r < wire_transition_start) {
+      bphi[i] = params.conductor_radius / r;
+    } else {
+      const Real q =
+          (r - wire_transition_start) / params.wire_transition_width;
+      bphi[i] = params.conductor_radius * (1.0 - SmootherStep01(q)) / r;
+    }
+  }
+
+  Real peak_edge_gradient = 0.0;
+  for (int i = 0; i < table.num_points - 1; ++i) {
+    peak_edge_gradient =
+        std::max(peak_edge_gradient, 0.5 * (bphi[i] + bphi[i + 1]));
+  }
+  PARTHENON_REQUIRE(peak_edge_gradient > 0.0,
+                    "confined_current profile has zero magnetic-field support.");
+  for (auto &value : bphi) value /= peak_edge_gradient;
+
+  table.values[table.num_points - 1] = 0.0;
+  for (int i = table.num_points - 2; i >= 0; --i) {
+    table.values[i] = table.values[i + 1] +
+                      0.5 * (bphi[i] + bphi[i + 1]) * table.dr;
+  }
+  return table;
 }
 
 SupportTable BuildUnitAmplitudeSupportTable(const RadialProfileParams &params,
@@ -901,8 +1431,8 @@ DiagnosticSelection RequestedDiagnostics(ParameterInput *pin) {
 void ProblemInitPackageData(ParameterInput *pin,
                             parthenon::StateDescriptor *hydro_pkg) {
   const auto fluid = hydro_pkg->Param<Fluid>("fluid");
-  PARTHENON_REQUIRE(fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd,
-                    "pulsed_reconnection requires ctmhd or ucthlldmhd.");
+  PARTHENON_REQUIRE(IsCTFluid(fluid),
+                    "pulsed_reconnection requires a constrained-transport fluid.");
 
   const auto diagnostics = RequestedDiagnostics(pin);
   hydro_pkg->AddParam<DiagnosticSelection>("pulsed_reconnection/diagnostics", diagnostics);
@@ -1257,34 +1787,69 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
                 ? fmax(0.0, EvaluateMagneticSupportSum(params, params.drive_support_table, x,
                                                        y, amplitude_new))
                 : 0.0;
-        if (support.rho_target <= 0.0 && support.T_floor <= 0.0 &&
+        if (support.rho_target <= 0.0 && support.rho_inner_target <= 0.0 &&
+            support.inner_reservoir_weight <= 0.0 &&
+            support.T_floor <= 0.0 && support.T_inner_floor <= 0.0 &&
             magnetic_support <= 0.0) {
           return;
         }
 
         const Real rho_old = cons(IDN, k, j, i);
-        // The envelope modulates a one-sided target. On the falling side of a sin2
-        // pulse, previously supplied mass remains and is transported by the equations.
-        const Real delta_rho = fmax(0.0, support.rho_target - rho_old);
-        const Real rho_new = rho_old + delta_rho;
-
-        // Density support represents co-moving plasma, not stationary ballast. Add the
-        // matching momentum so top-up changes density without changing the cell velocity.
         const Real v1_old = rho_old > 0.0 ? cons(IM1, k, j, i) / rho_old : 0.0;
         const Real v2_old = rho_old > 0.0 ? cons(IM2, k, j, i) / rho_old : 0.0;
         const Real v3_old = rho_old > 0.0 ? cons(IM3, k, j, i) / rho_old : 0.0;
+
+        // Maintain the inner reservoir first. Its replacement mass is co-moving and
+        // never receives the annular ablation velocity. The background contribution
+        // is included only where an inner-reservoir mask has support.
+        const Real inner_rho_target =
+            support.inner_reservoir_weight > 0.0
+                ? params.rho_background + support.rho_inner_target
+                : 0.0;
+        const Real delta_rho_inner = fmax(0.0, inner_rho_target - rho_old);
+        const Real rho_after_inner = rho_old + delta_rho_inner;
+
+        // The annular target is additive to the supported inner reservoir, matching
+        // initialization across their complementary transition masks. On the falling
+        // side of a sin2 pulse, previously supplied mass is never removed.
+        const Real total_rho_target = inner_rho_target + support.rho_target;
+        const Real delta_rho_annulus = fmax(0.0, total_rho_target - rho_after_inner);
+        const Real delta_rho = delta_rho_inner + delta_rho_annulus;
+        const Real rho_new = rho_old + delta_rho;
+
+        // Only annular replacement mass receives the prescribed radial velocity.
+        const bool inject_driven_velocity =
+            params.drive_velocity_mode == VelocityDriveMode::injected_mass &&
+            support.velocity_weight > 0.0;
+        const Real v1_injected =
+            inject_driven_velocity ? support.v1_target : v1_old;
+        const Real v2_injected =
+            inject_driven_velocity ? support.v2_target : v2_old;
+        const Real v3_injected = inject_driven_velocity ? 0.0 : v3_old;
         cons(IDN, k, j, i) = rho_new;
-        cons(IM1, k, j, i) += delta_rho * v1_old;
-        cons(IM2, k, j, i) += delta_rho * v2_old;
-        cons(IM3, k, j, i) += delta_rho * v3_old;
+        cons(IM1, k, j, i) +=
+            delta_rho_inner * v1_old + delta_rho_annulus * v1_injected;
+        cons(IM2, k, j, i) +=
+            delta_rho_inner * v2_old + delta_rho_annulus * v2_injected;
+        cons(IM3, k, j, i) +=
+            delta_rho_inner * v3_old + delta_rho_annulus * v3_injected;
 
         // Inject both the kinetic energy required by co-motion and the specific internal
         // energy corresponding to the instantaneous local T profile floor. This term is
         // separate from the minimum-pressure correction below.
         const Real injected_kinetic_energy =
-            0.5 * delta_rho * (SQR(v1_old) + SQR(v2_old) + SQR(v3_old));
+            0.5 * delta_rho_inner *
+                (SQR(v1_old) + SQR(v2_old) + SQR(v3_old)) +
+            0.5 * delta_rho_annulus *
+                (SQR(v1_injected) + SQR(v2_injected) + SQR(v3_injected));
+        const Real supported_T_floor =
+            support.T_floor +
+            (support.inner_reservoir_weight > 0.0
+                 ? params.T_background + support.T_inner_floor
+                 : 0.0);
         const Real injected_internal_energy =
-            delta_rho * params.k_b * support.T_floor / (params.m_bar * params.gm1);
+            delta_rho * params.k_b * supported_T_floor /
+            (params.m_bar * params.gm1);
         cons(IEN, k, j, i) += injected_kinetic_energy + injected_internal_energy;
 
         const Real momentum_sq = SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
@@ -1299,7 +1864,9 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
         // Enforce, but never overwrite downward to, the sum of the independently
         // profiled temperature floor and instantaneous magnetic force-balance support.
         const Real thermal_pressure_floor =
-            rho_new > 0.0 ? support.T_floor * params.k_b * rho_new / params.m_bar : 0.0;
+            rho_new > 0.0
+                ? supported_T_floor * params.k_b * rho_new / params.m_bar
+                : 0.0;
         const Real target_pressure = thermal_pressure_floor + magnetic_support;
         const Real delta_internal_energy =
             target_pressure > pressure ? (target_pressure - pressure) / params.gm1 : 0.0;
@@ -1329,10 +1896,32 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     std::cout << "B_peak [gauss] ========= " << params.B_peak_gauss << std::endl;
     std::cout << "drive_enable =========== " << params.drive_enable << std::endl;
     std::cout << "drive_B_peak [gauss] === " << params.drive_B_peak_gauss << std::endl;
+    std::cout << "drive velocity [cm/s] == " << params.drive_velocity_peak_cgs
+              << std::endl;
+    std::cout << "drive velocity mode ==== "
+              << VelocityDriveModeName(params.drive_velocity_mode) << std::endl;
+    std::cout << "drive velocity annulus = ["
+              << params.drive_velocity_inner_radius_cgs << ", "
+              << params.drive_velocity_outer_radius_cgs << "] cm, transition "
+              << params.drive_velocity_transition_width_cgs << " cm" << std::endl;
     std::cout << "drive_t_peak [ns] ====== " << params.drive_t_peak_ns << std::endl;
     std::cout << "rho_wire(core) [g/cm^3]= " << params.rho_wire_cgs << std::endl;
+    std::cout << "rho inner reservoir ==== " << params.rho_inner_reservoir_cgs
+              << " g/cm^3" << std::endl;
+    std::cout << "inner reservoir radius = " << params.inner_reservoir_radius_cgs
+              << " cm" << std::endl;
     std::cout << "rho_background [g/cm^3]= " << params.rho_background_cgs << std::endl;
     std::cout << "T_wire(core) [K] ======= " << params.T_wire << std::endl;
+    std::cout << "T inner reservoir [K] == " << params.T_inner_reservoir << std::endl;
+    std::cout << "inner reservoir support  "
+              << (params.inner_reservoir_support_enabled
+                      ? TimeProfileName(params.inner_reservoir_time_profile)
+                      : "none")
+              << std::endl;
+    std::cout << "inner rho support floor  "
+              << params.drive_rho_inner_reservoir_floor_cgs << " g/cm^3" << std::endl;
+    std::cout << "inner T support floor == "
+              << params.drive_T_inner_reservoir_floor << " K" << std::endl;
     std::cout << "T_background [K] ======= " << params.T_background << std::endl;
     std::cout << "v0(peak) [cm/s] ======== " << params.v0_cgs << std::endl;
     std::cout << "array_separation [cm] == " << params.array_separation_cgs << std::endl;
@@ -1348,6 +1937,17 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
               << ProfileShapeName(params.drive_T_profile.shape) << std::endl;
     std::cout << "drive magnetic profile = "
               << ProfileShapeName(params.drive_magnetic_profile.shape) << std::endl;
+    if (params.drive_magnetic_profile.shape == ProfileShape::confined_current) {
+      std::cout << "drive current radii [code] "
+                << params.drive_magnetic_profile.conductor_radius << ", "
+                << params.drive_magnetic_profile.wire_inner_radius << ", "
+                << params.drive_magnetic_profile.wire_outer_radius
+                << " (conductor, wire inner, wire outer)" << std::endl;
+      std::cout << "drive current transitions "
+                << params.drive_magnetic_profile.conductor_transition_width << ", "
+                << params.drive_magnetic_profile.wire_transition_width
+                << " (conductor, wire)" << std::endl;
+    }
     std::cout << "initial_force_balance == " << params.initial_force_balance
               << std::endl;
     std::cout << "drive_force_balance === " << params.drive_force_balance << std::endl;
@@ -1359,6 +1959,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
               << TimeProfileName(params.drive_rho_time_profile) << std::endl;
     std::cout << "drive T time profile === "
               << TimeProfileName(params.drive_T_time_profile) << std::endl;
+    std::cout << "drive velocity time ==== "
+              << TimeProfileName(params.drive_velocity_time_profile) << std::endl;
     std::cout << "azimuthal mode N ======= " << params.azimuthal_mode_number
               << std::endl;
     std::cout << "dens. perturb. amplitude=" << params.density_perturb_amplitude
@@ -1375,8 +1977,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
               << params.drive_peak_magnetic_profile_amplitude
               << std::endl;
     std::cout << "rho_wire(core) [code] == " << params.rho_wire << std::endl;
+    std::cout << "rho inner res. [code] == " << params.rho_inner_reservoir << std::endl;
     std::cout << "rho_background [code] == " << params.rho_background << std::endl;
     std::cout << "v0(peak) [code] ======== " << params.v0 << std::endl;
+    std::cout << "drive velocity [code] == " << params.drive_velocity_peak << std::endl;
     std::cout << "array_separation [code]  " << params.array_separation << std::endl;
     std::cout << "initial rho width [code] " << params.initial_rho_profile.width
               << std::endl;
@@ -1386,8 +1990,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
               << std::endl;
     std::cout << "rho/T perturbation ===== 1 + p*cos(N*theta)" << std::endl;
     std::cout << "velocity =============== "
-              << (params.drive_enable ? "disabled in driven mode"
-                                      : "normalized -grad(initial rho profile)")
+              << (params.initial_rho_profile.shape == ProfileShape::annulus
+                      ? "outer initial rho transition plus driven injected mass"
+                      : (params.drive_enable ? "driven mass injected radially outward"
+                                             : "normalized -grad(initial rho profile)"))
               << std::endl;
     std::cout << "magnetic field ========= "
               << "B = z_hat x grad(profile), peak-normalized"

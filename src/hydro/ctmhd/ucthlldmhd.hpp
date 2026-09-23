@@ -14,10 +14,10 @@
 
 using namespace parthenon::package::prelude;
 
-namespace Hydro::UCTHLLDMHD {
+namespace Hydro::UCT {
 
-TaskStatus Assemble_HLLD_Edge_EMF(MeshData<Real> *md);
+TaskStatus Assemble_Edge_EMF(MeshData<Real> *md);
 
-} // namespace Hydro::UCTHLLDMHD
+} // namespace Hydro::UCT
 
 #endif // HYDRO_CTMHD_UCTHLLDMHD_HPP_

@@ -59,7 +59,7 @@ setup_test_both("resistive_ct_analytic" "--driver ${PROJECT_BINARY_DIR}/bin/athe
   --driver_input ${PROJECT_SOURCE_DIR}/inputs/linear_wave3d.in --num_steps 2" "convergence")
 
 setup_test_both("field_loop" "--driver ${PROJECT_BINARY_DIR}/bin/athenaPK \
-  --driver_input ${PROJECT_SOURCE_DIR}/inputs/field_loop.in --num_steps 12" "convergence")
+  --driver_input ${PROJECT_SOURCE_DIR}/inputs/field_loop.in --num_steps 15" "convergence")
 
 setup_test_both("cluster_magnetic_tower" "--driver ${PROJECT_BINARY_DIR}/bin/athenaPK \
   --driver_input ${PROJECT_SOURCE_DIR}/inputs/cluster/magnetic_tower.in --num_steps 4" "convergence")

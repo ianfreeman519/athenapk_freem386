@@ -36,6 +36,12 @@ method_cfgs = [
     {"integrator": "vl2", "recon": "plm"},
     {"integrator": "rk3", "recon": "ppm"},
     {"integrator": "rk3", "recon": "weno3"},
+    {
+        "integrator": "rk2",
+        "recon": "plm",
+        "fluid": "ucthllemhd",
+        "riemann": "hlle",
+    },
 ]
 
 all_cfgs = list(itertools.product(res_cfgs, method_cfgs))
@@ -91,6 +97,8 @@ class TestCase(utils.test_case.TestCaseAbs):
             "parthenon/meshblock/nx3=1",
             "parthenon/time/integrator=%s" % integrator,
             "hydro/reconstruction=%s" % recon,
+            "hydro/fluid=%s" % method.get("fluid", "glmmhd"),
+            "hydro/riemann=%s" % method.get("riemann", "hlle"),
             "parthenon/mesh/nghost=%d"
             % (3 if (recon == "ppm" or recon == "wenoz") else 2),
             "parthenon/job/problem_id=%s" % outname,
@@ -137,6 +145,10 @@ class TestCase(utils.test_case.TestCaseAbs):
             outname = get_outname(all_cfgs[step])
             data_filename = f"{parameters.output_path}/{outname}.out1.hst"
             data = np.genfromtxt(data_filename)
+
+            if not np.all(np.isfinite(data)):
+                print(f"Non-finite history data in {data_filename}")
+                return False
 
             res, method = all_cfgs[step]
             row = method_cfgs.index(method)

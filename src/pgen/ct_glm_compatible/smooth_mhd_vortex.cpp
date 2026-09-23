@@ -127,7 +127,7 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg
                                                       RelDivBHst, "UserRelDivB"));
     pkg->UpdateParam(parthenon::hist_param_key, hst_vars);
     }
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     hst_vars.emplace_back(parthenon::HistoryOutputVar(parthenon::UserHistoryOperation::sum,
                                                     FaceDivBHst, "UserFaceDivB"));
     pkg->UpdateParam(parthenon::hist_param_key, hst_vars);
@@ -184,7 +184,7 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
 
   auto &mbd = pmb->meshblock_data.Get();
 
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     // fills u_cons() with the cell-averaged b values from
     // the face centered values made via the discrete
     // curl of the vector potential
@@ -419,7 +419,7 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
   // initializing on host
   auto u = u_dev.GetHostMirrorAndCopy();
 
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     // fills u_cons() with the cell-averaged b values from
     // the face centered values made via the discrete
     // curl of the vector potential

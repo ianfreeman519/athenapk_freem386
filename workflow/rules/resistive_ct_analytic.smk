@@ -90,6 +90,8 @@ rule run_resistive_ct_analytic:
         mb1=lambda wc: resistive_ct_meshblock(resistive_ct_case(wc)["mesh"])[0],
         mb2=lambda wc: resistive_ct_meshblock(resistive_ct_case(wc)["mesh"])[1],
         mb3=lambda wc: resistive_ct_meshblock(resistive_ct_case(wc)["mesh"])[2],
+        fluid=RESISTIVE_CT["fluid"],
+        riemann=RESISTIVE_CT["riemann"],
         eta=RESISTIVE_CT["eta"],
         tlim=RESISTIVE_CT["tlim"],
         amp=RESISTIVE_CT["amplitude"],
@@ -103,6 +105,8 @@ rule run_resistive_ct_analytic:
         cd {params.rundir}
 
         {input.executable} -i {input.deck} \
+          hydro/fluid={params.fluid} \
+          hydro/riemann={params.riemann} \
           problem/resistive_diffusion/iprob={params.iprob} \
           problem/resistive_diffusion/amp={params.amp} \
           diffusion/ohm_diff_coeff_code={params.eta} \

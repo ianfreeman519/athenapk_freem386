@@ -33,6 +33,7 @@ include: "rules/cpaw.smk"
 include: "rules/cpaw_static.smk"
 include: "rules/cpaw_viz.smk"
 include: "rules/resistive_ct_analytic.smk"
+include: "rules/resistive_ct_extended.smk"
 
 
 
@@ -54,4 +55,5 @@ rule all:
         cpaw_targets,
         cpaw_static_targets,
         cpaw_viz_targets,
-        resistive_ct_analytic_targets
+        resistive_ct_analytic_targets,
+        resistive_ct_extended_targets

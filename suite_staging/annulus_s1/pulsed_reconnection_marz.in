@@ -1,0 +1,171 @@
+# AthenaPK - MARZ suite S1: capped Spitzer with 50 km/s injected mass
+
+<job>
+problem_id = pulsed_reconnection
+
+<units>
+code_length_cgs = 1.0
+code_mass_cgs = 1e-10
+code_time_cgs = 1e-7
+
+<problem/pulsed_reconnection>
+rho_background = 1e-10
+T_background = 1e5
+
+array_separation = 6.0
+N = 0
+density_perturb_amplitude = 0.0
+temperature_perturb_amplitude = 0.0
+initial_force_balance = false
+
+# Optional additive, initial-only material inside the wire annulus. Leave both zero for
+# a background-filled array interior; nonzero values evolve freely after initialization.
+rho_inner_reservoir = 1e-7
+T_inner_reservoir = 1e8
+inner_reservoir_radius = 1.8
+
+B_peak_gauss = 0.0
+v0 = 0.0
+
+initial_rho_profile = annulus
+rho_wire = 5e-3
+initial_rho_inner_radius = 1.9
+initial_rho_outer_radius = 2.1
+initial_rho_transition_width = 0.04
+w_initial_rho = 0.1
+
+initial_T_profile = annulus
+T_wire = 2.3e5
+initial_T_inner_radius = 1.9
+initial_T_outer_radius = 2.1
+initial_T_transition_width = 0.04
+initial_magnetic_profile = tophat
+w_initial_T = 0.1
+
+# The magnetic field follows the measured 300 ns sin^2 current timescale. Replenished
+# annular mass receives a constant 50 km/s outward velocity; core top-up is co-moving.
+drive_enable = true
+drive_t_peak_ns = 300.0
+drive_force_balance = false
+
+inner_reservoir_support = fixed
+drive_rho_inner_reservoir_floor = 1e-4
+drive_T_inner_reservoir_floor = 1e5
+
+drive_magnetic_profile = confined_current
+drive_B_peak_gauss = 200e4
+drive_magnetic_conductor_radius = 1.0
+drive_magnetic_conductor_transition_width = 0.5
+drive_magnetic_wire_inner_radius = 1.9
+drive_magnetic_wire_outer_radius = 2.1
+drive_magnetic_wire_transition_width = 0.0999999
+
+drive_velocity_peak = 5e6
+drive_velocity_time_profile = fixed
+drive_velocity_mode = injected_mass
+drive_velocity_inner_radius = 1.9
+drive_velocity_outer_radius = 2.1
+drive_velocity_transition_width = 0.04
+
+drive_rho_profile = annulus
+drive_rho_time_profile = fixed
+drive_rho_profile_floor = 5e-3
+drive_rho_inner_radius = 1.9
+drive_rho_outer_radius = 2.1
+drive_rho_transition_width = 0.04
+
+drive_T_profile = annulus
+drive_T_time_profile = fixed
+drive_T_profile_floor = 2.3e5
+drive_T_inner_radius = 1.9
+drive_T_outer_radius = 2.1
+drive_T_transition_width = 0.04
+
+<parthenon/meshblock>
+nx1 = 256
+nx2 = 256
+nx3 = 1
+
+<parthenon/mesh>
+refinement = static
+nghost = 2
+nx1 = 1024
+x1min = -6.0
+x1max = 6.0
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2 = 512
+x2min = -3.0
+x2max = 3.0
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/static_refinement0>
+x1min = -4.0
+x1max = 4.0
+x2min = -0.001
+x2max = 0.001
+x3min = -0.0
+x3max = 0.0
+level = 3
+
+<hydro>
+scratch_level = 1
+fluid = ucthllemhd
+eos = adiabatic
+riemann = hlle
+reconstruction = plm
+gamma = 1.6666666666666667
+mean_molecular_weight = 6.75
+mean_ionization_state = 3.0
+dfloor = 1e-8
+Tfloor = 1e4
+
+<diffusion>
+integrator = unsplit
+cfl = 0.3
+conduction = none
+viscosity = none
+resistivity = ohmic
+resistivity_coeff = spitzer
+spitzer_log_lambda = 10.0
+spitzer_zbar = 3.0
+spitzer_eta_max = 3e5
+
+
+<cooling>
+enable_cooling = none
+table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling
+density_normalization = electron
+lambda_units_cgs = 1.0
+integrator = rk12
+max_iter = 1000
+cfl = 0.45
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
+
+<parthenon/time>
+integrator = rk2
+cfl = 0.4
+tlim = 4.0
+
+<parthenon/output0>
+file_type = hdf5
+dt = 0.1
+id = out0
+variables = cons, curlBz, beta, eta
+
+<parthenon/output1>
+file_type = hst
+dn = 1
+
+<parthenon/output2>
+file_type = rst
+dt = 1.0

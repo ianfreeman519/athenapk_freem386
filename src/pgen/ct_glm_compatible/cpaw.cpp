@@ -198,7 +198,7 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
   
     auto &rc = pmb->meshblock_data.Get(); // get base container
     // for ctmhd, fill up IB1:IB3 with the proper cell-center derived values
-    if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+    if (IsCTFluid(fluid)) {
       auto &u_dev_face = rc->Get("Bface").data;
       auto Bface = u_dev_face.GetHostMirrorAndCopy();
       Bface_Fill_Cons(pmb.get(), u_ref, Bface); // dont do the deep copy   
@@ -372,7 +372,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput * /*pin*/) {
   // initializing on host
   auto u = u_dev.GetHostMirrorAndCopy();
   
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     // fills u_cons() with the cell-averaged b values from
     // the face centered values made via the discrete
     // curl of the vector potential

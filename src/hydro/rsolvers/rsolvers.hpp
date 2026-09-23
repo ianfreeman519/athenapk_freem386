@@ -28,6 +28,7 @@ struct Riemann;
 #include "glmmhd_hlld.hpp"
 #include "ctmhd_hlld.hpp"
 #include "ucthlldmhd_hlld.hpp"
+#include "ucthllemhd_hlle.hpp"
 #include "glmmhd_hlle.hpp"
 #include "hydro_dc_llf.hpp"
 #include "hydro_hllc.hpp"

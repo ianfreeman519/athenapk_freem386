@@ -50,7 +50,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   const auto fluid = pmb->packages.Get("Hydro")->Param<Fluid>("fluid");
 
 
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     // fills u_cons() with the cell-averaged b values from
     // the face centered values made via the discrete
     // curl of the vector potential

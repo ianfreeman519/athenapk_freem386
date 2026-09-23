@@ -42,7 +42,15 @@ enum { IV1 = 1, IV2 = 2, IV3 = 3, IPR = 4 };
 enum class RiemannSolver { undefined, none, hlle, llf, hllc, hlld };
 enum class Reconstruction { undefined, dc, plm, ppm, wenoz, weno3, limo3 };
 enum class Integrator { undefined, rk1, rk2, vl2, rk3 };
-enum class Fluid { undefined, euler, glmmhd, ctmhd, ucthlldmhd };
+enum class Fluid { undefined, euler, glmmhd, ctmhd, ucthlldmhd, ucthllemhd };
+
+KOKKOS_INLINE_FUNCTION constexpr bool IsUCTFluid(const Fluid fluid) {
+  return fluid == Fluid::ucthlldmhd || fluid == Fluid::ucthllemhd;
+}
+
+KOKKOS_INLINE_FUNCTION constexpr bool IsCTFluid(const Fluid fluid) {
+  return fluid == Fluid::ctmhd || IsUCTFluid(fluid);
+}
 enum class Cooling { none, tabular };
 enum class Conduction { none, isotropic, anisotropic };
 enum class ConductionCoeff { none, fixed, spitzer };

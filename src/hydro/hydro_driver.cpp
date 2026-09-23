@@ -512,7 +512,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
           // during the correction.
           u0.get(), u1.get(),
           hydro_pkg->Param<bool>("first_order_flux_correct"),
-          fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd);
+          IsCTFluid(fluid));
     }
   }
 
@@ -540,10 +540,10 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     if (fluid == Fluid::ctmhd) {
       ct_emf = tl.AddTask(calc_flux, Hydro::CTMHD::Assemble_Corner_EMF, mu0.get());
     }
-    if (fluid == Fluid::ucthlldmhd){
-      ct_emf = tl.AddTask(calc_flux, Hydro::UCTHLLDMHD::Assemble_HLLD_Edge_EMF, mu0.get());
+    if (IsUCTFluid(fluid)) {
+      ct_emf = tl.AddTask(calc_flux, Hydro::UCT::Assemble_Edge_EMF, mu0.get());
     }
-    if (fluid == Fluid::ucthlldmhd &&
+    if (IsUCTFluid(fluid) &&
         hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none &&
         hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
       ct_emf = tl.AddTask(ct_emf, AddOhmicEdgeEMF, mu0.get());
@@ -577,7 +577,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
         integrator->beta[stage - 1] * integrator->dt);
     // -------------- CT step 3b. (RK update magnetic face varibles) --------------
     TaskID update_face = update_flx;
-    if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+    if (IsCTFluid(fluid)) {
       update_face = tl.AddTask(
           update_flx, Hydro::CTMHD::UpdateWithFaceMagDivergence, mu0.get(),
           mu1.get(), integrator->gam0[stage - 1], integrator->gam1[stage - 1],

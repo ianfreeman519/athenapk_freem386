@@ -1,0 +1,5 @@
+tests:
+  resistive_ct_analytic:
+    enabled: false
+  resistive_ct_extended:
+    enabled: true

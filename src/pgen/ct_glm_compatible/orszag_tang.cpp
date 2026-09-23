@@ -74,7 +74,7 @@ Real MaxFaceDivBHst(MeshData<Real> *md) {
 }
 
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg) {
-  if (pkg->Param<Fluid>("fluid") != Fluid::ctmhd) return;
+  if (!IsCTFluid(pkg->Param<Fluid>("fluid"))) return;
 
   auto hst_vars = pkg->Param<parthenon::HstVar_list>(parthenon::hist_param_key);
   hst_vars.emplace_back(parthenon::HistoryOutputVar(
@@ -106,7 +106,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   const auto fluid = pmb->packages.Get("Hydro")->Param<Fluid>("fluid");
 
 
-  if (fluid == Fluid::ctmhd ||fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     // fills u_cons() with the cell-averaged b values from
     // the face centered values made via the discrete
     // curl of the vector potential

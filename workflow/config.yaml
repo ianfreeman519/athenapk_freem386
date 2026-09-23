@@ -1,6 +1,6 @@
 plotting_python: $HOME/pixi-env/.pixi/envs/default/bin/python
 gnuplot: $HOME/pixi-env/.pixi/envs/default/bin/gnuplot
-athenapk: $HOME/uct-athenapk/build-host/bin/athenaPK
+athenapk: $HOME/uct-athenapk/build-v100/bin/athenaPK
 # cannot currently use mpi if want .pdhf's
 # h5py not compatible. But good for convergence test runs
 athenapk_mpi: $HOME/uct-athenapk/build-mpi/bin/athenaPK
@@ -31,9 +31,38 @@ tests:
     input: inputs/ct_glm_compatible/resistive_diffusion.in
     results_root: workflow/results
     dirname: resistive_ct_analytic
+    fluid: ucthllemhd
+    riemann: hlle
     eta: 0.01
     tlim: 0.1
     amplitude: 1.0e-6
+    runtime: 30
+    mem_mb: 4000
+
+  # Finite-amplitude Ohmic heating, current-sheet reconnection scaling, CT
+  # divergence, and cross-solver consistency. Enable explicitly when desired.
+  resistive_ct_extended:
+    enabled: false
+    python: /mnt/ffs24/home/freem386/pixi-env/.pixi/envs/default/bin/python
+    gpu_ids: [0, 1, 2, 3]
+    executable: build-v100/bin/athenaPK
+    resistive_input: inputs/ct_glm_compatible/resistive_diffusion.in
+    current_sheet_input: inputs/ct_glm_compatible/current_sheet.in
+    results_root: workflow/results
+    dirname: resistive_ct_extended
+    fluids:
+      ucthlldmhd: hlld
+      ucthllemhd: hlle
+    heating:
+      resolution: 16
+      eta: 0.05
+      tlim: 0.1
+      amplitude: 0.2
+    reconnection:
+      nx1: 128
+      nx2: 4
+      etas: [0.02, 0.05, 0.125]
+      tlim: 0.05
     runtime: 30
     mem_mb: 4000
 

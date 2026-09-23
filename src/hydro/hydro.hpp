@@ -87,6 +87,11 @@ constexpr size_t GetAuxNVars<Fluid::ucthlldmhd>() {
   return 6; // AL, AR, DL, DR, VBART1, VBART2
 }
 
+template <>
+constexpr size_t GetAuxNVars<Fluid::ucthllemhd>() {
+  return 6; // AL, AR, DL, DR, VBART1, VBART2
+}
+
 
 } // namespace Hydro
 

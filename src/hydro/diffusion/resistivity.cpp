@@ -147,7 +147,7 @@ void OhmicDiffFlux(MeshData<Real> *md) {
 
   const int ndim = pmb->pmy_mesh->ndim;
   const auto fluid = hydro_pkg->Param<Fluid>("fluid");
-  const bool update_cell_centered_b = fluid != Fluid::ucthlldmhd;
+  const bool update_cell_centered_b = !IsUCTFluid(fluid);
 
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
 

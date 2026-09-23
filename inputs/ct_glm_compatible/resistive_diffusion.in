@@ -3,7 +3,7 @@
 # Licensed under the BSD 3-Clause License (the "LICENSE").
 
 <comment>
-problem = Analytic Ohmic diffusion tests for UCT-HLLD
+problem = Analytic Ohmic diffusion tests for UCT
 
 <job>
 problem_id = resistive_diffusion
@@ -51,9 +51,9 @@ tlim = 0.1
 nlim = -1
 
 <hydro>
-fluid = ucthlldmhd
+fluid = ucthllemhd
 eos = adiabatic
-riemann = hlld
+riemann = hlle
 reconstruction = plm
 gamma = 1.666666666666667
 scratch_level = 1

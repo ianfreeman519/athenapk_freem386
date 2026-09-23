@@ -359,7 +359,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   auto fluid = Fluid::undefined;
   bool calc_c_h = false; // calculate hyperbolic divergence cleaning speed
   int nhydro = -1;
-  int nuct_hlld_aux = 0;
+  int nuct_aux = 0;
 
   if (fluid_str == "euler") {
     fluid = Fluid::euler;
@@ -387,16 +387,20 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   } else if (fluid_str == "ucthlldmhd") {
     fluid = Fluid::ucthlldmhd;
     nhydro = GetNVars<Fluid::ctmhd>(); // same number of vars in soln vector
-    nuct_hlld_aux = GetAuxNVars<Fluid::ucthlldmhd>();
+    nuct_aux = GetAuxNVars<Fluid::ucthlldmhd>();
+  } else if (fluid_str == "ucthllemhd") {
+    fluid = Fluid::ucthllemhd;
+    nhydro = GetNVars<Fluid::ctmhd>(); // same number of vars in soln vector
+    nuct_aux = GetAuxNVars<Fluid::ucthllemhd>();
   } else {
     PARTHENON_FAIL("AthenaPK hydro: Unknown fluid method.");
   }
   pkg->AddParam<>("fluid", fluid);
   pkg->AddParam<>("nhydro", nhydro);
-  pkg->AddParam<>("nuct_hlld_aux", nuct_hlld_aux);
+  pkg->AddParam<>("nuct_aux", nuct_aux);
 
   bool ct_energy_correction = false;
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+  if (IsCTFluid(fluid)) {
     ct_energy_correction =
         pin->GetOrAddBoolean("hydro", "ct_energy_correction", false);
   }
@@ -482,6 +486,12 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         "AthenaPK hydro: ucthlldmhd currently only supports PLM reconstruction "
         "and requires HLLD Riemann solves ");
   }
+  if (fluid == Fluid::ucthllemhd &&
+      (recon != Reconstruction::plm || riemann != RiemannSolver::hlle)) {
+    PARTHENON_FAIL(
+        "AthenaPK hydro: ucthllemhd currently only supports PLM reconstruction "
+        "and requires HLLE Riemann solves ");
+  }
 
   // Set calculation of hyperbolic timestep. Input file option takes precedence.
   if (pin->DoesParameterExist("hydro", "calc_dt_hyp")) {
@@ -529,6 +539,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   add_flux_fun<Fluid::ctmhd, Reconstruction::plm, RiemannSolver::hlld>(flux_functions);
   // (jwysong) only adding 1 ucthlldmhd option for now
   add_flux_fun<Fluid::ucthlldmhd, Reconstruction::plm, RiemannSolver::hlld>(flux_functions);
+  add_flux_fun<Fluid::ucthllemhd, Reconstruction::plm, RiemannSolver::hlle>(flux_functions);
 
   // Add first order recon with LLF fluxes (implemented for testing as tight loop)
   flux_functions[std::make_tuple(Fluid::euler, Reconstruction::dc, RiemannSolver::llf)] =
@@ -559,7 +570,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     hst_vars.emplace_back(HistoryOutputVar(parthenon::UserHistoryOperation::sum,
                                            HydroHst<Hst::divb>, "relDivB"));
   }
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     hst_vars.emplace_back(HistoryOutputVar(parthenon::UserHistoryOperation::sum,
                                            HydroHst<Hst::facedivb>, "faceDivB"));
     hst_vars.emplace_back(HistoryOutputVar(parthenon::UserHistoryOperation::max,
@@ -596,8 +607,9 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   auto first_order_flux_correct =
       pin->GetOrAddBoolean("hydro", "first_order_flux_correct", false);
   PARTHENON_REQUIRE(
-      !((fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) && first_order_flux_correct),
-      "AthenaPK hydro: first_order_flux_correct is not currently supported with ctmhd or ucthlldmhd.");
+      !(IsCTFluid(fluid) && first_order_flux_correct),
+      "AthenaPK hydro: first_order_flux_correct is not currently supported with "
+      "constrained-transport fluids.");
   pkg->AddParam<>("first_order_flux_correct", first_order_flux_correct);
   if (first_order_flux_correct) {
     if (fluid == Fluid::euler) {
@@ -913,9 +925,9 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
                      "Options are: none, unsplit, rkl2");
     }
     PARTHENON_REQUIRE_THROWS(
-        !(fluid == Fluid::ucthlldmhd && resistivity != Resistivity::none &&
+        !(IsUCTFluid(fluid) && resistivity != Resistivity::none &&
           diffint == DiffInt::rkl2),
-        "Resistive ucthlldmhd currently supports only diffusion/integrator=unsplit; "
+        "Resistive UCT fluids currently support only diffusion/integrator=unsplit; "
         "RKL2 does not evolve the face-centered magnetic field.");
     if (diffint != DiffInt::none) {
       // As in Athena++ a cfl safety factor is also applied to the theoretical limit.
@@ -942,7 +954,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       pkg->AddParam<>("eos", eos);
       pkg->FillDerivedMesh = ConsToPrim<AdiabaticGLMMHDEOS>;
       pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::glmmhd>;
-    } else if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) { // all ct schemes do this the same
+    } else if (IsCTFluid(fluid)) { // all CT schemes do this the same
       AdiabaticCTMHDEOS eos(pfloor, dfloor, efloor, vceil, eceil, gamma);
       pkg->AddParam<>("eos", eos);
       // this ensures that cons holds the cell-centered derived B values taken 
@@ -994,7 +1006,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     cons_labels[IB3] = "magnetic_field_3";
     cons_labels[IPS] = "magnetic_psi";
   }
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+  if (IsCTFluid(fluid)) {
     cons_labels[IB1] = "magnetic_field_1";
     cons_labels[IB2] = "magnetic_field_2";
     cons_labels[IB3] = "magnetic_field_3";
@@ -1013,14 +1025,14 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     prim_labels[IB3] = "magnetic_field_3";
     prim_labels[IPS] = "magnetic_psi";
   }
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+  if (IsCTFluid(fluid)) {
     prim_labels[IB1] = "magnetic_field_1";
     prim_labels[IB2] = "magnetic_field_2";
     prim_labels[IB3] = "magnetic_field_3";
   }
 
-  std::vector<std::string> uct_aux_labels(nuct_hlld_aux);
-  if (fluid == Fluid::ucthlldmhd){
+  std::vector<std::string> uct_aux_labels(nuct_aux);
+  if (IsUCTFluid(fluid)) {
     uct_aux_labels[AL] = "a_left";
     uct_aux_labels[AR] = "a_right";
     uct_aux_labels[DL] = "d_left";
@@ -1047,7 +1059,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
                prim_labels);
   pkg->AddField("prim", m);
 
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+  if (IsCTFluid(fluid)) {
     // gives us 3 face vectors accessed like
     //       Bx-face        By-face        Bz-face
     // Bface(TE::F1, 0), Bface(TE::F2, 0), Bface(TE::F3, 0)
@@ -1063,21 +1075,16 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     pkg->AddField("Bface", m);
   }
 
-  if (fluid == Fluid::ucthlldmhd){
+  if (IsUCTFluid(fluid)) {
     Metadata uct_m(
         {Metadata::Face, Metadata::Derived, Metadata::OneCopy},
-        std::vector<int>{nuct_hlld_aux}, // doing Metadata::Face automatically gives us 3 face vectors, while putting a number here gives us the number of quantities per face to save
+        std::vector<int>{nuct_aux}, // Metadata::Face supplies one vector per face.
         uct_aux_labels);
 
       // gives us the auxilliary vars needed to do uct-hlld accessed like
-      // uct_hlld(TE::F1, AL, ...)      uct_hlld(TE::F2, AL, ...)       uct_hlld(TE::F3, AL, ...)
-      // uct_hlld(TE::F1, AR, ...)      uct_hlld(TE::F2, AR, ...)       uct_hlld(TE::F3, AR, ...)
-      // uct_hlld(TE::F1, DL, ...)      uct_hlld(TE::F2, DL, ...)       uct_hlld(TE::F3, DL, ...)
-      // uct_hlld(TE::F1, DR, ...)      uct_hlld(TE::F2, DR, ...)       uct_hlld(TE::F3, DR, ...)
-      // uct_hlld(TE::F1, VBART1, ...)  uct_hlld(TE::F2, VBART1, ...)   uct_hlld(TE::F3, VBART1, ...)
-      // uct_hlld(TE::F1, VBART2, ...)  uct_hlld(TE::F2, VBART2, ...)   uct_hlld(TE::F3, VBART2, ...)
-      // and derived and saved during the hlld Riemann solve
-    pkg->AddField("uct_hlld", uct_m);
+      // Stores AL, AR, DL, DR, and two transverse velocities on each face.
+      // These coefficients are derived and saved by the selected UCT Riemann solver.
+    pkg->AddField("uct_aux", uct_m);
   }
 
   const auto refine_str = pin->GetOrAddString("refinement", "type", "unset");
@@ -1158,6 +1165,11 @@ struct EosType<Fluid::ucthlldmhd> {
   using type = AdiabaticCTMHDEOS;
 };
 
+template <>
+struct EosType<Fluid::ucthllemhd> {
+  using type = AdiabaticCTMHDEOS;
+};
+
 template <Fluid fluid>
 using EosType_t = typename EosType<fluid>::type;
 
@@ -1202,7 +1214,7 @@ Real EstimateHyperbolicTimestep(MeshData<Real> *md) {
           lambda_max_y = lambda_max_x;
           lambda_max_z = lambda_max_x;
 
-        } else if constexpr (fluid == Fluid::glmmhd || fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+        } else if constexpr (fluid == Fluid::glmmhd || IsCTFluid(fluid)) {
           lambda_max_x = eos.FastMagnetosonicSpeed(
               w[IDN], w[IPR], prim(IB1, k, j, i), prim(IB2, k, j, i), prim(IB3, k, j, i));
           if (ndim > 1) {
@@ -1374,7 +1386,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
       jl = jb.s - 1, ju = jb.e + 1, kl = kb.s - 1, ku = kb.e + 1;
   }
 
-  if (fluid == Fluid::ucthlldmhd){
+  if (IsUCTFluid(fluid)) {
     if (pmb->block_size.nx(X2DIR) > 1) {
       if (pmb->block_size.nx(X3DIR) == 1) // 2D
         jl = jb.s - 2, ju = jb.e + 2, kl = kb.s, ku = kb.e;
@@ -1386,15 +1398,15 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
   std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent, Metadata::Cell});
   auto cons_in = md->PackVariablesAndFluxes(flags_ind);
   MeshBlockPack<VariablePack<Real>> Bface_pack;
-  MeshBlockPack<VariablePack<Real>> uct_hlld_pack;
-  if constexpr (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+  MeshBlockPack<VariablePack<Real>> uct_aux_pack;
+  if constexpr (IsCTFluid(fluid)) {
     Bface_pack =
         md->PackVariables(std::vector<std::string>{"Bface"});
   }
 
-  if constexpr (fluid == Fluid::ucthlldmhd) {
-    uct_hlld_pack =
-              md->PackVariables(std::vector<std::string>{"uct_hlld"});
+  if constexpr (IsUCTFluid(fluid)) {
+    uct_aux_pack =
+              md->PackVariables(std::vector<std::string>{"uct_aux"});
   }
 
   auto pkg = pmb->packages.Get("Hydro");
@@ -1429,7 +1441,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
         // Force NVCC to capture packs outside if constexpr branches. Extended host-device
         // lambdas cannot first-capture a variable from within a constexpr-if context.
         const auto &Bface_pack_ = Bface_pack;
-        const auto &uct_hlld_pack_ = uct_hlld_pack;
+        const auto &uct_aux_pack_ = uct_aux_pack;
         const auto &riemann_ = riemann;
         const auto &eos_ = eos;
         const auto &c_h_ = c_h;
@@ -1443,7 +1455,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
         Reconstruct<recon, X1DIR>(member, k, j, ib.s - 1, ib.e + 1, prim, wl, wr);
         // Sync all threads in the team so that scratch memory is consistent
         member.team_barrier();
-        if constexpr (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+        if constexpr (IsCTFluid(fluid)) {
           const auto &Bface = Bface_pack_(b);
           // force the evolved Bface vars to sit on both sides of the reconstructed face
           parthenon::par_for_inner(member, ib.s, ib.e + 1, [&](const int i) {
@@ -1453,9 +1465,10 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
           member.team_barrier();
         }
 
-        if constexpr (fluid == Fluid::ucthlldmhd) {
-          auto &uct_hlld = uct_hlld_pack_(b);
-          riemann_.Solve(member, k, j, ib.s, ib.e+1, IV1, wl, wr, cons, uct_hlld, eos_, c_h_);
+        if constexpr (IsUCTFluid(fluid)) {
+          auto &uct_aux = uct_aux_pack_(b);
+          riemann_.Solve(member, k, j, ib.s, ib.e + 1, IV1, wl, wr, cons, uct_aux,
+                         eos_, c_h_);
         } else {
           riemann_.Solve(member, k, j, ib.s, ib.e+1, IV1, wl, wr, cons, eos_, c_h_);
         }
@@ -1485,7 +1498,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
     else // 3D
       kl = kb.s - 1, ku = kb.e + 1;
 
-    if (fluid == Fluid::ucthlldmhd){
+    if (IsUCTFluid(fluid)) {
       il = ib.s - 2, iu = ib.e + 2, kl = kb.s, ku = kb.e;
       if (pmb->block_size.nx(X3DIR) == 1) // 2D
         kl = kb.s, ku = kb.e;
@@ -1500,7 +1513,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
           // Force NVCC to capture packs outside if constexpr branches. Extended host-device
           // lambdas cannot first-capture a variable from within a constexpr-if context.
           const auto &Bface_pack_ = Bface_pack;
-          const auto &uct_hlld_pack_ = uct_hlld_pack;
+          const auto &uct_aux_pack_ = uct_aux_pack;
           const auto &riemann_ = riemann;
           const auto &eos_ = eos;
           const auto &c_h_ = c_h;
@@ -1519,7 +1532,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
             member.team_barrier();
 
             if (j > jb.s - 1) {
-              if constexpr (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+              if constexpr (IsCTFluid(fluid)) {
                 const auto &Bface = Bface_pack_(b);
                 parthenon::par_for_inner(member, il, iu, [&](const int i) {
                   wl(IB2, i) = Bface(TE::F2, 0, k, j, i);
@@ -1527,9 +1540,10 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
                 });
                 member.team_barrier();
               }
-              if constexpr (fluid == Fluid::ucthlldmhd) {
-                auto &uct_hlld = uct_hlld_pack_(b);
-                riemann_.Solve(member, k, j, il, iu, IV2, wl, wr, cons, uct_hlld, eos_, c_h_);
+              if constexpr (IsUCTFluid(fluid)) {
+                auto &uct_aux = uct_aux_pack_(b);
+                riemann_.Solve(member, k, j, il, iu, IV2, wl, wr, cons, uct_aux,
+                               eos_, c_h_);
               } else {
                 riemann_.Solve(member, k, j, il, iu, IV2, wl, wr, cons, eos_, c_h_);
               }member.team_barrier();
@@ -1560,7 +1574,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
     // set the loop limits
     il = ib.s - 1, iu = ib.e + 1, jl = jb.s - 1, ju = jb.e + 1;
 
-    if (fluid == Fluid::ucthlldmhd){
+    if (IsUCTFluid(fluid)) {
       il = ib.s - 2, iu = ib.e + 2, jl = jb.s - 2, ju = jb.e + 2;
     }
 
@@ -1571,7 +1585,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
           // Force NVCC to capture packs outside if constexpr branches. Extended host-device
           // lambdas cannot first-capture a variable from within a constexpr-if context.
           const auto &Bface_pack_ = Bface_pack;
-          const auto &uct_hlld_pack_ = uct_hlld_pack;
+          const auto &uct_aux_pack_ = uct_aux_pack;
           const auto &riemann_ = riemann;
           const auto &eos_ = eos;
           const auto &c_h_ = c_h;
@@ -1590,7 +1604,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
             member.team_barrier();
 
             if (k > kb.s - 1) {
-              if constexpr (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd) {
+              if constexpr (IsCTFluid(fluid)) {
                 const auto &Bface = Bface_pack_(b);
                 parthenon::par_for_inner(member, il, iu, [&](const int i) {
                   wl(IB3, i) = Bface(TE::F3, 0, k, j, i);
@@ -1598,9 +1612,10 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
                 });
                 member.team_barrier();
               }
-              if constexpr (fluid == Fluid::ucthlldmhd) {
-                auto &uct_hlld = uct_hlld_pack_(b);
-                riemann_.Solve(member, k, j, il, iu, IV3, wl, wr, cons, uct_hlld, eos_, c_h_);
+              if constexpr (IsUCTFluid(fluid)) {
+                auto &uct_aux = uct_aux_pack_(b);
+                riemann_.Solve(member, k, j, il, iu, IV3, wl, wr, cons, uct_aux,
+                               eos_, c_h_);
               } else {
                 riemann_.Solve(member, k, j, il, iu, IV3, wl, wr, cons, eos_, c_h_);
               }

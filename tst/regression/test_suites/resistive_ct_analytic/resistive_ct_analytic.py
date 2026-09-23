@@ -71,6 +71,8 @@ class TestCase(utils.test_case.TestCaseAbs):
         elif nx3 >= 8:
             mb3 = nx3 // 2
         parameters.driver_cmd_line_args = [
+            "hydro/fluid=ucthllemhd",
+            "hydro/riemann=hlle",
             f"problem/resistive_diffusion/iprob={iprob}",
             f"parthenon/mesh/nx1={nx1}",
             f"parthenon/mesh/nx2={nx2}",

@@ -236,7 +236,7 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
             cons_(IB2, k, j, i) = b2;
             cons_(IB3, k, j, i) = b3;
           }
-          if (two_d && (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd)){
+          if (two_d && IsCTFluid(fluid)) {
             cons_(IB3,k,j,i) = bz0 + amp * sn * rem[6][wave_flag];
           }
 
@@ -247,7 +247,7 @@ void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) 
 
     auto &rc = pmb->meshblock_data.Get(); // get base container
 
-    if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+    if (IsCTFluid(fluid)) {
       auto &u_dev_face = rc->Get("Bface").data;
       auto Bface = u_dev_face.GetHostMirrorAndCopy();
       Bface_Fill_Cons(pmb.get(), cons_, Bface); // dont do the deep copy   
@@ -500,7 +500,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
                             }
           u(IPS, k, j, i) = 0.0;
         }
-        if (two_d && (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd)){
+        if (two_d && IsCTFluid(fluid)) {
           u(IB3,k,j,i) = bz0 + amp * sn * rem[6][wave_flag];
         }
 
@@ -510,7 +510,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
       }
     }
   }
-  if (fluid == Fluid::ctmhd || fluid == Fluid::ucthlldmhd){
+  if (IsCTFluid(fluid)) {
     // fills u_cons() with the cell-averaged b values from
     // the face centered values made via the discrete
     // curl of the vector potential

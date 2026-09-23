@@ -1,0 +1,174 @@
+# AthenaPK - MARZ-like, continuously driven pulsed reconnection
+
+<job>
+problem_id = pulsed_reconnection
+
+<units>
+code_length_cgs = 1.0
+code_mass_cgs = 1e-10
+code_time_cgs = 1e-7
+
+<problem/pulsed_reconnection>
+# Start with zero current; the confined conductor-to-wire field follows the Z pulse.
+B_peak_gauss = 0.0
+rho_wire = 2.7e-4
+T_wire = 2.3e5
+# Additive material inside the wire annulus. Fixed support maintains the same initial
+# reservoir values using the complementary inner masks. Replenished interior mass is
+# co-moving and receives no radial drive.
+rho_inner_reservoir = 1e-5
+T_inner_reservoir = 1e5
+inner_reservoir_radius = 1.0
+inner_reservoir_support = fixed
+drive_rho_inner_reservoir_floor = 1e-5
+drive_T_inner_reservoir_floor = 1e5
+rho_background = 1e-6
+T_background = 1e5
+v0 = 1e7
+w_initial_rho = 1e-10
+w_initial_T = 1e-10
+initial_rho_inner_radius = 1.8
+initial_rho_outer_radius = 2.2
+initial_rho_transition_width = 0.1
+initial_T_inner_radius = 1.8
+initial_T_outer_radius = 2.2
+initial_T_transition_width = 0.1
+initial_magnetic_conductor_radius = 0.5
+initial_magnetic_conductor_transition_width = 0.1
+initial_magnetic_wire_inner_radius = 1.8
+initial_magnetic_wire_outer_radius = 2.2
+initial_magnetic_wire_transition_width = 0.1
+array_separation = 6.0
+N = 0
+density_perturb_amplitude = 0.0
+temperature_perturb_amplitude = 0.0
+initial_rho_profile = annulus
+initial_T_profile = annulus
+initial_magnetic_profile = confined_current
+initial_force_balance = false
+
+# The magnetic field follows the measured 300 ns sin^2 current timescale. Replenished
+# mass receives a constant 100 km/s outward velocity only in a smooth annulus around
+# the nominal 2 cm wire-array radius; density top-up in the core remains co-moving.
+drive_enable = true
+drive_t_peak_ns = 300.0
+drive_force_balance = false
+
+# drive_B_peak_gauss is the peak field at the conductor surface. The field is zero
+# through the post core, rises over the final 0.1 cm inside its surface, follows 1/r,
+# and falls over the final 0.1 cm inside the wire outer radius.
+drive_magnetic_profile = confined_current
+drive_B_peak_gauss = 4e6
+drive_magnetic_conductor_radius = 0.5
+drive_magnetic_conductor_transition_width = 0.1
+drive_magnetic_wire_inner_radius = 1.8
+drive_magnetic_wire_outer_radius = 2.2
+drive_magnetic_wire_transition_width = 0.1
+
+drive_velocity_peak = 1e7
+drive_velocity_time_profile = fixed
+drive_velocity_mode = injected_mass
+drive_velocity_inner_radius = 1.8
+drive_velocity_outer_radius = 2.2
+drive_velocity_transition_width = 0.1
+
+drive_rho_profile = annulus
+drive_rho_time_profile = fixed
+drive_rho_profile_floor = 2.7e-4
+drive_rho_inner_radius = 1.8
+drive_rho_outer_radius = 2.2
+drive_rho_transition_width = 0.1
+
+drive_T_time_profile = fixed
+drive_T_profile = annulus
+drive_T_profile_floor = 2.3e5
+drive_T_inner_radius = 1.8
+drive_T_outer_radius = 2.2
+drive_T_transition_width = 0.1
+
+<parthenon/meshblock>
+nx1 = 256
+nx2 = 256
+nx3 = 1
+
+<parthenon/mesh>
+refinement = static
+nghost = 2
+nx1 = 512
+x1min = -6.0
+x1max = 6.0
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2 = 512
+x2min = -6.0
+x2max = 6.0
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/static_refinement0>
+x1min = -4.0
+x1max = 4.0
+x2min = -0.01
+x2max = 0.01
+x3min = -0.0
+x3max = 0.0
+level = 3
+
+<hydro>
+scratch_level = 1
+fluid = ucthllemhd
+eos = adiabatic
+riemann = hlle
+reconstruction = plm
+gamma = 1.6666666666666667
+mean_molecular_weight = 6.75
+mean_ionization_state = 3.0
+dfloor = 1e-8
+Tfloor = 1e3
+
+<diffusion>
+integrator = unsplit
+cfl = 0.3
+conduction = none
+viscosity = none
+resistivity = ohmic
+resistivity_coeff = fixed
+# With these base units, 1e-3 code diffusivity is 1e4 cm^2/s.
+ohm_diff_coeff_code = 1e-3
+
+<cooling>
+enable_cooling = tabular
+table_filename = free_free_loss_aluminum_ni_1e18_Zbar_3.cooling
+density_normalization = electron
+lambda_units_cgs = 1.0
+integrator = rk12
+max_iter = 1000
+cfl = 0.45
+d_log_temp_tol = 1e-8
+d_e_tol = 1e-8
+
+<parthenon/time>
+integrator = rk2
+cfl = 0.4
+tlim = 4.0
+
+<parthenon/output0>
+file_type = hdf5
+dt = 0.1
+id = out0
+variables = cons, curlBz, eta, divv, beta, T
+
+<parthenon/output1>
+file_type = hst
+dn = 1
+
+<parthenon/output2>
+file_type = rst
+dt = 1.0

@@ -17,10 +17,10 @@ using namespace parthenon::package::prelude;
 using TE = parthenon::TopologicalElement;
 
 
-namespace Hydro::UCTHLLDMHD {
+namespace Hydro::UCT {
 
 
-TaskStatus Assemble_HLLD_Edge_EMF(MeshData<Real> *md) {
+TaskStatus Assemble_Edge_EMF(MeshData<Real> *md) {
     auto pmb = md->GetBlockData(0)->GetBlockPointer();
     const int ndim = pmb->pmy_mesh->ndim;
 
@@ -28,7 +28,7 @@ TaskStatus Assemble_HLLD_Edge_EMF(MeshData<Real> *md) {
     // the edge EMFs will be stored in the fluxes of Bface
     auto Bface_pack = md->PackVariablesAndFluxes(std::vector<std::string>{"Bface"});
 
-    const auto &uct_hlld_pack = md->PackVariables(std::vector<std::string>{"uct_hlld"});
+    const auto &uct_hlld_pack = md->PackVariables(std::vector<std::string>{"uct_aux"});
     
     const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
 
@@ -313,4 +313,4 @@ TaskStatus Assemble_HLLD_Edge_EMF(MeshData<Real> *md) {
 // Add
 
 
-} // namespace Hydro::UCTHLLDMHD
+} // namespace Hydro::UCT
