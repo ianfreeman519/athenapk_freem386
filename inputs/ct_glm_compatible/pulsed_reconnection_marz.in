@@ -54,8 +54,9 @@ drive_enable = true
 drive_t_peak_ns = 300.0
 drive_force_balance = false
 
-# drive_B_peak_gauss is the peak field at the conductor surface. The field is zero
-# through the post core, rises over the final 0.1 cm inside its surface, follows 1/r,
+# drive_B_peak_gauss is the profile maximum, slightly inside the conductor surface.
+# The analytic vector potential smoothly ramps r*B through the final 0.1 cm inside
+# the post surface, gives a current-free 1/r field outside the conductor,
 # and falls over the final 0.1 cm inside the wire outer radius.
 drive_magnetic_profile = confined_current
 drive_B_peak_gauss = 4e6
