@@ -24,7 +24,7 @@ TWO_PI = 2.0 * np.pi
 
 # Keep the expensive three-dimensional convergence test deliberately small. The one- and
 # two-dimensional tests provide the tighter asymptotic convergence measurements.
-CONFIGS = (
+SPATIAL_CONFIGS = (
     [("uniform", 0, 16, 16, 16)]
     # UCT corner reconstruction requires a non-degenerate transverse mesh. The
     # initialized state is still independent of x2, so this remains a 1D test.
@@ -35,11 +35,16 @@ CONFIGS = (
     + [("fourier2d", 10, n, n, 1) for n in (16, 32, 64)]
     + [("abc3d", 20, n, n, n) for n in (8, 16)]
 )
+CONFIGS = [
+    (*config, integrator)
+    for config in SPATIAL_CONFIGS
+    for integrator in ("unsplit", "rkl2")
+]
 
 
 def output_name(config):
-    name, _, nx1, nx2, nx3 = config
-    return f"{name}_{nx1}_{nx2}_{nx3}"
+    name, _, nx1, nx2, nx3, integrator = config
+    return f"{name}_{nx1}_{nx2}_{nx3}_{integrator}"
 
 
 def cell_volumes(data_file):
@@ -59,7 +64,7 @@ class TestCase(utils.test_case.TestCaseAbs):
     def Prepare(self, parameters, step):
         assert parameters.num_ranks <= 2, "Use <= 2 ranks for resistive CT tests."
         config = CONFIGS[step - 1]
-        _, iprob, nx1, nx2, nx3 = config
+        _, iprob, nx1, nx2, nx3, integrator = config
 
         # Make at least two blocks so every configuration is valid in the two-rank test.
         # Split only one active dimension to keep the small 3D cases inexpensive.
@@ -73,6 +78,8 @@ class TestCase(utils.test_case.TestCaseAbs):
         parameters.driver_cmd_line_args = [
             "hydro/fluid=ucthllemhd",
             "hydro/riemann=hlle",
+            f"diffusion/integrator={integrator}",
+            "diffusion/rkl2_max_dt_ratio=200",
             f"problem/resistive_diffusion/iprob={iprob}",
             f"parthenon/mesh/nx1={nx1}",
             f"parthenon/mesh/nx2={nx2}",
@@ -97,12 +104,17 @@ class TestCase(utils.test_case.TestCaseAbs):
             return False
 
         passed = True
-        errors = {"sin1d": [], "fourier2d": [], "abc3d": []}
+        errors = {
+            f"{name}_{integrator}": []
+            for name in ("sin1d", "fourier2d", "abc3d")
+            for integrator in ("unsplit", "rkl2")
+        }
+        solutions = {}
         decay_1d = np.exp(-ETA * TWO_PI**2 * TLIM)
         decay_2d = np.exp(-ETA * 2.0 * TWO_PI**2 * TLIM)
 
         for config in CONFIGS:
-            name, iprob, nx1, nx2, nx3 = config
+            name, iprob, nx1, nx2, nx3, integrator = config
             filename = os.path.join(
                 parameters.output_path,
                 f"parthenon.{output_name(config)}.final.phdf",
@@ -113,14 +125,23 @@ class TestCase(utils.test_case.TestCaseAbs):
                     "prim_magnetic_field_1",
                     "prim_magnetic_field_2",
                     "prim_magnetic_field_3",
+                    "prim_pressure",
                 ],
                 flatten=False,
             )
             bx = components["prim_magnetic_field_1"]
             by = components["prim_magnetic_field_2"]
             bz = components["prim_magnetic_field_3"]
+            pressure = components["prim_pressure"]
+            if not all(np.all(np.isfinite(field)) for field in (bx, by, bz)):
+                print(f"ERROR: non-finite magnetic field in {output_name(config)}")
+                passed = False
+            if not np.all(np.isfinite(pressure)) or np.any(pressure <= 0.0):
+                print(f"ERROR: non-positive/non-finite pressure in {output_name(config)}")
+                passed = False
             z, y, x = data.GetVolumeLocations(flatten=False)
             vol = cell_volumes(data)
+            solutions[(name, nx1, nx2, nx3, integrator)] = (bx, by, bz)
 
             if iprob == 0:
                 err = max(
@@ -128,7 +149,7 @@ class TestCase(utils.test_case.TestCaseAbs):
                     np.max(np.abs(by + 0.125)),
                     np.max(np.abs(bz - 0.0625)),
                 )
-                print(f"[resistive CT uniform] Linf error = {err:.8e}")
+                print(f"[resistive CT uniform {integrator}] Linf error = {err:.8e}")
                 passed &= err < 5.0e-13
                 continue
 
@@ -148,7 +169,7 @@ class TestCase(utils.test_case.TestCaseAbs):
                     f"quadrature amplitude={phase_err:.8e}"
                 )
                 if name == "sin1d":
-                    errors[name].append((nx1, err))
+                    errors[f"{name}_{integrator}"].append((nx1, err))
                 else:
                     passed &= amp_err < 2.0e-2 and phase_err < 2.0e-3
                 continue
@@ -161,7 +182,7 @@ class TestCase(utils.test_case.TestCaseAbs):
                     weighted_l1(bx - decay_2d * expected_bx, vol)
                     + weighted_l1(by - decay_2d * expected_by, vol)
                 ) / (2.0 * scale)
-                errors[name].append((nx1, err))
+                errors[f"{name}_{integrator}"].append((nx1, err))
                 print(f"[resistive CT Fourier2D N={nx1}] normalized L1={err:.8e}")
                 continue
 
@@ -174,20 +195,40 @@ class TestCase(utils.test_case.TestCaseAbs):
                 + weighted_l1(by - decay_1d * expected_by, vol)
                 + weighted_l1(bz - decay_1d * expected_bz, vol)
             ) / (3.0 * AMP)
-            errors[name].append((nx1, err))
+            errors[f"{name}_{integrator}"].append((nx1, err))
             print(f"[resistive CT ABC3D N={nx1}] normalized L1={err:.8e}")
 
-        for name, minimum_rate in (("sin1d", 1.8), ("fourier2d", 1.8), ("abc3d", 1.6)):
-            resolutions, values = np.asarray(errors[name]).T
-            if np.any(values <= 0.0) or np.any(~np.isfinite(values)):
-                print(f"ERROR: invalid {name} convergence errors: {values}")
-                passed = False
-                continue
-            rate = -np.polyfit(np.log(resolutions), np.log(values), 1)[0]
-            print(f"[resistive CT {name}] measured convergence rate = {rate:.6f}")
-            if rate < minimum_rate:
-                print(f"ERROR: {name} convergence rate is below {minimum_rate}")
-                passed = False
+        for integrator in ("unsplit", "rkl2"):
+            for name, minimum_rate in (
+                ("sin1d", 1.8),
+                ("fourier2d", 1.8),
+                ("abc3d", 1.6),
+            ):
+                key = f"{name}_{integrator}"
+                resolutions, values = np.asarray(errors[key]).T
+                if np.any(values <= 0.0) or np.any(~np.isfinite(values)):
+                    print(f"ERROR: invalid {key} convergence errors: {values}")
+                    passed = False
+                    continue
+                rate = -np.polyfit(np.log(resolutions), np.log(values), 1)[0]
+                print(f"[resistive CT {key}] measured convergence rate = {rate:.6f}")
+                if rate < minimum_rate:
+                    print(f"ERROR: {key} convergence rate is below {minimum_rate}")
+                    passed = False
+
+        # At fixed spatial resolution the two second-order integrations should differ
+        # only by a small temporal-discretization contribution.
+        for name, _, nx1, nx2, nx3 in SPATIAL_CONFIGS:
+            unsplit = solutions[(name, nx1, nx2, nx3, "unsplit")]
+            rkl2 = solutions[(name, nx1, nx2, nx3, "rkl2")]
+            difference = max(np.max(np.abs(a - b)) for a, b in zip(unsplit, rkl2))
+            scale = max(AMP, *(np.max(np.abs(a)) for a in unsplit))
+            relative_difference = difference / scale
+            print(
+                f"[resistive CT {name} integrator comparison] "
+                f"relative Linf={relative_difference:.8e}"
+            )
+            passed &= np.isfinite(relative_difference) and relative_difference < 5.0e-2
 
         fig, axis = plt.subplots()
         for name, entries in errors.items():

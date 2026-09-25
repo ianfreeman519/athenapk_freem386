@@ -139,7 +139,11 @@ void OhmicDiffFlux(MeshData<Real> *md) {
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  // Bface is also Independent, but its flux storage is edge-centered.  Keep it out of
+  // this cell-centered pack; the CT resistive operator fills Bface edge EMFs in
+  // AddOhmicEdgeEMF instead.
+  std::vector<parthenon::MetadataFlag> flags_ind(
+      {Metadata::Independent, Metadata::Cell});
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
   auto hydro_pkg = pmb->packages.Get("Hydro");
 

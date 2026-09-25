@@ -192,7 +192,10 @@ void ThermalFluxIsoFixed(MeshData<Real> *md) {
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  // Restrict this pack to cell-centered conserved variables.  Bface is Independent
+  // for CT fluids but has edge-centered flux storage.
+  std::vector<parthenon::MetadataFlag> flags_ind(
+      {Metadata::Independent, Metadata::Cell});
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
   auto hydro_pkg = pmb->packages.Get("Hydro");
 
@@ -268,7 +271,10 @@ void ThermalFluxGeneral(MeshData<Real> *md) {
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  // Restrict this pack to cell-centered conserved variables.  Bface is Independent
+  // for CT fluids but has edge-centered flux storage.
+  std::vector<parthenon::MetadataFlag> flags_ind(
+      {Metadata::Independent, Metadata::Cell});
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
   auto hydro_pkg = pmb->packages.Get("Hydro");
 

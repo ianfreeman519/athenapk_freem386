@@ -924,11 +924,6 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       PARTHENON_FAIL("AthenaPK unknown integration method for diffusion processes. "
                      "Options are: none, unsplit, rkl2");
     }
-    PARTHENON_REQUIRE_THROWS(
-        !(IsUCTFluid(fluid) && resistivity != Resistivity::none &&
-          diffint == DiffInt::rkl2),
-        "Resistive UCT fluids currently support only diffusion/integrator=unsplit; "
-        "RKL2 does not evolve the face-centered magnetic field.");
     if (diffint != DiffInt::none) {
       // As in Athena++ a cfl safety factor is also applied to the theoretical limit.
       // If no diffusion-specific value is provided, inherit parthenon/time/cfl.

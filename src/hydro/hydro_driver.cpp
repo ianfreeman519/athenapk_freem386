@@ -30,6 +30,7 @@
 #include "hydro_driver.hpp"
 
 using namespace parthenon::driver::prelude;
+using TE = parthenon::TopologicalElement;
 
 namespace Hydro {
 
@@ -92,13 +93,113 @@ TaskStatus ResetFluxes(MeshData<Real> *md) {
   return TaskStatus::complete;
 }
 
+// Sets the edge-centered flux storage associated with Bface to zero. During an
+// RKL2 diffusion stage these slots contain only the non-ideal EMF; unlike the
+// unsplit CT path there is no preceding ideal-MHD EMF to overwrite them.
+TaskStatus ResetFaceFluxes(MeshData<Real> *md) {
+  auto pmb = md->GetBlockData(0)->GetBlockPointer();
+  const int ndim = pmb->pmy_mesh->ndim;
+  IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+  auto bface_pack = md->PackVariablesAndFluxes(std::vector<std::string>{"Bface"});
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Reset Bface Ez", parthenon::DevExecSpace(), 0,
+      bface_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e + 1, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        bface_pack(b).template flux<parthenon::TopologicalType::Edge>(
+            X3DIR, 0, k, j, i) = 0.0;
+      });
+  if (ndim < 3) return TaskStatus::complete;
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Reset Bface Ey", parthenon::DevExecSpace(), 0,
+      bface_pack.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        bface_pack(b).template flux<parthenon::TopologicalType::Edge>(
+            X2DIR, 0, k, j, i) = 0.0;
+      });
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Reset Bface Ex", parthenon::DevExecSpace(), 0,
+      bface_pack.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e + 1, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        bface_pack(b).template flux<parthenon::TopologicalType::Edge>(
+            X1DIR, 0, k, j, i) = 0.0;
+      });
+  return TaskStatus::complete;
+}
+
+// Store the CT curl operator M(B) in dst.Bface. The signs deliberately match
+// UpdateWithFaceMagDivergence, but no state update is performed here.
+TaskStatus FaceMagneticDerivative(MeshData<Real> *src, MeshData<Real> *dst) {
+  auto pmb = src->GetBlockData(0)->GetBlockPointer();
+  const int ndim = pmb->pmy_mesh->ndim;
+  IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+  auto Bsrc = src->PackVariablesAndFluxes(std::vector<std::string>{"Bface"});
+  auto Bdst = dst->PackVariables(std::vector<std::string>{"Bface"});
+
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "RKL Bface derivative X1", DevExecSpace(), 0,
+      Bsrc.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        const auto &coords = Bsrc.GetCoords(b);
+        const auto &B = Bsrc(b);
+        Real dB = (B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) -
+                   B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j + 1, i)) /
+                  coords.Dxc<2>(k, j, i);
+        if (ndim >= 3) {
+          dB -= (B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k, j, i) -
+                  B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k + 1, j, i)) /
+                 coords.Dxc<3>(k, j, i);
+        }
+        Bdst(b)(TE::F1, 0, k, j, i) = dB;
+      });
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "RKL Bface derivative X2", DevExecSpace(), 0,
+      Bsrc.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e + 1, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        const auto &coords = Bsrc.GetCoords(b);
+        const auto &B = Bsrc(b);
+        Real dB = -(B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) -
+                    B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i + 1)) /
+                   coords.Dxc<1>(k, j, i);
+        if (ndim >= 3) {
+          dB += (B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k, j, i) -
+                  B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k + 1, j, i)) /
+                 coords.Dxc<3>(k, j, i);
+        }
+        Bdst(b)(TE::F2, 0, k, j, i) = dB;
+      });
+  if (ndim >= 3) {
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "RKL Bface derivative X3", DevExecSpace(), 0,
+        Bsrc.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          const auto &coords = Bsrc.GetCoords(b);
+          const auto &B = Bsrc(b);
+          Bdst(b)(TE::F3, 0, k, j, i) =
+              (B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k, j, i) -
+               B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k, j, i + 1)) /
+                  coords.Dxc<1>(k, j, i) -
+              (B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k, j, i) -
+               B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k, j + 1, i)) /
+                  coords.Dxc<2>(k, j, i);
+        });
+  }
+  return TaskStatus::complete;
+}
+
 TaskStatus RKL2StepFirst(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
                          MeshData<Real> *md_Yjm2, MeshData<Real> *md_MY0, const int s_rkl,
-                         const Real tau) {
+                         const Real tau, const bool evolve_bface) {
   auto pmb = md_Y0->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+  const int ndim = pmb->pmy_mesh->ndim;
 
   // Compute coefficients. Meyer+2014 eq. (18)
   Real mu_tilde_1 = 4. / 3. /
@@ -107,7 +208,8 @@ TaskStatus RKL2StepFirst(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
 
   // In principle, we'd only need to pack Metadata::WithFluxes here, but
   // choosing to mirror other use in the code so that the packs are already cached.
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  std::vector<parthenon::MetadataFlag> flags_ind(
+      {Metadata::Independent, Metadata::Cell});
   auto Y0 = md_Y0->PackVariablesAndFluxes(flags_ind);
   auto Yjm1 = md_Yjm1->PackVariablesAndFluxes(flags_ind);
   auto Yjm2 = md_Yjm2->PackVariablesAndFluxes(flags_ind);
@@ -124,13 +226,49 @@ TaskStatus RKL2StepFirst(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
         Yjm2(b, v, k, j, i) = Y0(b, v, k, j, i);                       // Y_0
       });
 
+  if (evolve_bface) {
+    auto B0 = md_Y0->PackVariables(std::vector<std::string>{"Bface"});
+    auto Bjm1 = md_Yjm1->PackVariables(std::vector<std::string>{"Bface"});
+    auto Bjm2 = md_Yjm2->PackVariables(std::vector<std::string>{"Bface"});
+    auto MB0 = md_MY0->PackVariables(std::vector<std::string>{"Bface"});
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "RKL first Bface X1", DevExecSpace(), 0,
+        B0.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e + 1,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          Bjm1(b)(TE::F1, 0, k, j, i) = B0(b)(TE::F1, 0, k, j, i) +
+                                               mu_tilde_1 * tau *
+                                                   MB0(b)(TE::F1, 0, k, j, i);
+          Bjm2(b)(TE::F1, 0, k, j, i) = B0(b)(TE::F1, 0, k, j, i);
+        });
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "RKL first Bface X2", DevExecSpace(), 0,
+        B0.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e + 1, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          Bjm1(b)(TE::F2, 0, k, j, i) = B0(b)(TE::F2, 0, k, j, i) +
+                                               mu_tilde_1 * tau *
+                                                   MB0(b)(TE::F2, 0, k, j, i);
+          Bjm2(b)(TE::F2, 0, k, j, i) = B0(b)(TE::F2, 0, k, j, i);
+        });
+    if (ndim >= 3) {
+      parthenon::par_for(
+          DEFAULT_LOOP_PATTERN, "RKL first Bface X3", DevExecSpace(), 0,
+          B0.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e, ib.s, ib.e,
+          KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+            Bjm1(b)(TE::F3, 0, k, j, i) = B0(b)(TE::F3, 0, k, j, i) +
+                                                 mu_tilde_1 * tau *
+                                                     MB0(b)(TE::F3, 0, k, j, i);
+            Bjm2(b)(TE::F3, 0, k, j, i) = B0(b)(TE::F3, 0, k, j, i);
+          });
+    }
+  }
+
   return TaskStatus::complete;
 }
 
 TaskStatus RKL2StepOther(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
                          MeshData<Real> *md_Yjm2, MeshData<Real> *md_MY0, const Real mu_j,
                          const Real nu_j, const Real mu_tilde_j, const Real gamma_tilde_j,
-                         const Real tau) {
+                         const Real tau, const bool evolve_bface) {
   auto pmb = md_Y0->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
@@ -138,7 +276,8 @@ TaskStatus RKL2StepOther(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
 
   // In principle, we'd only need to pack Metadata::WithFluxes here, but
   // choosing to mirror other use in the code so that the packs are already cached.
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  std::vector<parthenon::MetadataFlag> flags_ind(
+      {Metadata::Independent, Metadata::Cell});
   auto Y0 = md_Y0->PackVariablesAndFluxes(flags_ind);
   auto Yjm1 = md_Yjm1->PackVariablesAndFluxes(flags_ind);
   auto Yjm2 = md_Yjm2->PackVariablesAndFluxes(flags_ind);
@@ -164,6 +303,87 @@ TaskStatus RKL2StepOther(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
         Yjm1(b, v, k, j, i) = Yj;
       });
 
+  if (evolve_bface) {
+    auto B0 = md_Y0->PackVariables(std::vector<std::string>{"Bface"});
+    auto Bjm1 = md_Yjm1->PackVariablesAndFluxes(std::vector<std::string>{"Bface"});
+    auto Bjm2 = md_Yjm2->PackVariables(std::vector<std::string>{"Bface"});
+    auto MB0 = md_MY0->PackVariables(std::vector<std::string>{"Bface"});
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "RKL other Bface X1", DevExecSpace(), 0,
+        B0.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e + 1,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          const auto &coords = Bjm1.GetCoords(b);
+          const auto &B = Bjm1(b);
+          Real MBjm1 =
+              (B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) -
+               B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j + 1, i)) /
+              coords.Dxc<2>(k, j, i);
+          if (ndim >= 3) {
+            MBjm1 -=
+                (B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k, j, i) -
+                 B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k + 1, j, i)) /
+                coords.Dxc<3>(k, j, i);
+          }
+          const Real Bj =
+              mu_j * Bjm1(b)(TE::F1, 0, k, j, i) +
+              nu_j * Bjm2(b)(TE::F1, 0, k, j, i) +
+              (1.0 - mu_j - nu_j) * B0(b)(TE::F1, 0, k, j, i) +
+              mu_tilde_j * tau * MBjm1 +
+              gamma_tilde_j * tau * MB0(b)(TE::F1, 0, k, j, i);
+          Bjm2(b)(TE::F1, 0, k, j, i) = Bjm1(b)(TE::F1, 0, k, j, i);
+          Bjm1(b)(TE::F1, 0, k, j, i) = Bj;
+        });
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "RKL other Bface X2", DevExecSpace(), 0,
+        B0.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e + 1, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          const auto &coords = Bjm1.GetCoords(b);
+          const auto &B = Bjm1(b);
+          Real MBjm1 =
+              -(B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) -
+                B.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i + 1)) /
+              coords.Dxc<1>(k, j, i);
+          if (ndim >= 3) {
+            MBjm1 +=
+                (B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k, j, i) -
+                 B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k + 1, j, i)) /
+                coords.Dxc<3>(k, j, i);
+          }
+          const Real Bj =
+              mu_j * Bjm1(b)(TE::F2, 0, k, j, i) +
+              nu_j * Bjm2(b)(TE::F2, 0, k, j, i) +
+              (1.0 - mu_j - nu_j) * B0(b)(TE::F2, 0, k, j, i) +
+              mu_tilde_j * tau * MBjm1 +
+              gamma_tilde_j * tau * MB0(b)(TE::F2, 0, k, j, i);
+          Bjm2(b)(TE::F2, 0, k, j, i) = Bjm1(b)(TE::F2, 0, k, j, i);
+          Bjm1(b)(TE::F2, 0, k, j, i) = Bj;
+        });
+    if (ndim >= 3) {
+      parthenon::par_for(
+          DEFAULT_LOOP_PATTERN, "RKL other Bface X3", DevExecSpace(), 0,
+          B0.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e, ib.s, ib.e,
+          KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+            const auto &coords = Bjm1.GetCoords(b);
+            const auto &B = Bjm1(b);
+            const Real MBjm1 =
+                (B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k, j, i) -
+                 B.template flux<parthenon::TopologicalType::Edge>(X2DIR, 0, k, j, i + 1)) /
+                    coords.Dxc<1>(k, j, i) -
+                (B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k, j, i) -
+                 B.template flux<parthenon::TopologicalType::Edge>(X1DIR, 0, k, j + 1, i)) /
+                    coords.Dxc<2>(k, j, i);
+            const Real Bj =
+                mu_j * Bjm1(b)(TE::F3, 0, k, j, i) +
+                nu_j * Bjm2(b)(TE::F3, 0, k, j, i) +
+                (1.0 - mu_j - nu_j) * B0(b)(TE::F3, 0, k, j, i) +
+                mu_tilde_j * tau * MBjm1 +
+                gamma_tilde_j * tau * MB0(b)(TE::F3, 0, k, j, i);
+            Bjm2(b)(TE::F3, 0, k, j, i) = Bjm1(b)(TE::F3, 0, k, j, i);
+            Bjm1(b)(TE::F3, 0, k, j, i) = Bj;
+          });
+    }
+  }
+
   return TaskStatus::complete;
 }
 
@@ -174,6 +394,10 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
 
   auto hydro_pkg = blocks[0]->packages.Get("Hydro");
   auto mindt_diff = hydro_pkg->Param<Real>("dt_diff");
+  const auto fluid = hydro_pkg->Param<Fluid>("fluid");
+  const bool evolve_bface =
+      IsCTFluid(fluid) &&
+      hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none;
 
   // get number of RKL steps
   // eq (21) using half hyperbolic timestep due to Strang split
@@ -201,12 +425,13 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
     auto &base = blocks[i]->meshblock_data.Get();
     tl.AddTask(
         none,
-        [](MeshBlockData<Real> *dst, MeshBlockData<Real> *src) {
+        [](MeshBlockData<Real> *dst, MeshBlockData<Real> *src, const bool copy_bface) {
           dst->Get("cons").data.DeepCopy(src->Get("cons").data);
           dst->Get("prim").data.DeepCopy(src->Get("prim").data);
+          if (copy_bface) dst->Get("Bface").data.DeepCopy(src->Get("Bface").data);
           return TaskStatus::complete;
         },
-        Y0.get(), base.get());
+        Y0.get(), base.get(), evolve_bface);
   }
 
   TaskRegion &region_init = ptask_coll->AddRegion(blocks.size());
@@ -235,19 +460,29 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
 
     // Reset flux arrays (not guaranteed to be zero)
     auto reset_fluxes = tl.AddTask(none, ResetFluxes, base.get());
+    TaskID reset_all_fluxes = reset_fluxes;
+    if (evolve_bface) {
+      reset_all_fluxes =
+          reset_fluxes | tl.AddTask(none, ResetFaceFluxes, base.get());
+    }
 
     // Calculate the diffusive fluxes for Y0 (here still "base" as nothing has been
     // updated yet) so that we can store the result as MY0 and reuse later
     // (in every subsetp).
     auto hydro_diff_fluxes =
-        tl.AddTask(reset_fluxes, CalcDiffFluxes, hydro_pkg.get(), base.get());
+        tl.AddTask(reset_all_fluxes, CalcDiffFluxes, hydro_pkg.get(), base.get());
+    TaskID diffusion_operator = hydro_diff_fluxes;
+    if (evolve_bface) {
+      diffusion_operator =
+          hydro_diff_fluxes | tl.AddTask(reset_all_fluxes, AddOhmicEdgeEMF, base.get());
+    }
 
     auto send_flx =
-        tl.AddTask(hydro_diff_fluxes, parthenon::LoadAndSendFluxCorrections, base);
+        tl.AddTask(diffusion_operator, parthenon::LoadAndSendFluxCorrections, base);
     auto recv_flx =
         tl.AddTask(start_flxcor_recv, parthenon::ReceiveFluxCorrections, base);
     auto set_flx =
-        tl.AddTask(recv_flx | hydro_diff_fluxes, parthenon::SetFluxCorrections, base);
+        tl.AddTask(recv_flx | diffusion_operator, parthenon::SetFluxCorrections, base);
 
     auto &Y0 = pmesh->mesh_data.GetOrAdd("u1", i);
     auto &MY0 = pmesh->mesh_data.GetOrAdd("MY0", i);
@@ -255,11 +490,24 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
 
     auto init_MY0 = tl.AddTask(set_flx, parthenon::Update::FluxDivergence<MeshData<Real>>,
                                base.get(), MY0.get());
+    TaskID init_operator = init_MY0;
+    if (evolve_bface) {
+      init_operator =
+          init_MY0 | tl.AddTask(set_flx, FaceMagneticDerivative, base.get(), MY0.get());
+    }
 
     // Initialize Y0 and Y1 and the recursion relation starting with j = 2 needs data from
     // the two preceeding stages.
-    auto rkl2_step_first = tl.AddTask(init_MY0, RKL2StepFirst, Y0.get(), base.get(),
-                                      Yjm2.get(), MY0.get(), s_rkl, tau);
+    auto rkl2_step_first = tl.AddTask(init_operator, RKL2StepFirst, Y0.get(), base.get(),
+                                      Yjm2.get(), MY0.get(), s_rkl, tau, evolve_bface);
+
+    TaskID synced_history = rkl2_step_first;
+    if (evolve_bface) {
+      auto start_hist_bnd =
+          tl.AddTask(none, parthenon::StartReceiveBoundBufs<any>, Yjm2);
+      synced_history = parthenon::AddBoundaryExchangeTasks(
+          rkl2_step_first | start_hist_bnd, tl, Yjm2, pmesh->multilevel);
+    }
 
     // Update ghost cells of Y1 (as MY1 is calculated for each Y_j).
     // Y1 stored in "base", see rkl2_step_first task.
@@ -269,7 +517,7 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
     // best impl. Go with default call (split local/nonlocal) for now.
     // TODO(pgrete) optimize (in parthenon) to only send subset of updated vars
     auto bounds_exchange = parthenon::AddBoundaryExchangeTasks(
-        rkl2_step_first | start_bnd, tl, base, pmesh->multilevel);
+        synced_history | start_bnd, tl, base, pmesh->multilevel);
 
     tl.AddTask(bounds_exchange, parthenon::Update::FillDerived<MeshData<Real>>,
                base.get());
@@ -297,9 +545,7 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
       auto &tl = region_calc_fluxes_step_other[i];
       auto &base = pmesh->mesh_data.GetOrAdd("base", i);
 
-      // Only need boundaries for base as it's the only "active" container exchanging
-      // data/fluxes with neighbors. All other containers are passive (i.e., data is only
-      // used but not exchanged).
+      // Only need boundaries for base as it is the active stage container.
       const auto any = parthenon::BoundaryType::any;
       auto start_bnd = tl.AddTask(none, parthenon::StartReceiveBoundBufs<any>, base);
       auto start_flxcor_recv =
@@ -307,25 +553,43 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
 
       // Reset flux arrays (not guaranteed to be zero)
       auto reset_fluxes = tl.AddTask(none, ResetFluxes, base.get());
+      TaskID reset_all_fluxes = reset_fluxes;
+      if (evolve_bface) {
+        reset_all_fluxes =
+            reset_fluxes | tl.AddTask(none, ResetFaceFluxes, base.get());
+      }
 
       // Calculate the diffusive fluxes for Yjm1 (here u1)
       auto hydro_diff_fluxes =
-          tl.AddTask(reset_fluxes, CalcDiffFluxes, hydro_pkg.get(), base.get());
+          tl.AddTask(reset_all_fluxes, CalcDiffFluxes, hydro_pkg.get(), base.get());
+      TaskID diffusion_operator = hydro_diff_fluxes;
+      if (evolve_bface) {
+        diffusion_operator =
+            hydro_diff_fluxes | tl.AddTask(reset_all_fluxes, AddOhmicEdgeEMF, base.get());
+      }
 
       auto send_flx =
-          tl.AddTask(hydro_diff_fluxes, parthenon::LoadAndSendFluxCorrections, base);
+          tl.AddTask(diffusion_operator, parthenon::LoadAndSendFluxCorrections, base);
       auto recv_flx =
           tl.AddTask(start_flxcor_recv, parthenon::ReceiveFluxCorrections, base);
       auto set_flx =
-          tl.AddTask(recv_flx | hydro_diff_fluxes, parthenon::SetFluxCorrections, base);
+          tl.AddTask(recv_flx | diffusion_operator, parthenon::SetFluxCorrections, base);
 
       auto &Y0 = pmesh->mesh_data.GetOrAdd("u1", i);
       auto &MY0 = pmesh->mesh_data.GetOrAdd("MY0", i);
       auto &Yjm2 = pmesh->mesh_data.GetOrAdd("Yjm2", i);
 
-      auto rkl2_step_other =
-          tl.AddTask(set_flx, RKL2StepOther, Y0.get(), base.get(), Yjm2.get(), MY0.get(),
-                     mu_j, nu_j, mu_tilde_j, gamma_tilde_j, tau);
+      auto rkl2_step_other = tl.AddTask(
+          set_flx, RKL2StepOther, Y0.get(), base.get(), Yjm2.get(), MY0.get(), mu_j,
+          nu_j, mu_tilde_j, gamma_tilde_j, tau, evolve_bface);
+
+      TaskID synced_history = rkl2_step_other;
+      if (evolve_bface) {
+        auto start_hist_bnd =
+            tl.AddTask(none, parthenon::StartReceiveBoundBufs<any>, Yjm2);
+        synced_history = parthenon::AddBoundaryExchangeTasks(
+            rkl2_step_other | start_hist_bnd, tl, Yjm2, pmesh->multilevel);
+      }
 
       // update ghost cells of base (currently storing Yj)
       // Update ghost cells (local and non local), prolongate and apply bound cond.
@@ -334,7 +598,7 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
       // best impl. Go with default call (split local/nonlocal) for now.
       // TODO(pgrete) optimize (in parthenon) to only send subset of updated vars
       auto bounds_exchange = parthenon::AddBoundaryExchangeTasks(
-          rkl2_step_other | start_bnd, tl, base, pmesh->multilevel);
+          synced_history | start_bnd, tl, base, pmesh->multilevel);
 
       tl.AddTask(bounds_exchange, parthenon::Update::FillDerived<MeshData<Real>>,
                  base.get());

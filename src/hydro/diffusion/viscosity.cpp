@@ -97,7 +97,10 @@ void MomentumDiffFluxIsoFixed(MeshData<Real> *md) {
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  // UCT fluids also have the Independent face-centered Bface variable.  Viscous
+  // fluxes are cell-conserved fluxes and must not include its edge-flux allocation.
+  std::vector<parthenon::MetadataFlag> flags_ind(
+      {Metadata::Independent, Metadata::Cell});
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
   auto hydro_pkg = pmb->packages.Get("Hydro");
 
