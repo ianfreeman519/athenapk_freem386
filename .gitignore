@@ -10,6 +10,9 @@ test_runs/
 test-suite-uct-ct-glm/
 suit_staging/
 
+# Validation folder
+validation/
+
 # Emacs autosave files
 \#*\#
 
