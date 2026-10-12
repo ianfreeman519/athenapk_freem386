@@ -29,6 +29,7 @@
 #include <vector>
 
 // AthenaPK headers
+#include "../eos/adiabatic_ctmhd.hpp"
 #include "../hydro/diffusion/diffusion.hpp"
 #include "../main.hpp"
 #include "../units.hpp"
@@ -78,7 +79,6 @@ struct SupportTable {
 // driving. Physical input values used only for reporting stay local to setup.
 struct PulsedReconnectionParams {
   // Thermodynamics and array geometry
-  Real gm1;
   Real k_b;
   Real m_bar;
   Real array_separation;
@@ -135,6 +135,7 @@ struct PulsedReconnectionParams {
 struct InitialState {
   Real rho;
   Real pressure;
+  Real specific_internal_energy;
   Real v1;
   Real v2;
   Real v3;
@@ -911,11 +912,10 @@ void WarnLegacyInputKeys(ParameterInput *pin) {
 }
 
 PulsedReconnectionParams
-LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInput *pin) {
+LoadSourceParams(StateDescriptor *hydro_pkg, ParameterInput *pin) {
   WarnLegacyInputKeys(pin);
   PulsedReconnectionParams params{};
 
-  params.gm1 = pin->GetReal("hydro", "gamma") - 1.0;
   params.drive_enable = pin->GetOrAddBoolean(kInputBlock, "drive_enable", false);
 
   // Initial profiles may be independently disabled. Only width-based kernels need
@@ -1123,15 +1123,18 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
              "Force-balance support is not implemented for confined_current; that "
              "profile contributes no magnetic pressure support.");
 
-  PARTHENON_REQUIRE(hydro_pkg->AllParams().hasKey("units") &&
-                        hydro_pkg->AllParams().hasKey("mbar") &&
-                        hydro_pkg->AllParams().hasKey("mbar_over_kb"),
-                    "pulsed_reconnection requires a <units> block and "
+  const auto &eos = hydro_pkg->Param<AdiabaticCTMHDEOS>("eos");
+  PARTHENON_REQUIRE(hydro_pkg->AllParams().hasKey("units"),
+                    "pulsed_reconnection requires a <units> block.");
+  PARTHENON_REQUIRE(eos.IsTabulated() ||
+                        (hydro_pkg->AllParams().hasKey("mbar") &&
+                         hydro_pkg->AllParams().hasKey("mbar_over_kb")),
+                    "Ideal-gas pulsed_reconnection requires gas composition, e.g. "
                     "hydro/He_mass_fraction.");
   // Convert once; kernels use only code units and temperatures in kelvin.
   const auto units = hydro_pkg->Param<Units>("units");
-  params.k_b = units.k_boltzmann();
-  params.m_bar = hydro_pkg->Param<Real>("mbar");
+  params.k_b = eos.IsTabulated() ? 0.0 : units.k_boltzmann();
+  params.m_bar = eos.IsTabulated() ? 1.0 : hydro_pkg->Param<Real>("mbar");
   params.rho_wire = rho_wire_cgs * units.g_cm3();
   params.rho_inner_reservoir = rho_inner_reservoir_cgs * units.g_cm3();
   params.inner_reservoir_radius = inner_reservoir_radius_cgs * units.cm();
@@ -1210,8 +1213,11 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   if (parthenon::Globals::my_rank == 0) {
     std::cout << "========================================" << '\n'
               << "Input parameters:" << '\n'
-              << "gamma ================== " << pin->GetReal("hydro", "gamma") << '\n'
-              << "B_peak [gauss] ========= " << B_peak_gauss << '\n'
+              << "EOS ==================== "
+              << (eos.IsTabulated() ? "tabulated" : "adiabatic ideal gas") << '\n';
+    if (!eos.IsTabulated())
+      std::cout << "gamma ================== " << eos.GetGamma() << '\n';
+    std::cout << "B_peak [gauss] ========= " << B_peak_gauss << '\n'
               << "drive_enable =========== " << params.drive_enable << '\n'
               << "drive_B_peak [gauss] === " << drive_B_peak_gauss << '\n'
               << "drive velocity [cm/s] == " << drive_velocity_peak_cgs << '\n'
@@ -1318,9 +1324,29 @@ LoadSourceParams(const std::shared_ptr<StateDescriptor> &hydro_pkg, ParameterInp
   return params;
 }
 
+KOKKOS_INLINE_FUNCTION Real SpecificInternalEnergyFromDensityTemperature(
+    const AdiabaticCTMHDEOS &eos, const PulsedReconnectionParams &params,
+    const Real rho, const Real temperature) {
+  if (!(rho > 0.0) || !(temperature > 0.0)) return 0.0;
+  if (eos.IsTabulated())
+    return eos.InternalEnergyFromDensityTemperature(rho, temperature);
+  const Real pressure = temperature * params.k_b * rho / params.m_bar;
+  return eos.InternalEnergyFromDensityPressure(rho, pressure);
+}
+
+KOKKOS_INLINE_FUNCTION Real PressureFromDensityTemperature(
+    const AdiabaticCTMHDEOS &eos, const PulsedReconnectionParams &params,
+    const Real rho, const Real temperature) {
+  if (!(rho > 0.0) || !(temperature > 0.0)) return 0.0;
+  const Real eps =
+      SpecificInternalEnergyFromDensityTemperature(eos, params, rho, temperature);
+  return eos.StateFromDensityInternalEnergy(rho, eps).pressure;
+}
+
 KOKKOS_INLINE_FUNCTION
 InitialState EvaluateInitialState(const PulsedReconnectionParams &params,
-                                  const Real x, const Real y) {
+                                  const AdiabaticCTMHDEOS &eos, const Real x,
+                                  const Real y) {
   InitialState state{};
   const Real d = params.array_separation / 2.0;
   Real T_profile_sum = 0.0;
@@ -1378,11 +1404,15 @@ InitialState EvaluateInitialState(const PulsedReconnectionParams &params,
               params.rho_inner_reservoir * rho_inner_reservoir_sum;
   const Real T = params.T_background + params.T_wire * T_profile_sum +
                  params.T_inner_reservoir * T_inner_reservoir_sum;
-  state.pressure =
-      T * params.k_b * state.rho / params.m_bar +
-      (params.initial_force_balance
-           ? SQR(params.initial_magnetic_profile_amplitude) * magnetic_support_sum
-           : 0.0);
+  const Real thermal_pressure =
+      PressureFromDensityTemperature(eos, params, state.rho, T);
+  const Real magnetic_pressure =
+      params.initial_force_balance
+          ? SQR(params.initial_magnetic_profile_amplitude) * magnetic_support_sum
+          : 0.0;
+  state.pressure = thermal_pressure + magnetic_pressure;
+  state.specific_internal_energy =
+      eos.InternalEnergyFromDensityPressure(state.rho, state.pressure);
   return state;
 }
 
@@ -1392,6 +1422,13 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   const auto fluid = hydro_pkg->Param<Fluid>("fluid");
   PARTHENON_REQUIRE(IsCTFluid(fluid),
                     "pulsed_reconnection requires a constrained-transport fluid.");
+
+  // Package initialization runs for both fresh starts and restarts, whereas the
+  // problem generator is skipped when state is restored from a restart file.
+  // Reconstruct the host-side source parameters here so time-dependent driving
+  // survives a restart.
+  g_source_params = LoadSourceParams(hydro_pkg, pin);
+  g_source_params_initialized = true;
 
   const auto diagnostics = RequestedDiagnostics(pin);
   hydro_pkg->AddParam<DiagnosticSelection>("pulsed_reconnection/diagnostics", diagnostics);
@@ -1433,16 +1470,16 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto &u = mbd->Get("cons").data;
   auto &bface = mbd->Get("Bface").data;
   auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto eos = hydro_pkg->Param<AdiabaticCTMHDEOS>("eos");
   PARTHENON_REQUIRE(pmb->pmy_mesh->ndim >= 2,
                     "pulsed_reconnection requires at least two dimensions.");
   if (!g_source_params_initialized) {
-    g_source_params = LoadSourceParams(hydro_pkg, pin);
+    g_source_params = LoadSourceParams(hydro_pkg.get(), pin);
     g_source_params_initialized = true;
   }
   const auto params = g_source_params;
 
   auto &coords = pmb->coords;
-  auto u_host = u.GetHostMirrorAndCopy();
   auto bface_host = bface.GetHostMirrorAndCopy();
   auto b1f = bface_host.Get(IBF1, 0, 0, 0);
   auto b2f = bface_host.Get(IBF2, 0, 0, 0);
@@ -1496,29 +1533,30 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     }
   }
 
-  for (int k = kb.s; k <= kb.e; ++k) {
-    for (int j = jb.s; j <= jb.e; ++j) {
-      for (int i = ib.s; i <= ib.e; ++i) {
-        const auto state = EvaluateInitialState(params, coords.Xc<1>(i), coords.Xc<2>(j));
-        const Real B1 = CellCenteredB1(b1f, k, j, i);
-        const Real B2 = CellCenteredB2(b2f, k, j, i);
+  bface.DeepCopy(bface_host);
+  const auto b1f_device = bface.Get(IBF1, 0, 0, 0);
+  const auto b2f_device = bface.Get(IBF2, 0, 0, 0);
+  pmb->par_for(
+      "pulsed_reconnection::InitializeCellState", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int k, const int j, const int i) {
+        const auto state =
+            EvaluateInitialState(params, eos, coords.Xc<1>(i), coords.Xc<2>(j));
+        const Real B1 = CellCenteredB1(b1f_device, k, j, i);
+        const Real B2 = CellCenteredB2(b2f_device, k, j, i);
         const Real B3 = 0.0;
-        u_host(IDN, k, j, i) = state.rho;
-        u_host(IM1, k, j, i) = state.rho * state.v1;
-        u_host(IM2, k, j, i) = state.rho * state.v2;
-        u_host(IM3, k, j, i) = state.rho * state.v3;
-        u_host(IB1, k, j, i) = B1;
-        u_host(IB2, k, j, i) = B2;
-        u_host(IB3, k, j, i) = B3;
-        u_host(IEN, k, j, i) = state.pressure / params.gm1 +
+        u(IDN, k, j, i) = state.rho;
+        u(IM1, k, j, i) = state.rho * state.v1;
+        u(IM2, k, j, i) = state.rho * state.v2;
+        u(IM3, k, j, i) = state.rho * state.v3;
+        u(IB1, k, j, i) = B1;
+        u(IB2, k, j, i) = B2;
+        u(IB3, k, j, i) = B3;
+        u(IEN, k, j, i) =
+            state.rho * state.specific_internal_energy +
             0.5 * (SQR(B1) + SQR(B2) + SQR(B3) +
                    state.rho *
                        (SQR(state.v1) + SQR(state.v2) + SQR(state.v3)));
-      }
-    }
-  }
-  bface.DeepCopy(bface_host);
-  u.DeepCopy(u_host);
+      });
 }
 
 // Driving -----------------------------------------------------------------------------
@@ -1530,6 +1568,8 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
 
   auto cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
   auto bface_pack = md->PackVariables(std::vector<std::string>{"Bface"});
+  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const auto eos = hydro_pkg->Param<AdiabaticCTMHDEOS>("eos");
   IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
   IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
   IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
@@ -1681,9 +1721,11 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
             (support.inner_reservoir_weight > 0.0
                  ? params.T_background + support.T_inner_floor
                  : 0.0);
+        const Real injected_specific_internal_energy =
+            SpecificInternalEnergyFromDensityTemperature(eos, params, rho_new,
+                                                         supported_T_floor);
         const Real injected_internal_energy =
-            delta_rho * params.k_b * supported_T_floor /
-            (params.m_bar * params.gm1);
+            delta_rho * injected_specific_internal_energy;
         cons(IEN, k, j, i) += injected_kinetic_energy + injected_internal_energy;
 
         const Real momentum_sq = SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
@@ -1694,18 +1736,27 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
             rho_new > 0.0 ? 0.5 * momentum_sq / rho_new : 0.0;
         const Real internal_energy =
             fmax(0.0, cons(IEN, k, j, i) - kinetic_energy - magnetic_energy);
-        const Real pressure = params.gm1 * internal_energy;
+        const Real pressure =
+            rho_new > 0.0 && internal_energy > 0.0
+                ? eos.StateFromDensityInternalEnergy(rho_new,
+                                                     internal_energy / rho_new)
+                      .pressure
+                : 0.0;
         // Enforce, but never overwrite downward to, the sum of the independently
         // profiled temperature floor and instantaneous magnetic force-balance support.
-        const Real thermal_pressure_floor =
-            rho_new > 0.0
-                ? supported_T_floor * params.k_b * rho_new / params.m_bar
-                : 0.0;
+        const Real thermal_pressure_floor = PressureFromDensityTemperature(
+            eos, params, rho_new, supported_T_floor);
         const Real target_pressure = thermal_pressure_floor + magnetic_support;
+        const Real target_internal_energy =
+            rho_new > 0.0 && target_pressure > pressure
+                ? rho_new * eos.InternalEnergyFromDensityPressure(rho_new,
+                                                                  target_pressure)
+                : internal_energy;
         const Real delta_internal_energy =
-            target_pressure > pressure ? (target_pressure - pressure) / params.gm1 : 0.0;
+            fmax(0.0, target_internal_energy - internal_energy);
         cons(IEN, k, j, i) += delta_internal_energy;
       });
+  eos.CheckDiagnostics("pulsed-reconnection driving source");
 }
 
 // Refinement --------------------------------------------------------------------------
@@ -1900,13 +1951,23 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput * /*pin*/,
 
   if (diagnostics.T) {
     auto &out = mbd->Get("T").data;
-    auto &u = mbd->Get("cons").data;
-    auto &w = mbd->Get("prim").data;
-    const Real mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
-    pmb->par_for("pulsed_reconnection::T", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
-                 KOKKOS_LAMBDA(const int k, const int j, const int i) {
-                   out(k, j, i) = mbar_over_kb * w(IPR, k, j, i) / u(IDN, k, j, i);
-                 });
+    const auto eos = hydro_pkg->Param<AdiabaticCTMHDEOS>("eos");
+    if (eos.IsTabulated()) {
+      auto &temperature = mbd->Get("eos_temperature").data;
+      pmb->par_for("pulsed_reconnection::T", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                   KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                     out(k, j, i) = temperature(k, j, i);
+                   });
+    } else {
+      auto &u = mbd->Get("cons").data;
+      auto &w = mbd->Get("prim").data;
+      const Real mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
+      pmb->par_for("pulsed_reconnection::T", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+                   KOKKOS_LAMBDA(const int k, const int j, const int i) {
+                     out(k, j, i) =
+                         mbar_over_kb * w(IPR, k, j, i) / u(IDN, k, j, i);
+                   });
+    }
   }
 
   if (diagnostics.beta) {

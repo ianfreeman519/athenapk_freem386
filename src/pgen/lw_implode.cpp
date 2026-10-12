@@ -16,6 +16,7 @@
 
 // Athena headers
 #include "../main.hpp"
+#include "../eos/adiabatic_hydro.hpp"
 #include "utils/error_checking.hpp"
 
 namespace lw_implode {
@@ -37,7 +38,7 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
   auto d_out = pin->GetReal("problem/lw_implode", "d_out");
   auto p_out = pin->GetReal("problem/lw_implode", "p_out");
 
-  auto gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  const auto eos = hydro_pkg->Param<AdiabaticHydroEOS>("eos");
 
   // initialize conserved variables
   auto &mbd = pmb->meshblock_data.Get();
@@ -67,10 +68,11 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
         cons(IM3, k, j, i) = 0.0;
         if (coords.Xc<2>(j) > (y0 - coords.Xc<1>(i))) {
           cons(IDN, k, j, i) = d_out;
-          cons(IEN, k, j, i) = p_out / gm1;
+          cons(IEN, k, j, i) =
+              d_out * eos.InternalEnergyFromDensityPressure(d_out, p_out);
         } else {
           cons(IDN, k, j, i) = d_in;
-          cons(IEN, k, j, i) = p_in / gm1;
+          cons(IEN, k, j, i) = d_in * eos.InternalEnergyFromDensityPressure(d_in, p_in);
         }
       });
 }

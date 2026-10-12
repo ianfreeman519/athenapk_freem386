@@ -627,6 +627,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
 
   auto eos_str = pin->GetString("hydro", "eos");
   if (eos_str == "adiabatic") {
+    pkg->AddParam<>("eos_type", eos_str);
     Real gamma = pin->GetReal("hydro", "gamma");
     pkg->AddParam<>("AdiabaticIndex", gamma);
 
@@ -958,6 +959,90 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       pkg->FillDerivedMesh = ConsToPrim<AdiabaticCTMHDEOS>;
       pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::ctmhd>;
     }
+  } else if (eos_str == "tabulated") {
+    PARTHENON_REQUIRE_THROWS(
+        riemann == RiemannSolver::hlle || riemann == RiemannSolver::llf ||
+            riemann == RiemannSolver::none,
+        "The tabulated EOS currently supports only HLLE/LLF Riemann solvers.");
+    PARTHENON_REQUIRE_THROWS(
+        fluid == Fluid::euler || fluid == Fluid::glmmhd || fluid == Fluid::ucthllemhd,
+        "The tabulated EOS supports euler, glmmhd, and ucthllemhd fluids.");
+    PARTHENON_REQUIRE_THROWS(pin->DoesBlockExist("units"),
+                             "The tabulated EOS requires a <units> block.");
+    const auto filename = pin->GetString("tabulated_eos", "filename");
+    const auto density_factor = pin->GetReal("tabulated_eos", "density_to_code");
+    const auto energy_factor =
+        pin->GetReal("tabulated_eos", "specific_internal_energy_to_code");
+    const auto pressure_factor = pin->GetReal("tabulated_eos", "pressure_to_code");
+    const auto sound_speed_factor = pin->GetReal("tabulated_eos", "sound_speed_to_code");
+    const auto temperature_factor =
+        pin->GetReal("tabulated_eos", "temperature_to_kelvin");
+    const auto mean_ion_mass =
+        pin->GetReal("tabulated_eos", "mean_ion_mass_hydrogen");
+    const auto table = TabulatedEOS::Load(filename, density_factor, energy_factor,
+                                          pressure_factor, sound_speed_factor,
+                                          temperature_factor, mean_ion_mass);
+    if (pin->DoesParameterExist("tabulated_eos", "fingerprint")) {
+      PARTHENON_REQUIRE_THROWS(
+          pin->GetString("tabulated_eos", "fingerprint") == table.Fingerprint(),
+          "The tabulated EOS file or its normalization differs from the restart input.");
+    } else {
+      pin->SetString("tabulated_eos", "fingerprint", table.Fingerprint());
+    }
+    pkg->AddParam<>("tabulated_eos_fingerprint", table.Fingerprint());
+    pkg->AddParam<>("eos_type", eos_str);
+
+    const auto problem_id = pin->GetString("job", "problem_id");
+    if (problem_id == "linear_wave" || problem_id == "linear_wave_mhd" ||
+        problem_id == "cpaw" || problem_id == "smooth_mhd_vortex") {
+      PARTHENON_WARN("Problem generator '" + problem_id +
+                     "' has a constant-gamma analytic reference and is not a "
+                     "general-EOS validation problem.");
+    }
+
+    const Real dfloor = pin->GetOrAddReal("hydro", "dfloor", -1.0);
+    const Real pfloor = pin->GetOrAddReal("hydro", "pfloor", -1.0);
+    const Real efloor = pin->GetOrAddReal("hydro", "efloor", -1.0);
+    const Real Tfloor = pin->GetOrAddReal("hydro", "Tfloor", -1.0);
+    const Real vceil =
+        pin->GetOrAddReal("hydro", "vceil", std::numeric_limits<Real>::infinity());
+    const Real eceil =
+        pin->GetOrAddReal("hydro", "eceil", std::numeric_limits<Real>::infinity());
+    const Real Tceil =
+        pin->GetOrAddReal("hydro", "Tceil", std::numeric_limits<Real>::infinity());
+
+    PARTHENON_REQUIRE_THROWS(
+        pin->GetOrAddString("diffusion", "conduction", "none") == "none" &&
+            pin->GetOrAddString("diffusion", "viscosity", "none") == "none" &&
+            pin->GetOrAddString("diffusion", "resistivity", "none") == "none",
+        "Diffusion/transport is not yet supported with hydro/eos=tabulated.");
+    PARTHENON_REQUIRE_THROWS(
+        pin->GetOrAddString("cooling", "enable_cooling", "none") == "none",
+        "Tabular cooling is not yet supported with hydro/eos=tabulated.");
+    pkg->AddParam<>("conduction", Conduction::none);
+    pkg->AddParam<>("viscosity", Viscosity::none);
+    pkg->AddParam<>("resistivity", Resistivity::none);
+    pkg->AddParam<>("diffint", DiffInt::none);
+    pkg->AddParam<Real>("dt_diff", std::numeric_limits<Real>::max(),
+                        Params::Mutability::Mutable);
+
+    if (fluid == Fluid::euler) {
+      AdiabaticHydroEOS eos(pfloor, dfloor, efloor, vceil, eceil, table, Tfloor, Tceil);
+      pkg->AddParam<>("eos", eos);
+      pkg->FillDerivedMesh = ConsToPrim<AdiabaticHydroEOS>;
+      pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::euler>;
+    } else if (fluid == Fluid::glmmhd) {
+      AdiabaticGLMMHDEOS eos(pfloor, dfloor, efloor, vceil, eceil, table, Tfloor, Tceil);
+      pkg->AddParam<>("eos", eos);
+      pkg->FillDerivedMesh = ConsToPrim<AdiabaticGLMMHDEOS>;
+      pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::glmmhd>;
+    } else {
+      AdiabaticCTMHDEOS eos(pfloor, dfloor, efloor, vceil, eceil, table, Tfloor, Tceil);
+      pkg->AddParam<>("eos", eos);
+      pkg->PreFillDerivedMesh = Hydro::CTMHD::center_Mag_Field;
+      pkg->FillDerivedMesh = ConsToPrim<AdiabaticCTMHDEOS>;
+      pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::ctmhd>;
+    }
   } else {
     PARTHENON_FAIL("AthenaPK hydro: Unknown EOS");
   }
@@ -1053,6 +1138,15 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   m = Metadata({Metadata::Cell, Metadata::Derived}, std::vector<int>({nhydro + nscalars}),
                prim_labels);
   pkg->AddField("prim", m);
+
+  if (eos_str == "tabulated") {
+    Metadata eos_m({Metadata::Cell, Metadata::Derived});
+    pkg->AddField("eos_temperature", eos_m);
+    pkg->AddField("eos_sound_speed", eos_m);
+    pkg->AddField("eos_zbar", eos_m);
+    pkg->AddField("eos_mu", eos_m);
+    pkg->AddField("eos_mu_e", eos_m);
+  }
 
   if (IsCTFluid(fluid)) {
     // gives us 3 face vectors accessed like
@@ -1235,6 +1329,8 @@ Real EstimateHyperbolicTimestep(MeshData<Real> *md) {
       },
       Kokkos::Min<Real>(min_dt_hyperbolic));
 
+  eos_.CheckDiagnostics("hyperbolic timestep estimate");
+
   // TODO(pgrete) THIS WORKAROUND IS NOT THREAD SAFE (though this will only become
   // relevant once parthenon uses host-multithreading in the driver).
   // We need to save the the hyperbolic part to recover it later as
@@ -1360,6 +1456,7 @@ TaskStatus CalculateFluxesTight(std::shared_ptr<MeshData<Real>> &md) {
         }
       });
 
+  eos.CheckDiagnostics("tight flux calculation");
   return TaskStatus::complete;
 }
 
@@ -1641,6 +1738,7 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
     CalcDiffFluxes(pkg.get(), md.get());
   }
 
+  eos.CheckDiagnostics("flux calculation");
   return TaskStatus::complete;
 }
 
@@ -1773,6 +1871,7 @@ TaskStatus FirstOrderFluxCorrect(MeshData<Real> *u0_data, MeshData<Real> *u1_dat
     num_attempts += 1;
   } while (num_corrected > 0 && num_attempts < 4);
 
+  eos.CheckDiagnostics("first-order flux correction");
   return TaskStatus::complete;
 }
 

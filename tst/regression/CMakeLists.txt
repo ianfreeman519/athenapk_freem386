@@ -22,6 +22,9 @@ endfunction()
 setup_test_both("riemann_hydro" "--driver ${PROJECT_BINARY_DIR}/bin/athenaPK \
   --driver_input ${PROJECT_SOURCE_DIR}/inputs/sod.in --num_steps 39" "other")
 
+setup_test_both("tabulated_eos" "--driver ${PROJECT_BINARY_DIR}/bin/athenaPK \
+  --driver_input ${PROJECT_SOURCE_DIR}/inputs/tabulated_sod.in --num_steps 1" "other")
+
 setup_test_both("turbulence" "--driver ${PROJECT_BINARY_DIR}/bin/athenaPK \
   --driver_input ${PROJECT_SOURCE_DIR}/inputs/turbulence.in --num_steps 1" "other")
 

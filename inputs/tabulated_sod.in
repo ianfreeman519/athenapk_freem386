@@ -1,0 +1,72 @@
+<comment>
+problem = Sod-like shock tube using the aluminum three-chart EOS
+
+<job>
+problem_id = sod
+
+<problem/sod>
+rho_l = 1.0
+pres_l = 1.0e6
+u_l = 0.0
+rho_r = 0.125
+pres_r = 1.0e5
+u_r = 0.0
+x_discont = 0.5
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+nx1 = 128
+x1min = 0.0
+x1max = 1.0
+ix1_bc = outflow
+ox1_bc = outflow
+nx2 = 1
+x2min = -0.5
+x2max = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+nx3 = 1
+x3min = -0.5
+x3max = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/meshblock>
+nx1 = 64
+nx2 = 1
+nx3 = 1
+
+<parthenon/output0>
+file_type = hdf5
+dt = 1.0e-6
+variables = prim,cons,eos_temperature,eos_sound_speed,eos_zbar,eos_mu,eos_mu_e
+id = tabulated
+
+<parthenon/time>
+integrator = vl2
+cfl = 0.3
+tlim = 1.0e-6
+nlim = 100
+
+# These base units make one code density, pressure, specific energy, and velocity
+# numerically equal to one kg/m^3, Pa, J/kg, and m/s, respectively.
+<units>
+code_length_cgs = 100.0
+code_mass_cgs = 1000.0
+code_time_cgs = 1.0
+
+<hydro>
+fluid = euler
+eos = tabulated
+riemann = hlle
+reconstruction = plm
+
+<tabulated_eos>
+filename = inputs/tables/tabulated_eos.h5
+density_to_code = 1.0
+specific_internal_energy_to_code = 1.0
+pressure_to_code = 1.0
+sound_speed_to_code = 1.0
+temperature_to_kelvin = 11604.51812155008
+mean_ion_mass_hydrogen = 27.0

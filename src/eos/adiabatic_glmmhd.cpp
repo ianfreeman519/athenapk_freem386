@@ -53,4 +53,35 @@ void AdiabaticGLMMHDEOS::ConservedToPrimitive(MeshData<Real> *md) const {
 
         return this_on_device.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i);
       });
+  if (IsTabulated()) {
+    parthenon::PackIndexMap eos_map;
+    auto eos_pack = md->PackVariables(std::vector<std::string>{
+        "eos_temperature", "eos_sound_speed", "eos_zbar", "eos_mu", "eos_mu_e"}, eos_map);
+    const int iT = eos_map["eos_temperature"].first;
+    const int ics = eos_map["eos_sound_speed"].first;
+    const int iz = eos_map["eos_zbar"].first;
+    const int imu = eos_map["eos_mu"].first;
+    const int imue = eos_map["eos_mu_e"].first;
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "FillTabulatedEOSFieldsGLM", parthenon::DevExecSpace(), 0,
+        cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          const auto &u = cons_pack(b);
+          auto &out = eos_pack(b);
+          const Real rho = u(IDN, k, j, i);
+          const Real ek = 0.5 / rho *
+                          (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) +
+                           SQR(u(IM3, k, j, i)));
+          const Real eb = 0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
+                                 SQR(u(IB3, k, j, i)));
+          const auto s = this_on_device.StateFromDensityInternalEnergy(
+              rho, (u(IEN, k, j, i) - ek - eb) / rho);
+          out(iT, k, j, i) = s.temperature;
+          out(ics, k, j, i) = s.sound_speed;
+          out(iz, k, j, i) = s.zbar;
+          out(imu, k, j, i) = s.mu;
+          out(imue, k, j, i) = s.mu_e;
+        });
+  }
+  CheckDiagnostics("GLM-MHD conserved-to-primitive conversion");
 }

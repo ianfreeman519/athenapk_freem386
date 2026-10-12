@@ -48,7 +48,6 @@ struct Riemann<Fluid::euler, RiemannSolver::llf> {
                                            const Real /* c_h */) {
     const int ivy = IV1 + ((ivx - IV1) + 1) % 3;
     const int ivz = IV1 + ((ivx - IV1) + 2) % 3;
-    const Real igm1 = 1.0 / (eos.GetGamma() - 1.0);
 
     //--- Step 1.  Use first order reconstruction
     Real wli[(NHYDRO)];
@@ -91,9 +90,9 @@ struct Riemann<Fluid::euler, RiemannSolver::llf> {
     fsum.mz = qa * wli[IV3] + qb * wri[IV3];
 
     Real el, er;
-    el = wli[IPR] * igm1 +
+    el = wli[IDN] * eos.InternalEnergyFromDensityPressure(wli[IDN], wli[IPR]) +
          0.5 * wli[IDN] * (SQR(wli[IV1]) + SQR(wli[IV2]) + SQR(wli[IV3]));
-    er = wri[IPR] * igm1 +
+    er = wri[IDN] * eos.InternalEnergyFromDensityPressure(wri[IDN], wri[IPR]) +
          0.5 * wri[IDN] * (SQR(wri[IV1]) + SQR(wri[IV2]) + SQR(wri[IV3]));
     fsum.mx += (wli[IPR] + wri[IPR]);
     fsum.e = (el + wli[IPR]) * wli[IV1] + (er + wri[IPR]) * wri[IV1];

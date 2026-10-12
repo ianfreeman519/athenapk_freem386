@@ -36,14 +36,11 @@ struct Riemann<Fluid::glmmhd, RiemannSolver::hlle> {
     const int iBy = ivy - 1 + NHYDRO;
     const int iBz = ivz - 1 + NHYDRO;
 
-    const auto gamma = eos.GetGamma();
-    const auto gm1 = gamma - 1.0;
-
     // TODO(pgrete) move to a more central center and add logic
     constexpr int NGLMMHD = 9;
 
     parthenon::par_for_inner(member, il, iu, [&](const int i) {
-      Real wli[NGLMMHD], wri[NGLMMHD], flxi[NGLMMHD], wroe[NGLMMHD], fl[NGLMMHD],
+      Real wli[NGLMMHD], wri[NGLMMHD], flxi[NGLMMHD], fl[NGLMMHD],
           fr[NGLMMHD];
 
       //--- Step 1.  Load L/R states into local variables
@@ -75,33 +72,14 @@ struct Riemann<Fluid::glmmhd, RiemannSolver::hlle> {
       flxi[IB1] = psii;
       flxi[IPS] = SQR(c_h) * bxi;
 
-      //--- Step 2. Compute Roe-averaged state
-
-      Real sqrtdl = std::sqrt(wli[IDN]);
-      Real sqrtdr = std::sqrt(wri[IDN]);
-      Real isdlpdr = 1.0 / (sqrtdl + sqrtdr);
-
-      wroe[IDN] = sqrtdl * sqrtdr;
-      wroe[IV1] = (sqrtdl * wli[IV1] + sqrtdr * wri[IV1]) * isdlpdr;
-      wroe[IV2] = (sqrtdl * wli[IV2] + sqrtdr * wri[IV2]) * isdlpdr;
-      wroe[IV3] = (sqrtdl * wli[IV3] + sqrtdr * wri[IV3]) * isdlpdr;
-      // Note Roe average of magnetic field is different
-      wroe[IB2] = (sqrtdr * wli[IB2] + sqrtdl * wri[IB2]) * isdlpdr;
-      wroe[IB3] = (sqrtdr * wli[IB3] + sqrtdl * wri[IB3]) * isdlpdr;
-      Real x = 0.5 * (SQR(wli[IB2] - wri[IB2]) + SQR(wli[IB3] - wri[IB3])) /
-               (SQR(sqrtdl + sqrtdr));
-      Real y = 0.5 * (wli[IDN] + wri[IDN]) / wroe[IDN];
-
-      // Following Roe(1981), the enthalpy H=(E+P)/d is averaged for adiabatic flows,
-      // rather than E or P directly. sqrtdl*hl = sqrtdl*(el+pl)/dl = (el+pl)/sqrtdl
+      // Build conservative left/right states through the selected EOS.
       Real pbl = 0.5 * (bxi * bxi + SQR(wli[IB2]) + SQR(wli[IB3]));
       Real pbr = 0.5 * (bxi * bxi + SQR(wri[IB2]) + SQR(wri[IB3]));
-      Real el, er, hroe;
-      el = wli[IPR] / gm1 +
+      Real el, er;
+      el = wli[IDN] * eos.InternalEnergyFromDensityPressure(wli[IDN], wli[IPR]) +
            0.5 * wli[IDN] * (SQR(wli[IV1]) + SQR(wli[IV2]) + SQR(wli[IV3])) + pbl;
-      er = wri[IPR] / gm1 +
+      er = wri[IDN] * eos.InternalEnergyFromDensityPressure(wri[IDN], wri[IPR]) +
            0.5 * wri[IDN] * (SQR(wri[IV1]) + SQR(wri[IV2]) + SQR(wri[IV3])) + pbr;
-      hroe = ((el + wli[IPR] + pbl) / sqrtdl + (er + wri[IPR] + pbr) / sqrtdr) * isdlpdr;
 
       //--- Step 3. Compute fast magnetosonic speed in L,R, and Roe-averaged states
 
@@ -110,26 +88,9 @@ struct Riemann<Fluid::glmmhd, RiemannSolver::hlle> {
       Real cr =
           eos.FastMagnetosonicSpeed(wri[IDN], wri[IPR], wri[IB1], wri[IB2], wri[IB3]);
 
-      // Compute fast-magnetosonic speed using eq. B18 (adiabatic) or B39 (isothermal)
-      Real btsq = SQR(wroe[IB2]) + SQR(wroe[IB3]);
-      Real vaxsq = bxi * bxi / wroe[IDN];
-      Real bt_starsq, twid_asq;
-      bt_starsq = (gm1 - (gm1 - 1.0) * y) * btsq;
-      Real hp = hroe - (vaxsq + btsq / wroe[IDN]);
-      Real vsq = SQR(wroe[IV1]) + SQR(wroe[IV2]) + SQR(wroe[IV3]);
-      twid_asq = std::max((gm1 * (hp - 0.5 * vsq) - (gm1 - 1.0) * x), 0.0);
-      Real ct2 = bt_starsq / wroe[IDN];
-      Real tsum = vaxsq + ct2 + twid_asq;
-      Real tdif = vaxsq + ct2 - twid_asq;
-      Real cf2_cs2 = std::sqrt(tdif * tdif + 4.0 * twid_asq * ct2);
-
-      Real cfsq = 0.5 * (tsum + cf2_cs2);
-      Real a = std::sqrt(cfsq);
-
-      //--- Step 4. Compute the max/min wave speeds based on L/R and Roe-averaged values
-
-      Real al = std::min((wroe[IV1] - a), (wli[IV1] - cl));
-      Real ar = std::max((wroe[IV1] + a), (wri[IV1] + cr));
+      // Davis bounds work with a general EOS and its supplied sound speed.
+      Real al = std::min(wli[IV1] - cl, wri[IV1] - cr);
+      Real ar = std::max(wli[IV1] + cl, wri[IV1] + cr);
 
       Real bp = ar > 0.0 ? ar : 0.0;
       Real bm = al < 0.0 ? al : 0.0;

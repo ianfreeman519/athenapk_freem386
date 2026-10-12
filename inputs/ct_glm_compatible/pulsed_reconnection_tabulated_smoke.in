@@ -1,0 +1,123 @@
+# Reduced CT-MHD pulsed-reconnection test for the aluminum tabulated EOS.
+
+<job>
+problem_id = pulsed_reconnection
+
+<units>
+code_length_cgs = 1.0
+code_mass_cgs = 1.0
+code_time_cgs = 1e-7
+
+<problem/pulsed_reconnection>
+B_peak_gauss = 2.0e2
+rho_wire = 2.7e-4
+T_wire = 2.0e5
+rho_background = 1.0e-7
+T_background = 2.0e3
+v0 = 0.0
+w_initial_rho = 0.8
+w_initial_T = 0.8
+w_B = 0.8
+array_separation = 6.0
+N = 0
+density_perturb_amplitude = 0.0
+temperature_perturb_amplitude = 0.0
+initial_rho_profile = wendland
+initial_T_profile = wendland
+initial_magnetic_profile = wendland
+initial_force_balance = true
+
+drive_enable = true
+drive_B_peak_gauss = 3.0e2
+drive_t_peak_ns = 10.0
+drive_rho_profile = wendland
+drive_rho_time_profile = sin2
+drive_rho_profile_floor = 1.0e-3
+w_drive_rho = 0.8
+drive_T_profile = wendland
+drive_T_time_profile = sin2
+drive_T_profile_floor = 1.0e6
+w_drive_T = 0.8
+drive_magnetic_profile = wendland
+w_drive_magnetic = 0.8
+drive_force_balance = true
+drive_velocity_mode = injected_mass
+drive_velocity_time_profile = sin2
+drive_velocity_peak = 1.0e6
+drive_velocity_inner_radius = 0.2
+drive_velocity_outer_radius = 0.8
+drive_velocity_transition_width = 0.1
+
+<parthenon/meshblock>
+nx1 = 16
+nx2 = 32
+nx3 = 1
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+nx1 = 32
+x1min = -6.0
+x1max = 6.0
+ix1_bc = outflow
+ox1_bc = outflow
+nx2 = 32
+x2min = -6.0
+x2max = 6.0
+ix2_bc = outflow
+ox2_bc = outflow
+nx3 = 1
+x3min = -1.0
+x3max = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<hydro>
+scratch_level = 1
+fluid = ucthllemhd
+eos = tabulated
+riemann = hlle
+reconstruction = plm
+dfloor = 1.0e-12
+Tfloor = 2.0e3
+
+<tabulated_eos>
+filename = inputs/tables/tabulated_eos.h5
+density_to_code = 1.0e-3
+specific_internal_energy_to_code = 1.0e-10
+pressure_to_code = 1.0e-13
+sound_speed_to_code = 1.0e-5
+temperature_to_kelvin = 11604.51812155008
+mean_ion_mass_hydrogen = 27.0
+
+<diffusion>
+integrator = unsplit
+cfl = 0.3
+conduction = none
+viscosity = none
+resistivity = none
+
+<cooling>
+enable_cooling = none
+
+<parthenon/time>
+integrator = rk2
+cfl = 0.3
+tlim = 0.15
+nlim = 10000
+
+<parthenon/output0>
+file_type = hdf5
+dt = 0.05
+id = tabulated_smoke
+variables = prim,cons,Bface,eos_temperature,eos_sound_speed,eos_zbar,eos_mu,eos_mu_e,curlBz,divB,divv,beta,T
+
+<parthenon/output1>
+file_type = hst
+dn = 1
+id = tabulated_smoke
+
+<parthenon/output2>
+file_type = rst
+dt = 0.075
+id = tabulated_smoke

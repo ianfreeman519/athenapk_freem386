@@ -10,6 +10,7 @@
 
 // Athena headers
 #include "../main.hpp"
+#include "../eos/adiabatic_hydro.hpp"
 
 namespace sod {
 using namespace parthenon::driver::prelude;
@@ -28,7 +29,7 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
   Real u_r = pin->GetOrAddReal("problem/sod", "u_r", 0.0);
   Real x_discont = pin->GetOrAddReal("problem/sod", "x_discont", 0.5);
 
-  Real gamma = pin->GetReal("hydro", "gamma");
+  const auto &eos = hydro_pkg->Param<AdiabaticHydroEOS>("eos");
 
   // initialize conserved variables
   auto &mbd = pmb->meshblock_data.Get();
@@ -41,11 +42,15 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
         if (coords.Xc<1>(i) < x_discont) {
           cons(IDN, k, j, i) = rho_l;
           cons(IM1, k, j, i) = rho_l * u_l;
-          cons(IEN, k, j, i) = 0.5 * rho_l * u_l * u_l + pres_l / (gamma - 1.0);
+          cons(IEN, k, j, i) =
+              0.5 * rho_l * u_l * u_l +
+              rho_l * eos.InternalEnergyFromDensityPressure(rho_l, pres_l);
         } else {
           cons(IDN, k, j, i) = rho_r;
           cons(IM1, k, j, i) = rho_r * u_r;
-          cons(IEN, k, j, i) = 0.5 * rho_r * u_r * u_r + pres_r / (gamma - 1.0);
+          cons(IEN, k, j, i) =
+              0.5 * rho_r * u_r * u_r +
+              rho_r * eos.InternalEnergyFromDensityPressure(rho_r, pres_r);
         }
       });
 }

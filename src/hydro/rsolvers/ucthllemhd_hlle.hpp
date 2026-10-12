@@ -24,7 +24,6 @@ struct Riemann<Fluid::ucthllemhd, RiemannSolver::hlle> {
     const int iBx = ivx - 1 + NHYDRO;
     const int iBy = ivy - 1 + NHYDRO;
     const int iBz = ivz - 1 + NHYDRO;
-    const Real igm1 = 1.0 / (eos.GetGamma() - 1.0);
 
     parthenon::par_for_inner(member, il, iu, [&](const int i) {
       const Real dl = wl(IDN, i);
@@ -46,9 +45,9 @@ struct Riemann<Fluid::ucthllemhd, RiemannSolver::hlle> {
 
       const Real pbl = 0.5 * (SQR(bx) + SQR(byl) + SQR(bzl));
       const Real pbr = 0.5 * (SQR(bx) + SQR(byr) + SQR(bzr));
-      const Real el = pl * igm1 +
+      const Real el = dl * eos.InternalEnergyFromDensityPressure(dl, pl) +
                       0.5 * dl * (SQR(vxl) + SQR(vyl) + SQR(vzl)) + pbl;
-      const Real er = pr * igm1 +
+      const Real er = dr * eos.InternalEnergyFromDensityPressure(dr, pr) +
                       0.5 * dr * (SQR(vxr) + SQR(vyr) + SQR(vzr)) + pbr;
 
       const Real cfl = eos.FastMagnetosonicSpeed(dl, pl, bx, byl, bzl);

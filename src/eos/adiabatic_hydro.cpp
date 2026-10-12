@@ -52,4 +52,33 @@ void AdiabaticHydroEOS::ConservedToPrimitive(MeshData<Real> *md) const {
 
         return this_on_device.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i);
       });
+  if (IsTabulated()) {
+    parthenon::PackIndexMap eos_map;
+    auto eos_pack = md->PackVariables(std::vector<std::string>{
+        "eos_temperature", "eos_sound_speed", "eos_zbar", "eos_mu", "eos_mu_e"}, eos_map);
+    const int iT = eos_map["eos_temperature"].first;
+    const int ics = eos_map["eos_sound_speed"].first;
+    const int iz = eos_map["eos_zbar"].first;
+    const int imu = eos_map["eos_mu"].first;
+    const int imue = eos_map["eos_mu_e"].first;
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "FillTabulatedEOSFields", parthenon::DevExecSpace(), 0,
+        cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          const auto &cons = cons_pack(b);
+          auto &out = eos_pack(b);
+          const Real rho = cons(IDN, k, j, i);
+          const Real ek = 0.5 / rho * (SQR(cons(IM1, k, j, i)) +
+                                       SQR(cons(IM2, k, j, i)) +
+                                       SQR(cons(IM3, k, j, i)));
+          const auto state = this_on_device.StateFromDensityInternalEnergy(
+              rho, (cons(IEN, k, j, i) - ek) / rho);
+          out(iT, k, j, i) = state.temperature;
+          out(ics, k, j, i) = state.sound_speed;
+          out(iz, k, j, i) = state.zbar;
+          out(imu, k, j, i) = state.mu;
+          out(imue, k, j, i) = state.mu_e;
+        });
+  }
+  CheckDiagnostics("hydro conserved-to-primitive conversion");
 }

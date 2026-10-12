@@ -53,7 +53,6 @@ struct Riemann<Fluid::glmmhd, RiemannSolver::llf> {
     const int iBx = ivx - 1 + NHYDRO;
     const int iBy = ivy - 1 + NHYDRO;
     const int iBz = ivz - 1 + NHYDRO;
-    const Real igm1 = 1.0 / (eos.GetGamma() - 1.0);
 
     //--- Step 1.  Use first order reconstruction
     Real wli[(NGLMMHD)];
@@ -120,9 +119,9 @@ struct Riemann<Fluid::glmmhd, RiemannSolver::llf> {
     fsum.bz = wli[IB3] * wli[IV1] + wri[IB3] * wri[IV1] - bxi * (wli[IV3] + wri[IV3]);
 
     Real el, er;
-    el = wli[IPR] * igm1 +
+    el = wli[IDN] * eos.InternalEnergyFromDensityPressure(wli[IDN], wli[IPR]) +
          0.5 * wli[IDN] * (SQR(wli[IV1]) + SQR(wli[IV2]) + SQR(wli[IV3])) + qc + SQR(bxi);
-    er = wri[IPR] * igm1 +
+    er = wri[IDN] * eos.InternalEnergyFromDensityPressure(wri[IDN], wri[IPR]) +
          0.5 * wri[IDN] * (SQR(wri[IV1]) + SQR(wri[IV2]) + SQR(wri[IV3])) + qd + SQR(bxi);
     fsum.mx += (wli[IPR] + wri[IPR]);
     fsum.e = (el + wli[IPR] + qc) * wli[IV1] + (er + wri[IPR] + qd) * wri[IV1];

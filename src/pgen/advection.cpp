@@ -28,6 +28,7 @@
 
 // AthenaPK headers
 #include "../main.hpp"
+#include "../eos/adiabatic_hydro.hpp"
 
 namespace advection {
 using namespace parthenon::driver::prelude;
@@ -87,18 +88,16 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   const auto p0 = pin->GetOrAddReal("problem/advection", "p0", 1.0);
   Real sigmasq = -rho_radius * rho_radius / 2 / std::log(rho_fraction_edge);
 
-  auto gam = pin->GetReal("hydro", "gamma");
-  auto gm1 = (gam - 1.0);
+  auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto eos = hydro_pkg->Param<AdiabaticHydroEOS>("eos");
 
   // initialize conserved variables
   auto &rc = pmb->meshblock_data.Get();
-  auto &u_dev = rc->Get("cons").data;
+  auto &u = rc->Get("cons").data;
   auto &coords = pmb->coords;
-  // initializing on host
-  auto u = u_dev.GetHostMirrorAndCopy();
-  for (int k = kb.s; k <= kb.e; k++) {
-    for (int j = jb.s; j <= jb.e; j++) {
-      for (int i = ib.s; i <= ib.e; i++) {
+  pmb->par_for(
+      "Init advection", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(const int k, const int j, const int i) {
         Real rho = rho0;
         Real rsq = coords.Xc<1>(i) * coords.Xc<1>(i) + coords.Xc<2>(j) * coords.Xc<2>(j) +
                    coords.Xc<3>(k) * coords.Xc<3>(k);
@@ -114,12 +113,10 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IM2, k, j, i) = my;
         u(IM3, k, j, i) = mz;
 
-        u(IEN, k, j, i) = p0 / gm1 + 0.5 * (mx * mx + my * my + mz * mz) / rho;
-      }
-    }
-  }
-  // copy initialized vars to device
-  u_dev.DeepCopy(u);
+        u(IEN, k, j, i) =
+            rho * eos.InternalEnergyFromDensityPressure(rho, p0) +
+            0.5 * (mx * mx + my * my + mz * mz) / rho;
+      });
 }
 
 } // namespace advection
