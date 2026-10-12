@@ -75,7 +75,10 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
   // Limit the fractional internal-energy increase from Ohmic heating,
   // d(e_int)/dt = eta |curl(B)|^2. This restriction is independent of the
   // dimensional factor used by the parabolic diffusion limit above.
-  const auto gm1 = hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
+  const auto eos_type = hydro_pkg->Param<std::string>("eos_type");
+  const auto gm1 = eos_type == "tabulated"
+                       ? NAN
+                       : hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
   Real min_heating_time = std::numeric_limits<Real>::infinity();
   const auto ohm_diff_val = ohm_diff;
   Kokkos::parallel_reduce(
@@ -120,7 +123,8 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
         const Real j3 = d_by_dx - d_bx_dy;
         const Real heating_rate = eta * (SQR(j1) + SQR(j2) + SQR(j3));
         if (heating_rate > 0.0) {
-          const Real internal_energy_density = pres / gm1;
+          const Real internal_energy_density =
+              ohm_diff_val.InternalEnergy(rho, pres, gm1);
           min_time = fmin(min_time, internal_energy_density / heating_rate);
         }
       },

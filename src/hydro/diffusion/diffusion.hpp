@@ -18,6 +18,7 @@
 
 // AthenaPK headers
 #include "../../main.hpp"
+#include "../../eos/tabulated_eos.hpp"
 
 using namespace parthenon::package::prelude;
 
@@ -78,16 +79,77 @@ struct ThermalDiffusivity {
   ConductionCoeff conduction_coeff_type_;
   // "free" coefficient/prefactor. Value depends on conduction is set in the constructor.
   Real coeff_;
+  TabulatedEOS eos_;
 
  public:
   KOKKOS_INLINE_FUNCTION
   ThermalDiffusivity(Conduction conduction, ConductionCoeff conduction_coeff_type,
-                     Real coeff, Real mbar, Real me, Real kb)
-      : conduction_(conduction), conduction_coeff_type_(conduction_coeff_type),
-        coeff_(coeff), mbar_(mbar), me_(me), kb_(kb) {}
+                     Real coeff, Real mbar, Real me, Real kb,
+                     TabulatedEOS eos = TabulatedEOS())
+      : mbar_(mbar), me_(me), kb_(kb), conduction_(conduction),
+        conduction_coeff_type_(conduction_coeff_type), coeff_(coeff), eos_(eos) {}
 
   KOKKOS_INLINE_FUNCTION
-  Real Get(const Real pres, const Real rho) const;
+  Real Get(const Real pres, const Real rho, const Real temperature = NAN,
+           const Real zbar = NAN) const {
+    if (conduction_coeff_type_ == ConductionCoeff::fixed) {
+      if (!eos_.IsInitialized()) return coeff_;
+      const Real local_temperature = Kokkos::isfinite(temperature)
+                                         ? temperature
+                                         : Temperature(pres, rho);
+      return coeff_ * HeatCapacity(rho, local_temperature);
+    } else if (conduction_coeff_type_ == ConductionCoeff::spitzer) {
+      auto local_temperature = temperature;
+      auto local_zbar = zbar;
+      if (eos_.IsInitialized()) {
+        const auto eps = eos_.InternalEnergyFromDensityPressure(rho, pres);
+        const auto state = eos_.StateFromDensityInternalEnergy(rho, eps);
+        local_temperature = state.temperature;
+        local_zbar = state.zbar;
+      }
+      const Real T_cgs = Kokkos::isfinite(local_temperature)
+                             ? local_temperature
+                             : mbar_ / kb_ * pres / rho;
+      local_zbar = Kokkos::isfinite(local_zbar) ? local_zbar : 1.0;
+      if (eos_.IsInitialized() && local_zbar <= 0.0) return 0.0;
+      PARTHENON_REQUIRE(T_cgs > 0.0 && local_zbar > 0.0,
+                        "Spitzer conduction requires positive temperature and Zbar.");
+      const Real kappa = coeff_ * std::pow(T_cgs, 2.5) / local_zbar;
+      return kappa * (eos_.IsInitialized() || Kokkos::isfinite(temperature)
+                          ? 1.0
+                          : mbar_ / kb_) /
+             rho;
+    }
+    return 0.0;
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  Real Temperature(const Real pres, const Real rho) const {
+    if (!eos_.IsInitialized()) return pres / rho;
+    const auto eps = eos_.InternalEnergyFromDensityPressure(rho, pres);
+    return eos_.StateFromDensityInternalEnergy(rho, eps).temperature;
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  Real HeatCapacity(const Real rho, const Real temperature) const {
+    if (!eos_.IsInitialized()) return 1.0;
+    constexpr Real delta = 1.e-4;
+    const Real tlo = temperature * (1.0 - delta);
+    const Real thi = temperature * (1.0 + delta);
+    return (eos_.InternalEnergyFromDensityTemperature(rho, thi) -
+            eos_.InternalEnergyFromDensityTemperature(rho, tlo)) /
+           (thi - tlo);
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  Real StableDiffusivity(const Real pres, const Real rho) const {
+    if (!eos_.IsInitialized()) return Get(pres, rho);
+    const Real temperature = Temperature(pres, rho);
+    return Get(pres, rho, temperature) / HeatCapacity(rho, temperature);
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  bool UsesGeneralEOS() const { return eos_.IsInitialized(); }
 
   KOKKOS_INLINE_FUNCTION
   Conduction GetType() const { return conduction_; }
@@ -145,28 +207,46 @@ struct OhmicDiffusivity {
   Real zbar_;
   Real eta_cgs_to_code_;
   Real eta_max_;
+  TabulatedEOS eos_;
 
  public:
   KOKKOS_INLINE_FUNCTION
   OhmicDiffusivity(Resistivity resistivity, ResistivityCoeff resistivity_coeff_type,
                    Real coeff, Real temperature_from_p_over_rho, Real zbar,
-                   Real eta_cgs_to_code, Real eta_max)
+                   Real eta_cgs_to_code, Real eta_max,
+                   TabulatedEOS eos = TabulatedEOS())
       : resistivity_(resistivity), resistivity_coeff_type_(resistivity_coeff_type),
         coeff_(coeff), temperature_from_p_over_rho_(temperature_from_p_over_rho),
-        zbar_(zbar), eta_cgs_to_code_(eta_cgs_to_code), eta_max_(eta_max) {}
+        zbar_(zbar), eta_cgs_to_code_(eta_cgs_to_code), eta_max_(eta_max), eos_(eos) {}
 
   KOKKOS_INLINE_FUNCTION
-  Real Get(const Real pres, const Real rho) const {
+  Real Get(const Real pres, const Real rho, const Real temperature = NAN,
+           const Real zbar = NAN) const {
     if (resistivity_coeff_type_ == ResistivityCoeff::fixed) {
       return coeff_;
     } else if (resistivity_coeff_type_ == ResistivityCoeff::spitzer) {
       // Convert p/rho from code units to temperature in kelvin.
-      const Real temperature_kelvin = temperature_from_p_over_rho_ * pres / rho;
+      auto local_temperature = temperature;
+      auto local_zbar = zbar;
+      if (eos_.IsInitialized()) {
+        const auto eps = eos_.InternalEnergyFromDensityPressure(rho, pres);
+        const auto state = eos_.StateFromDensityInternalEnergy(rho, eps);
+        local_temperature = state.temperature;
+        local_zbar = state.zbar;
+      }
+      const Real temperature_kelvin = Kokkos::isfinite(local_temperature)
+                                          ? local_temperature
+                                          : temperature_from_p_over_rho_ * pres / rho;
       PARTHENON_REQUIRE(temperature_kelvin > 0.0,
                         "Spitzer resistivity requires positive temperature.");
 
       // Magnetic diffusivity in Heaviside-Lorentz CGS [cm^2/s], then code units.
-      Real eta = 1.02688e12 * zbar_ * coeff_ / std::pow(temperature_kelvin, 1.5) *
+      local_zbar = Kokkos::isfinite(local_zbar) ? local_zbar : zbar_;
+      if (eos_.IsInitialized() && local_zbar <= 0.0) return 0.0;
+      PARTHENON_REQUIRE(local_zbar > 0.0,
+                        "Spitzer resistivity requires positive Zbar.");
+      Real eta = 1.02688e12 * local_zbar * coeff_ /
+                 std::pow(temperature_kelvin, 1.5) *
                  eta_cgs_to_code_;
       if (eta_max_ > 0.0) {
         eta = std::min(eta, eta_max_);
@@ -181,6 +261,12 @@ struct OhmicDiffusivity {
 
   KOKKOS_INLINE_FUNCTION
   ResistivityCoeff GetCoeffType() const { return resistivity_coeff_type_; }
+
+  KOKKOS_INLINE_FUNCTION
+  Real InternalEnergy(const Real rho, const Real pres, const Real gm1) const {
+    return eos_.IsInitialized() ? rho * eos_.InternalEnergyFromDensityPressure(rho, pres)
+                                : pres / gm1;
+  }
 };
 
 Real EstimateResistivityTimestep(MeshData<Real> *md);

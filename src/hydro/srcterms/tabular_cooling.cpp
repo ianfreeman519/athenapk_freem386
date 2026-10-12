@@ -51,17 +51,12 @@ TabularCooling::TabularCooling(ParameterInput *pin,
       lambda_units_cgs / (units.erg() * pow(units.cm(), 3) / units.s());
 
   const auto density_normalization =
-      pin->GetOrAddString("cooling", "density_normalization", "hydrogen_nuclei");
-  if (density_normalization == "hydrogen_nuclei") {
-    PARTHENON_REQUIRE_THROWS(
-        hydro_pkg->AllParams().hasKey("He_mass_fraction"),
-        "cooling/density_normalization=hydrogen_nuclei requires "
-        "hydro/He_mass_fraction.");
-    const auto hydrogen_mass_fraction =
-        1.0 - hydro_pkg->Param<Real>("He_mass_fraction");
-    number_density_per_mass_squared_ =
-        std::pow(hydrogen_mass_fraction / units.mh(), 2);
-  } else if (density_normalization == "electron") {
+      pin->GetOrAddString("cooling", "density_normalization", "electron");
+  PARTHENON_REQUIRE_THROWS(
+      density_normalization == "electron",
+      "Tabular cooling requires cooling/density_normalization=electron.");
+  general_eos_ = hydro_pkg->Param<std::string>("eos_type") == "tabulated";
+  if (!general_eos_) {
     PARTHENON_REQUIRE_THROWS(
         hydro_pkg->AllParams().hasKey("mu_e"),
         "cooling/density_normalization=electron requires a gas composition that "
@@ -70,8 +65,8 @@ TabularCooling::TabularCooling(ParameterInput *pin,
     number_density_per_mass_squared_ =
         std::pow(1.0 / (electron_molecular_weight * units.atomic_mass_unit()), 2);
   } else {
-    PARTHENON_FAIL("Unknown cooling/density_normalization. Options are: "
-                   "hydrogen_nuclei, electron");
+    eos_ = hydro_pkg->Param<TabulatedEOS>("tabulated_eos");
+    number_density_per_mass_squared_ = NAN;
   }
 
   const auto integrator_str = pin->GetOrAddString("cooling", "integrator", "rk12");
@@ -290,13 +285,18 @@ TabularCooling::TabularCooling(ParameterInput *pin,
   }
 
   // Create a lightweight object for computing cooling rates within kernels
-  const auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
-  const auto adiabatic_index = hydro_pkg->Param<Real>("AdiabaticIndex");
-
-  cooling_table_obj_ = CoolingTableObj(log_lambdas_, log_temp_start_, log_temp_final_,
-                                       d_log_temp_, n_temp_, mbar_over_kb,
-                                       adiabatic_index,
-                                       number_density_per_mass_squared_);
+  if (general_eos_) {
+    cooling_table_obj_ = CoolingTableObj(log_lambdas_, log_temp_start_, log_temp_final_,
+                                         d_log_temp_, n_temp_, eos_,
+                                         units.atomic_mass_unit());
+  } else {
+    const auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
+    const auto adiabatic_index = hydro_pkg->Param<Real>("AdiabaticIndex");
+    cooling_table_obj_ = CoolingTableObj(log_lambdas_, log_temp_start_, log_temp_final_,
+                                         d_log_temp_, n_temp_, mbar_over_kb,
+                                         adiabatic_index,
+                                         number_density_per_mass_squared_);
+  }
 }
 
 void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
@@ -304,8 +304,12 @@ void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
     SubcyclingFixedIntSrcTerm<RK12Stepper>(md, dt, RK12Stepper());
   } else if (integrator_ == CoolIntegrator::rk45) {
     SubcyclingFixedIntSrcTerm<RK45Stepper>(md, dt, RK45Stepper());
-  } else if (integrator_ == CoolIntegrator::townsend) {
+  } else if (integrator_ == CoolIntegrator::townsend && !general_eos_) {
     TownsendSrcTerm(md, dt);
+  } else if (integrator_ == CoolIntegrator::townsend) {
+    // Townsend's analytic transform assumes e proportional to T and constant n_e/rho.
+    // Use the adaptive energy integrator when either quantity comes from the EOS.
+    SubcyclingFixedIntSrcTerm<RK45Stepper>(md, dt, RK45Stepper());
   } else {
     PARTHENON_FAIL("Unknown cooling integrator.");
   }
@@ -317,12 +321,16 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
 
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
-  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const auto fluid = hydro_pkg->Param<Fluid>("fluid");
+  const bool mhd_enabled = fluid != Fluid::euler;
   // Grab member variables for compiler
 
   const CoolingTableObj cooling_table_obj = cooling_table_obj_;
-  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
-  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const bool general_eos = general_eos_;
+  const auto eos = eos_;
+  const auto gm1 = general_eos ? NAN : hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
+  const auto mbar_gm1_over_kb =
+      general_eos ? NAN : hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
 
   const unsigned int max_iter = max_iter_;
 
@@ -335,7 +343,8 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
   const auto temp_cool_floor = std::pow(10.0, log_temp_start_); // low end of cool table
   const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
 
-  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb; // specific internal en.
+  // For a general EOS the floor depends on density and is evaluated in the kernel.
+  const Real ideal_internal_e_floor = temp_floor / mbar_gm1_over_kb;
 
   // Grab some necessary variables
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
@@ -367,6 +376,10 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
         }
         internal_e /= rho;
         const Real internal_e_initial = internal_e;
+        const Real internal_e_floor = general_eos
+                                          ? eos.InternalEnergyFromDensityTemperature(
+                                                rho, temp_floor)
+                                          : ideal_internal_e_floor;
 
         bool dedt_valid = true;
 
@@ -506,7 +519,10 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
         cons(IEN, k, j, i) += rho * (internal_e - internal_e_initial);
         // Latter technically not required if no other tasks follows before
         // ConservedToPrim conversion, but keeping it for now (better safe than sorry).
-        prim(IPR, k, j, i) = rho * internal_e * gm1;
+        prim(IPR, k, j, i) = general_eos
+                                 ? eos.StateFromDensityInternalEnergy(rho, internal_e)
+                                       .pressure
+                                 : rho * internal_e * gm1;
       });
 }
 
@@ -518,7 +534,7 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
   // Grab member variables for compiler
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
 
-  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+  const auto gm1 = hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
   const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
   const Real number_density_per_mass_squared = number_density_per_mass_squared_;
 
@@ -639,15 +655,18 @@ Real TabularCooling::EstimateTimeStep(MeshData<Real> *md) const {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
 
   const CoolingTableObj cooling_table_obj = cooling_table_obj_;
-  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
-  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const bool general_eos = general_eos_;
+  const auto eos = eos_;
+  const auto gm1 = general_eos ? NAN : hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0;
+  const auto mbar_gm1_over_kb =
+      general_eos ? NAN : hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
 
   // Determine the cooling floor, whichever is higher of the cooling table floor
   // or fluid solver floor
   const auto temp_cool_floor = std::pow(10.0, log_temp_start_); // low end of cool table
   const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
 
-  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb; // specific internal en.
+  const Real ideal_internal_e_floor = temp_floor / mbar_gm1_over_kb;
 
   // Grab some necessary variables
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
@@ -670,7 +689,13 @@ Real TabularCooling::EstimateTimeStep(MeshData<Real> *md) const {
         const Real rho = prim(IDN, k, j, i);
         const Real pres = prim(IPR, k, j, i);
 
-        const Real internal_e = pres / (rho * gm1);
+        const Real internal_e = general_eos
+                                    ? eos.InternalEnergyFromDensityPressure(rho, pres)
+                                    : pres / (rho * gm1);
+        const Real internal_e_floor = general_eos
+                                          ? eos.InternalEnergyFromDensityTemperature(
+                                                rho, temp_floor)
+                                          : ideal_internal_e_floor;
 
         const Real de_dt = cooling_table_obj.DeDt(internal_e, rho);
 

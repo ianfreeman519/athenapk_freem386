@@ -23,24 +23,6 @@
 
 using namespace parthenon::package::prelude;
 
-// Calculate the thermal *diffusivity*, \chi, in code units as the energy flux itself
-// is calculated from -\chi \rho \nabla (p/\rho).
-KOKKOS_INLINE_FUNCTION
-Real ThermalDiffusivity::Get(const Real pres, const Real rho) const {
-  if (conduction_coeff_type_ == ConductionCoeff::fixed) {
-    return coeff_;
-  } else if (conduction_coeff_type_ == ConductionCoeff::spitzer) {
-    const Real T_cgs = mbar_ / kb_ * pres / rho;
-    const Real kappa_spitzer = coeff_ * std::pow(T_cgs, 5. / 2.); // Full spitzer
-
-    // Convert conductivity to diffusivity
-    return kappa_spitzer * mbar_ / kb_ / rho;
-
-  } else {
-    return 0.0;
-  }
-}
-
 Real EstimateConductionTimestep(MeshData<Real> *md) {
   // get to package via first block in Meshdata (which exists by construction)
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
@@ -60,12 +42,12 @@ Real EstimateConductionTimestep(MeshData<Real> *md) {
     fac = 1.0 / 6.0;
   }
 
-  const auto gm1 = hydro_pkg->Param<Real>("AdiabaticIndex");
   const auto &thermal_diff = hydro_pkg->Param<ThermalDiffusivity>("thermal_diff");
   const auto &flux_sat_prefac = hydro_pkg->Param<Real>("conduction_sat_prefac");
 
   if (thermal_diff.GetType() == Conduction::isotropic &&
-      thermal_diff.GetCoeffType() == ConductionCoeff::fixed) {
+      thermal_diff.GetCoeffType() == ConductionCoeff::fixed &&
+      !thermal_diff.UsesGeneralEOS()) {
     // TODO(pgrete): once mindx is properly calculated before this loop, we can get rid of
     // it entirely.
     // Using 0.0 as parameters rho and p as they're not used anyway for a fixed coeff.
@@ -104,21 +86,21 @@ Real EstimateConductionTimestep(MeshData<Real> *md) {
           const auto &p = prim(IPR, k, j, i);
 
           const auto dTdx = 0.5 *
-                            (prim(IPR, k, j, i + 1) / prim(IDN, k, j, i + 1) -
-                             prim(IPR, k, j, i - 1) / prim(IDN, k, j, i - 1)) /
+                            (thermal_diff.Temperature(prim(IPR, k, j, i + 1), prim(IDN, k, j, i + 1)) -
+                             thermal_diff.Temperature(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1))) /
                             coords.Dxc<1>(i);
 
           const auto dTdy = ndim >= 2
                                 ? 0.5 *
-                                      (prim(IPR, k, j + 1, i) / prim(IDN, k, j + 1, i) -
-                                       prim(IPR, k, j - 1, i) / prim(IDN, k, j - 1, i)) /
+                                      (thermal_diff.Temperature(prim(IPR, k, j + 1, i), prim(IDN, k, j + 1, i)) -
+                                       thermal_diff.Temperature(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i))) /
                                       coords.Dxc<2>(j)
                                 : 0.0;
 
           const auto dTdz = ndim >= 3
                                 ? 0.5 *
-                                      (prim(IPR, k + 1, j, i) / prim(IDN, k + 1, j, i) -
-                                       prim(IPR, k - 1, j, i) / prim(IDN, k - 1, j, i)) /
+                                      (thermal_diff.Temperature(prim(IPR, k + 1, j, i), prim(IDN, k + 1, j, i)) -
+                                       thermal_diff.Temperature(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i))) /
                                       coords.Dxc<3>(k)
                                 : 0.0;
           const auto gradTmag = sqrt(SQR(dTdx) + SQR(dTdy) + SQR(dTdz));
@@ -127,7 +109,7 @@ Real EstimateConductionTimestep(MeshData<Real> *md) {
           if (gradTmag == 0.0) {
             return;
           }
-          auto thermal_diff_coeff = thermal_diff.Get(p, rho);
+          auto thermal_diff_coeff = thermal_diff.StableDiffusivity(p, rho);
 
           if (thermal_diff.GetType() == Conduction::isotropic) {
             min_dt = fmin(min_dt, SQR(coords.Dxc<1>(k, j, i)) / thermal_diff_coeff);
@@ -204,10 +186,6 @@ void ThermalFluxIsoFixed(MeshData<Real> *md) {
   const int ndim = pmb->pmy_mesh->ndim;
 
   const auto &thermal_diff = hydro_pkg->Param<ThermalDiffusivity>("thermal_diff");
-  // Using fixed and uniform coefficient so it's safe to get it outside the kernel.
-  // Using 0.0 as parameters rho and p as they're not used anyway for a fixed coeff.
-  const auto thermal_diff_coeff = thermal_diff.Get(0.0, 0.0);
-
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "Thermal conduction X1 fluxes (iso)",
       parthenon::DevExecSpace(), 0, cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s,
@@ -215,10 +193,14 @@ void ThermalFluxIsoFixed(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-        const auto T_i = prim(IPR, k, j, i) / prim(IDN, k, j, i);
-        const auto T_im1 = prim(IPR, k, j, i - 1) / prim(IDN, k, j, i - 1);
+        const auto T_i = thermal_diff.Temperature(prim(IPR, k, j, i), prim(IDN, k, j, i));
+        const auto T_im1 = thermal_diff.Temperature(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1));
         const auto dTdx = (T_i - T_im1) / coords.Dxc<1>(k, j, i);
         const auto denf = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j, i - 1));
+        const auto thermal_diff_coeff =
+            0.5 * (thermal_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i), T_i) +
+                   thermal_diff.Get(prim(IPR, k, j, i - 1),
+                                    prim(IDN, k, j, i - 1), T_im1));
         cons.flux(X1DIR, IEN, k, j, i) -= thermal_diff_coeff * denf * dTdx;
       });
 
@@ -234,10 +216,14 @@ void ThermalFluxIsoFixed(MeshData<Real> *md) {
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
 
-        const auto T_j = prim(IPR, k, j, i) / prim(IDN, k, j, i);
-        const auto T_jm1 = prim(IPR, k, j - 1, i) / prim(IDN, k, j - 1, i);
+        const auto T_j = thermal_diff.Temperature(prim(IPR, k, j, i), prim(IDN, k, j, i));
+        const auto T_jm1 = thermal_diff.Temperature(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i));
         const auto dTdy = (T_j - T_jm1) / coords.Dxc<2>(k, j, i);
         const auto denf = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j - 1, i));
+        const auto thermal_diff_coeff =
+            0.5 * (thermal_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i), T_j) +
+                   thermal_diff.Get(prim(IPR, k, j - 1, i),
+                                    prim(IDN, k, j - 1, i), T_jm1));
         cons.flux(X2DIR, IEN, k, j, i) -= thermal_diff_coeff * denf * dTdy;
       });
   /* Compute heat fluxes in 3-direction, 3D problem ONLY  ---------------------*/
@@ -253,10 +239,14 @@ void ThermalFluxIsoFixed(MeshData<Real> *md) {
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
 
-        const auto T_k = prim(IPR, k, j, i) / prim(IDN, k, j, i);
-        const auto T_km1 = prim(IPR, k - 1, j, i) / prim(IDN, k - 1, j, i);
+        const auto T_k = thermal_diff.Temperature(prim(IPR, k, j, i), prim(IDN, k, j, i));
+        const auto T_km1 = thermal_diff.Temperature(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i));
         const auto dTdz = (T_k - T_km1) / coords.Dxc<3>(k, j, i);
         const auto denf = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k - 1, j, i));
+        const auto thermal_diff_coeff =
+            0.5 * (thermal_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i), T_k) +
+                   thermal_diff.Get(prim(IPR, k - 1, j, i),
+                                    prim(IDN, k - 1, j, i), T_km1));
         cons.flux(X3DIR, IEN, k, j, i) -= thermal_diff_coeff * denf * dTdz;
       });
 }
@@ -299,32 +289,32 @@ void ThermalFluxGeneral(MeshData<Real> *md) {
         // clang-format off
         /* Monotonized temperature difference dT/dy */
         const auto dTdy =
-            limiters::lim4(prim(IPR, k, j + 1, i    ) / prim(IDN, k, j + 1, i    ) -
-                           prim(IPR, k, j    , i    ) / prim(IDN, k, j    , i    ),
-                           prim(IPR, k, j    , i    ) / prim(IDN, k, j    , i    ) -
-                           prim(IPR, k, j - 1, i    ) / prim(IDN, k, j - 1, i    ),
-                           prim(IPR, k, j + 1, i - 1) / prim(IDN, k, j + 1, i - 1) -
-                           prim(IPR, k, j    , i - 1) / prim(IDN, k, j    , i - 1),
-                           prim(IPR, k, j    , i - 1) / prim(IDN, k, j    , i - 1) -
-                           prim(IPR, k, j - 1, i - 1) / prim(IDN, k, j - 1, i - 1)) /
+            limiters::lim4(thermal_diff.Temperature(prim(IPR, k, j + 1, i    ), prim(IDN, k, j + 1, i    )) -
+                           thermal_diff.Temperature(prim(IPR, k, j    , i    ), prim(IDN, k, j    , i    )),
+                           thermal_diff.Temperature(prim(IPR, k, j    , i    ), prim(IDN, k, j    , i    )) -
+                           thermal_diff.Temperature(prim(IPR, k, j - 1, i    ), prim(IDN, k, j - 1, i    )),
+                           thermal_diff.Temperature(prim(IPR, k, j + 1, i - 1), prim(IDN, k, j + 1, i - 1)) -
+                           thermal_diff.Temperature(prim(IPR, k, j    , i - 1), prim(IDN, k, j    , i - 1)),
+                           thermal_diff.Temperature(prim(IPR, k, j    , i - 1), prim(IDN, k, j    , i - 1)) -
+                           thermal_diff.Temperature(prim(IPR, k, j - 1, i - 1), prim(IDN, k, j - 1, i - 1))) /
             coords.Dxc<2>( k, j, i);
 
         if (ndim >= 3) {
           /* Monotonized temperature difference dT/dz, 3D problem ONLY */
-          dTdz = limiters::lim4(prim(IPR, k + 1, j, i    ) / prim(IDN, k + 1, j, i    ) -
-                                prim(IPR, k    , j, i    ) / prim(IDN, k    , j, i    ),
-                                prim(IPR, k    , j, i    ) / prim(IDN, k    , j, i    ) -
-                                prim(IPR, k - 1, j, i    ) / prim(IDN, k - 1, j, i    ),
-                                prim(IPR, k + 1, j, i - 1) / prim(IDN, k + 1, j, i - 1) -
-                                prim(IPR, k    , j, i - 1) / prim(IDN, k    , j, i - 1),
-                                prim(IPR, k    , j, i - 1) / prim(IDN, k    , j, i - 1) -
-                                prim(IPR, k - 1, j, i - 1) / prim(IDN, k - 1, j, i - 1)) /
+          dTdz = limiters::lim4(thermal_diff.Temperature(prim(IPR, k + 1, j, i    ), prim(IDN, k + 1, j, i    )) -
+                                thermal_diff.Temperature(prim(IPR, k    , j, i    ), prim(IDN, k    , j, i    )),
+                                thermal_diff.Temperature(prim(IPR, k    , j, i    ), prim(IDN, k    , j, i    )) -
+                                thermal_diff.Temperature(prim(IPR, k - 1, j, i    ), prim(IDN, k - 1, j, i    )),
+                                thermal_diff.Temperature(prim(IPR, k + 1, j, i - 1), prim(IDN, k + 1, j, i - 1)) -
+                                thermal_diff.Temperature(prim(IPR, k    , j, i - 1), prim(IDN, k    , j, i - 1)),
+                                thermal_diff.Temperature(prim(IPR, k    , j, i - 1), prim(IDN, k    , j, i - 1)) -
+                                thermal_diff.Temperature(prim(IPR, k - 1, j, i - 1), prim(IDN, k - 1, j, i - 1))) /
                  coords.Dxc<3>( k, j, i);
         }
         // clang-format on
 
-        const auto T_i = prim(IPR, k, j, i) / prim(IDN, k, j, i);
-        const auto T_im1 = prim(IPR, k, j, i - 1) / prim(IDN, k, j, i - 1);
+        const auto T_i = thermal_diff.Temperature(prim(IPR, k, j, i), prim(IDN, k, j, i));
+        const auto T_im1 = thermal_diff.Temperature(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1));
         const auto dTdx = (T_i - T_im1) / coords.Dxc<1>(k, j, i);
 
         const auto denf = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j, i - 1));
@@ -394,33 +384,33 @@ void ThermalFluxGeneral(MeshData<Real> *md) {
         // clang-format off
         /* Monotonized temperature difference dT/dx */
         const auto dTdx =
-            limiters::lim4(prim(IPR, k, j    , i + 1) / prim(IDN, k, j    , i + 1) -
-                           prim(IPR, k, j    , i    ) / prim(IDN, k, j    , i    ),
-                           prim(IPR, k, j    , i    ) / prim(IDN, k, j    , i    ) -
-                           prim(IPR, k, j    , i - 1) / prim(IDN, k, j    , i - 1),
-                           prim(IPR, k, j - 1, i + 1) / prim(IDN, k, j - 1, i + 1) -
-                           prim(IPR, k, j - 1, i    ) / prim(IDN, k, j - 1, i    ),
-                           prim(IPR, k, j - 1, i    ) / prim(IDN, k, j - 1, i    ) -
-                           prim(IPR, k, j - 1, i - 1) / prim(IDN, k, j - 1, i - 1)) /
+            limiters::lim4(thermal_diff.Temperature(prim(IPR, k, j    , i + 1), prim(IDN, k, j    , i + 1)) -
+                           thermal_diff.Temperature(prim(IPR, k, j    , i    ), prim(IDN, k, j    , i    )),
+                           thermal_diff.Temperature(prim(IPR, k, j    , i    ), prim(IDN, k, j    , i    )) -
+                           thermal_diff.Temperature(prim(IPR, k, j    , i - 1), prim(IDN, k, j    , i - 1)),
+                           thermal_diff.Temperature(prim(IPR, k, j - 1, i + 1), prim(IDN, k, j - 1, i + 1)) -
+                           thermal_diff.Temperature(prim(IPR, k, j - 1, i    ), prim(IDN, k, j - 1, i    )),
+                           thermal_diff.Temperature(prim(IPR, k, j - 1, i    ), prim(IDN, k, j - 1, i    )) -
+                           thermal_diff.Temperature(prim(IPR, k, j - 1, i - 1), prim(IDN, k, j - 1, i - 1))) /
             coords.Dxc<1>(k, j, i);
 
         if (ndim >= 3) {
           /* Monotonized temperature difference dT/dz, 3D problem ONLY */
-          dTdz = limiters::lim4(prim(IPR, k + 1, j    , i) / prim(IDN, k + 1, j    , i) -
-                                prim(IPR, k    , j    , i) / prim(IDN, k    , j    , i),
-                                prim(IPR, k    , j    , i) / prim(IDN, k    , j    , i) -
-                                prim(IPR, k - 1, j    , i) / prim(IDN, k - 1, j    , i),
-                                prim(IPR, k + 1, j - 1, i) / prim(IDN, k + 1, j - 1, i) -
-                                prim(IPR, k    , j - 1, i) / prim(IDN, k    , j - 1, i),
-                                prim(IPR, k    , j - 1, i) / prim(IDN, k    , j - 1, i) -
-                                prim(IPR, k - 1, j - 1, i) / prim(IDN, k - 1, j - 1, i)) /
+          dTdz = limiters::lim4(thermal_diff.Temperature(prim(IPR, k + 1, j    , i), prim(IDN, k + 1, j    , i)) -
+                                thermal_diff.Temperature(prim(IPR, k    , j    , i), prim(IDN, k    , j    , i)),
+                                thermal_diff.Temperature(prim(IPR, k    , j    , i), prim(IDN, k    , j    , i)) -
+                                thermal_diff.Temperature(prim(IPR, k - 1, j    , i), prim(IDN, k - 1, j    , i)),
+                                thermal_diff.Temperature(prim(IPR, k + 1, j - 1, i), prim(IDN, k + 1, j - 1, i)) -
+                                thermal_diff.Temperature(prim(IPR, k    , j - 1, i), prim(IDN, k    , j - 1, i)),
+                                thermal_diff.Temperature(prim(IPR, k    , j - 1, i), prim(IDN, k    , j - 1, i)) -
+                                thermal_diff.Temperature(prim(IPR, k - 1, j - 1, i), prim(IDN, k - 1, j - 1, i))) /
                  coords.Dxc<3>(k, j, i);
 
         }
         // clang-format on
 
-        const auto T_j = prim(IPR, k, j, i) / prim(IDN, k, j, i);
-        const auto T_jm1 = prim(IPR, k, j - 1, i) / prim(IDN, k, j - 1, i);
+        const auto T_j = thermal_diff.Temperature(prim(IPR, k, j, i), prim(IDN, k, j, i));
+        const auto T_jm1 = thermal_diff.Temperature(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i));
         const auto dTdy = (T_j - T_jm1) / coords.Dxc<2>(k, j, i);
 
         const auto denf = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k, j - 1, i));
@@ -484,31 +474,31 @@ void ThermalFluxGeneral(MeshData<Real> *md) {
         // clang-format off
         /* Monotonized temperature difference dT/dx */
         const auto dTdx =
-            limiters::lim4(prim(IPR, k    , j, i + 1) / prim(IDN, k    , j, i + 1) -
-                           prim(IPR, k    , j, i    ) / prim(IDN, k    , j, i    ),
-                           prim(IPR, k    , j, i    ) / prim(IDN, k    , j, i    ) -
-                           prim(IPR, k    , j, i - 1) / prim(IDN, k    , j, i - 1),
-                           prim(IPR, k - 1, j, i + 1) / prim(IDN, k - 1, j, i + 1) -
-                           prim(IPR, k - 1, j, i    ) / prim(IDN, k - 1, j, i    ),
-                           prim(IPR, k - 1, j, i    ) / prim(IDN, k - 1, j, i    ) -
-                           prim(IPR, k - 1, j, i - 1) / prim(IDN, k - 1, j, i - 1)) /
+            limiters::lim4(thermal_diff.Temperature(prim(IPR, k    , j, i + 1), prim(IDN, k    , j, i + 1)) -
+                           thermal_diff.Temperature(prim(IPR, k    , j, i    ), prim(IDN, k    , j, i    )),
+                           thermal_diff.Temperature(prim(IPR, k    , j, i    ), prim(IDN, k    , j, i    )) -
+                           thermal_diff.Temperature(prim(IPR, k    , j, i - 1), prim(IDN, k    , j, i - 1)),
+                           thermal_diff.Temperature(prim(IPR, k - 1, j, i + 1), prim(IDN, k - 1, j, i + 1)) -
+                           thermal_diff.Temperature(prim(IPR, k - 1, j, i    ), prim(IDN, k - 1, j, i    )),
+                           thermal_diff.Temperature(prim(IPR, k - 1, j, i    ), prim(IDN, k - 1, j, i    )) -
+                           thermal_diff.Temperature(prim(IPR, k - 1, j, i - 1), prim(IDN, k - 1, j, i - 1))) /
             coords.Dxc<1>(k, j, i);
 
         /* Monotonized temperature difference dT/dy */
         const auto dTdy =
-            limiters::lim4(prim(IPR, k    , j + 1, i) / prim(IDN, k    , j + 1, i) -
-                           prim(IPR, k    , j    , i) / prim(IDN, k    , j    , i),
-                           prim(IPR, k    , j    , i) / prim(IDN, k    , j    , i) -
-                           prim(IPR, k    , j - 1, i) / prim(IDN, k    , j - 1, i),
-                           prim(IPR, k - 1, j + 1, i) / prim(IDN, k - 1, j + 1, i) -
-                           prim(IPR, k - 1, j    , i) / prim(IDN, k - 1, j    , i),
-                           prim(IPR, k - 1, j    , i) / prim(IDN, k - 1, j    , i) -
-                           prim(IPR, k - 1, j - 1, i) / prim(IDN, k - 1, j - 1, i)) /
+            limiters::lim4(thermal_diff.Temperature(prim(IPR, k    , j + 1, i), prim(IDN, k    , j + 1, i)) -
+                           thermal_diff.Temperature(prim(IPR, k    , j    , i), prim(IDN, k    , j    , i)),
+                           thermal_diff.Temperature(prim(IPR, k    , j    , i), prim(IDN, k    , j    , i)) -
+                           thermal_diff.Temperature(prim(IPR, k    , j - 1, i), prim(IDN, k    , j - 1, i)),
+                           thermal_diff.Temperature(prim(IPR, k - 1, j + 1, i), prim(IDN, k - 1, j + 1, i)) -
+                           thermal_diff.Temperature(prim(IPR, k - 1, j    , i), prim(IDN, k - 1, j    , i)),
+                           thermal_diff.Temperature(prim(IPR, k - 1, j    , i), prim(IDN, k - 1, j    , i)) -
+                           thermal_diff.Temperature(prim(IPR, k - 1, j - 1, i), prim(IDN, k - 1, j - 1, i))) /
             coords.Dxc<2>(k, j, i);
         // clang-format on
 
-        const auto T_k = prim(IPR, k, j, i) / prim(IDN, k, j, i);
-        const auto T_km1 = prim(IPR, k - 1, j, i) / prim(IDN, k - 1, j, i);
+        const auto T_k = thermal_diff.Temperature(prim(IPR, k, j, i), prim(IDN, k, j, i));
+        const auto T_km1 = thermal_diff.Temperature(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i));
         const auto dTdz = (T_k - T_km1) / coords.Dxc<3>(k, j, i);
 
         const auto denf = 0.5 * (prim(IDN, k, j, i) + prim(IDN, k - 1, j, i));

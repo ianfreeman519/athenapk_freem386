@@ -990,6 +990,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       pin->SetString("tabulated_eos", "fingerprint", table.Fingerprint());
     }
     pkg->AddParam<>("tabulated_eos_fingerprint", table.Fingerprint());
+    pkg->AddParam<>("tabulated_eos", table);
     pkg->AddParam<>("eos_type", eos_str);
 
     const auto problem_id = pin->GetString("job", "problem_id");
@@ -1011,18 +1012,104 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     const Real Tceil =
         pin->GetOrAddReal("hydro", "Tceil", std::numeric_limits<Real>::infinity());
 
-    PARTHENON_REQUIRE_THROWS(
-        pin->GetOrAddString("diffusion", "conduction", "none") == "none" &&
-            pin->GetOrAddString("diffusion", "viscosity", "none") == "none" &&
-            pin->GetOrAddString("diffusion", "resistivity", "none") == "none",
-        "Diffusion/transport is not yet supported with hydro/eos=tabulated.");
-    PARTHENON_REQUIRE_THROWS(
-        pin->GetOrAddString("cooling", "enable_cooling", "none") == "none",
-        "Tabular cooling is not yet supported with hydro/eos=tabulated.");
-    pkg->AddParam<>("conduction", Conduction::none);
-    pkg->AddParam<>("viscosity", Viscosity::none);
-    pkg->AddParam<>("resistivity", Resistivity::none);
-    pkg->AddParam<>("diffint", DiffInt::none);
+    auto conduction = Conduction::none;
+    const auto conduction_str = pin->GetOrAddString("diffusion", "conduction", "none");
+    if (conduction_str == "isotropic") conduction = Conduction::isotropic;
+    else if (conduction_str == "anisotropic") conduction = Conduction::anisotropic;
+    else PARTHENON_REQUIRE_THROWS(conduction_str == "none",
+                                  "Unknown conduction method.");
+    if (conduction != Conduction::none) {
+      const auto coeff_str =
+          pin->GetOrAddString("diffusion", "conduction_coeff", "none");
+      const auto phi = pin->GetOrAddReal("diffusion", "conduction_sat_phi", 0.3);
+      if (coeff_str == "spitzer") {
+        auto coeff =
+            pin->GetOrAddReal("diffusion", "spitzer_cond_in_erg_by_s_K_cm", 4.6e-7);
+        const auto units = pkg->Param<Units>("units");
+        coeff *= units.erg() / (units.s() * units.cm());
+        pkg->AddParam<>("thermal_diff",
+                        ThermalDiffusivity(conduction, ConductionCoeff::spitzer, coeff,
+                                           0.0, units.electron_mass(),
+                                           units.k_boltzmann(), table));
+      } else if (coeff_str == "fixed") {
+        pkg->AddParam<>("thermal_diff",
+                        ThermalDiffusivity(conduction, ConductionCoeff::fixed,
+                                           pin->GetReal("diffusion",
+                                                        "thermal_diff_coeff_code"),
+                                           0.0, 0.0, 0.0, table));
+      } else {
+        PARTHENON_FAIL("Conduction requires a fixed or spitzer coefficient.");
+      }
+      pkg->AddParam<>("conduction_sat_prefac", 5.0 * phi);
+    }
+    pkg->AddParam<>("conduction", conduction);
+
+    auto viscosity = Viscosity::none;
+    const auto viscosity_str = pin->GetOrAddString("diffusion", "viscosity", "none");
+    if (viscosity_str == "isotropic") viscosity = Viscosity::isotropic;
+    else PARTHENON_REQUIRE_THROWS(viscosity_str == "none", "Unknown viscosity method.");
+    if (viscosity != Viscosity::none) {
+      PARTHENON_REQUIRE_THROWS(
+          pin->GetOrAddString("diffusion", "viscosity_coeff", "none") == "fixed",
+          "Viscosity requires viscosity_coeff=fixed.");
+      pkg->AddParam<>("mom_diff",
+                      MomentumDiffusivity(viscosity, ViscosityCoeff::fixed,
+                                          pin->GetReal("diffusion",
+                                                       "mom_diff_coeff_code"),
+                                          0.0, 0.0, 0.0));
+    }
+    pkg->AddParam<>("viscosity", viscosity);
+
+    auto resistivity = Resistivity::none;
+    const auto resistivity_str =
+        pin->GetOrAddString("diffusion", "resistivity", "none");
+    if (resistivity_str == "ohmic") resistivity = Resistivity::ohmic;
+    else PARTHENON_REQUIRE_THROWS(resistivity_str == "none",
+                                  "Unknown resistivity method.");
+    if (resistivity != Resistivity::none) {
+      const auto coeff_str =
+          pin->GetOrAddString("diffusion", "resistivity_coeff", "none");
+      if (coeff_str == "spitzer") {
+        const auto units = pkg->Param<Units>("units");
+        const auto log_lambda =
+            pin->GetOrAddReal("diffusion", "spitzer_log_lambda", 10.0);
+        const auto eta_conv = SQR(units.cm()) / units.s();
+        const auto eta_max_cgs =
+            pin->GetOrAddReal("diffusion", "spitzer_eta_max", -1.0);
+        pkg->AddParam<>(
+            "ohm_diff",
+            OhmicDiffusivity(resistivity, ResistivityCoeff::spitzer, log_lambda,
+                             NAN, NAN, eta_conv,
+                             eta_max_cgs > 0.0 ? eta_max_cgs * eta_conv : -1.0,
+                             table));
+      } else if (coeff_str == "fixed") {
+        pkg->AddParam<>("ohm_diff",
+                        OhmicDiffusivity(resistivity, ResistivityCoeff::fixed,
+                                         pin->GetReal("diffusion",
+                                                      "ohm_diff_coeff_code"),
+                                         0.0, 0.0, 0.0, -1.0, table));
+      } else {
+        PARTHENON_FAIL("Resistivity requires a fixed or spitzer coefficient.");
+      }
+    }
+    pkg->AddParam<>("resistivity", resistivity);
+
+    const auto diffint_str = pin->GetOrAddString("diffusion", "integrator", "none");
+    auto diffint = DiffInt::none;
+    if (diffint_str == "unsplit") diffint = DiffInt::unsplit;
+    else if (diffint_str == "rkl2") {
+      diffint = DiffInt::rkl2;
+      pkg->AddParam<>("rkl2_max_dt_ratio",
+                      pin->GetOrAddReal("diffusion", "rkl2_max_dt_ratio", -1.0));
+    } else PARTHENON_REQUIRE_THROWS(diffint_str == "none",
+                                    "Unknown diffusion integrator.");
+    if (diffint != DiffInt::none) {
+      const auto cfl_diff = pin->DoesParameterExist("diffusion", "cfl")
+                                ? pin->GetReal("diffusion", "cfl")
+                                : pin->GetReal("parthenon/time", "cfl");
+      pkg->AddParam<>("cfl_diff", cfl_diff);
+    }
+    pkg->AddParam<>("diffint", diffint);
     pkg->AddParam<Real>("dt_diff", std::numeric_limits<Real>::max(),
                         Params::Mutability::Mutable);
 

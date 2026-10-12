@@ -25,6 +25,7 @@
 
 // AthenaPK headers
 #include "../../main.hpp"
+#include "../../eos/tabulated_eos.hpp"
 #include "../../units.hpp"
 
 #ifdef MPI_PARALLEL
@@ -108,11 +109,14 @@ class CoolingTableObj {
 
   // Square of the selected number density per unit mass, e.g. (n_e / rho)^2
   parthenon::Real number_density_per_mass_squared_;
+  TabulatedEOS eos_;
+  parthenon::Real atomic_mass_unit_;
 
  public:
   CoolingTableObj()
       : log_lambdas_(), log_temp_start_(NAN), log_temp_final_(NAN), d_log_temp_(NAN),
-        n_temp_(0), mbar_gm1_over_k_B_(NAN), number_density_per_mass_squared_(NAN) {}
+        n_temp_(0), mbar_gm1_over_k_B_(NAN), number_density_per_mass_squared_(NAN),
+        eos_(), atomic_mass_unit_(NAN) {}
   CoolingTableObj(const parthenon::ParArray1D<parthenon::Real> log_lambdas,
                   const parthenon::Real log_temp_start,
                   const parthenon::Real log_temp_final, const parthenon::Real d_log_temp,
@@ -122,7 +126,17 @@ class CoolingTableObj {
       : log_lambdas_(log_lambdas), log_temp_start_(log_temp_start),
         log_temp_final_(log_temp_final), d_log_temp_(d_log_temp), n_temp_(n_temp),
         mbar_gm1_over_k_B_(mbar_over_kb * (adiabatic_index - 1)),
-        number_density_per_mass_squared_(number_density_per_mass_squared) {}
+        number_density_per_mass_squared_(number_density_per_mass_squared), eos_(),
+        atomic_mass_unit_(NAN) {}
+  CoolingTableObj(const parthenon::ParArray1D<parthenon::Real> log_lambdas,
+                  const parthenon::Real log_temp_start,
+                  const parthenon::Real log_temp_final, const parthenon::Real d_log_temp,
+                  const unsigned int n_temp, const TabulatedEOS eos,
+                  const parthenon::Real atomic_mass_unit)
+      : log_lambdas_(log_lambdas), log_temp_start_(log_temp_start),
+        log_temp_final_(log_temp_final), d_log_temp_(d_log_temp), n_temp_(n_temp),
+        mbar_gm1_over_k_B_(NAN), number_density_per_mass_squared_(NAN), eos_(eos),
+        atomic_mass_unit_(atomic_mass_unit) {}
 
   // Interpolate a cooling rate from the table
   // from internal energy density and density
@@ -135,7 +149,11 @@ class CoolingTableObj {
       return 0;
     }
 
-    const Real temp = mbar_gm1_over_k_B_ * e;
+    const auto state = eos_.IsInitialized()
+                           ? eos_.StateFromDensityInternalEnergy(rho, e)
+                           : TabulatedEOSState{NAN, mbar_gm1_over_k_B_ * e, NAN, NAN,
+                                               NAN, NAN};
+    const Real temp = state.temperature;
     const Real log_temp = log10(temp);
     Real log_lambda;
     if (log_temp < log_temp_start_) {
@@ -168,7 +186,12 @@ class CoolingTableObj {
     }
     // Return de/dt
     const Real lambda = pow(10., log_lambda);
-    const Real de_dt = -lambda * number_density_per_mass_squared_ * rho;
+    // Cooling tables are normalized as n_e^2 Lambda(T).  For a general EOS mu_e is
+    // state dependent, so n_e/rho must be evaluated at every RHS call.
+    const Real ne_per_mass = eos_.IsInitialized()
+                                 ? 1.0 / (state.mu_e * atomic_mass_unit_)
+                                 : std::sqrt(number_density_per_mass_squared_);
+    const Real de_dt = -lambda * SQR(ne_per_mass) * rho;
     return de_dt;
   }
 
@@ -227,6 +250,8 @@ class TabularCooling {
   static constexpr parthenon::Real KEpsilon_ = 1e-12;
 
   CoolingTableObj cooling_table_obj_;
+  bool general_eos_ = false;
+  TabulatedEOS eos_;
 
  public:
   TabularCooling(parthenon::ParameterInput *pin,
