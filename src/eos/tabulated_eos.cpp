@@ -364,9 +364,18 @@ void TabulatedEOS::CheckDiagnostics(const std::string &where) const {
 #endif
   if (counts[invalid_input] > 0 || counts[far_out_of_bounds] > 0) {
     std::ostringstream msg;
-    msg << "Tabulated EOS fatal diagnostic after " << where << ": invalid="
-        << counts[invalid_input] << ", more-than-one-decade="
-        << counts[far_out_of_bounds];
+msg << "Tabulated EOS fatal diagnostic after " << where
+    << ": rho_low=" << counts[rho_low]
+    << ", rho_high=" << counts[rho_high]
+    << ", energy_low=" << counts[energy_low]
+    << ", energy_high=" << counts[energy_high]
+    << ", pressure_low=" << counts[pressure_low]
+    << ", pressure_high=" << counts[pressure_high]
+    << ", temperature_low=" << counts[temperature_low]
+    << ", temperature_high=" << counts[temperature_high]
+    << ", invalid=" << counts[invalid_input]
+    << ", more-than-one-decade="
+    << counts[far_out_of_bounds];
     PARTHENON_FAIL(msg.str());
   }
   long long outside = 0;

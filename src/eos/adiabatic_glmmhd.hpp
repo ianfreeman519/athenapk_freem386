@@ -149,8 +149,11 @@ class AdiabaticGLMMHDEOS : public EquationOfState {
     if (IsTabulated()) {
       if (!(eps > 0.0) && pressure_floor_ > 0.0)
         eps = InternalEnergyFromDensityPressure(u_d, pressure_floor_);
-      if (!(eps > 0.0) && GetTemperatureFloor() > 0.0)
-        eps = InternalEnergyFromDensityTemperature(u_d, GetTemperatureFloor());
+      if (GetTemperatureFloor() > 0.0) {
+        const Real target =
+            InternalEnergyFromDensityTemperature(u_d, GetTemperatureFloor());
+        if (!(eps >= target)) eps = target;
+      }
       u_e = u_d * eps + e_k + e_B;
       w_p = StateFromDensityInternalEnergy(u_d, eps).pressure;
     } else {

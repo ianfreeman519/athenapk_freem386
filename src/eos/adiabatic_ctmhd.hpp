@@ -94,7 +94,9 @@ class AdiabaticCTMHDEOS : public EquationOfState {
   template <typename View4D>
   KOKKOS_INLINE_FUNCTION void ConsToPrim(View4D cons, View4D prim, const int &nhydro,
                                          const int &nscalars, const int &k, const int &j,
-                                         const int &i) const {
+                                         const int &i, const int rank = -1,
+                                         const int block = -1,
+                                         const bool is_ghost = false) const {
     auto gam = GetGamma();
     auto gm1 = gam - 1.0;
     auto density_floor_ = GetDensityFloor();
@@ -143,12 +145,29 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     Real e_k = 0.5 * di * (SQR(u_m1) + SQR(u_m2) + SQR(u_m3));
     Real e_B = 0.5 * (SQR(u_b1) + SQR(u_b2) + SQR(u_b3));
     Real eps = (u_e - e_k - e_B) * di;
+    const Real raw_eps = eps;
+    const bool raw_energy_far_low =
+        IsTabulated() && table_.IsEnergyMoreThanOneDecadeLow(raw_eps);
     if (IsTabulated()) {
       if (!(eps > 0.0) && pressure_floor_ > 0.0)
         eps = InternalEnergyFromDensityPressure(u_d, pressure_floor_);
-      if (!(eps > 0.0) && GetTemperatureFloor() > 0.0)
-        eps = InternalEnergyFromDensityTemperature(u_d, GetTemperatureFloor());
+      if (GetTemperatureFloor() > 0.0) {
+        const Real target =
+            InternalEnergyFromDensityTemperature(u_d, GetTemperatureFloor());
+        if (!(eps >= target)) eps = target;
+      }
       u_e = u_d * eps + e_k + e_B;
+      if (raw_energy_far_low) {
+        const Real reconstructed_eps = (u_e - e_k - e_B) * di;
+        Kokkos::printf(
+            "CTMHD_EOS_LOW rank=%d block=%d k=%d j=%d i=%d ghost=%d "
+            "rho=%.17e raw_eps=%.17e floor_eps=%.17e reconstructed_eps=%.17e "
+            "Etot=%.17e Ek=%.17e EB=%.17e Eth=%.17e "
+            "momentum=(%.17e,%.17e,%.17e) B=(%.17e,%.17e,%.17e)\n",
+            rank, block, k, j, i, static_cast<int>(is_ghost), u_d, raw_eps, eps,
+            reconstructed_eps, u_e, e_k, e_B, u_e - e_k - e_B, u_m1, u_m2, u_m3,
+            u_b1, u_b2, u_b3);
+      }
       w_p = StateFromDensityInternalEnergy(u_d, eps).pressure;
     } else {
       w_p = gm1 * (u_e - e_k - e_B);

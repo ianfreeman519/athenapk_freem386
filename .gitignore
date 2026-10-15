@@ -19,6 +19,10 @@ validation/
 # Object and binary directories
 build*/
 
+# Data Tables and simulation Outputs
+*.h5
+*.phdf
+
 # Mac OS metadata
 .DS_Store
 

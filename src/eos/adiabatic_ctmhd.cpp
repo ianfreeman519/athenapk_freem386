@@ -39,6 +39,10 @@ void AdiabaticCTMHDEOS::ConservedToPrimitive(MeshData<Real> *md) const {
   auto ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::entire);
   auto jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::entire);
   auto kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::entire);
+  auto iib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  auto ijb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  auto ikb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  const int rank = parthenon::Globals::my_rank;
 
   auto pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
   const auto nhydro = pkg->Param<int>("nhydro");
@@ -54,9 +58,13 @@ void AdiabaticCTMHDEOS::ConservedToPrimitive(MeshData<Real> *md) const {
         auto &prim = prim_pack(b);
         // auto &nu = entropy_pack(b);
 
-        return this_on_device.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i);
+        const bool is_ghost = i < iib.s || i > iib.e || j < ijb.s || j > ijb.e ||
+                              k < ikb.s || k > ikb.e;
+        return this_on_device.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i, rank, b,
+                                         is_ghost);
       });
   if (IsTabulated()) {
+    CheckDiagnostics("CT-MHD conserved-to-primitive state conversion");
     parthenon::PackIndexMap eos_map;
     auto eos_pack = md->PackVariables(std::vector<std::string>{
         "eos_temperature", "eos_sound_speed", "eos_zbar", "eos_mu", "eos_mu_e"}, eos_map);
@@ -77,8 +85,20 @@ void AdiabaticCTMHDEOS::ConservedToPrimitive(MeshData<Real> *md) const {
                            SQR(u(IM3, k, j, i)));
           const Real eb = 0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
                                  SQR(u(IB3, k, j, i)));
-          const auto s = this_on_device.StateFromDensityInternalEnergy(
-              rho, (u(IEN, k, j, i) - ek - eb) / rho);
+          const Real eps = (u(IEN, k, j, i) - ek - eb) / rho;
+          if (this_on_device.table_.IsEnergyMoreThanOneDecadeLow(eps)) {
+            const bool is_ghost = i < iib.s || i > iib.e || j < ijb.s || j > ijb.e ||
+                                  k < ikb.s || k > ikb.e;
+            Kokkos::printf(
+                "CTMHD_EOS_FIELD_LOW rank=%d block=%d k=%d j=%d i=%d ghost=%d "
+                "rho=%.17e eps=%.17e Etot=%.17e Ek=%.17e EB=%.17e Eth=%.17e "
+                "momentum=(%.17e,%.17e,%.17e) B=(%.17e,%.17e,%.17e)\n",
+                rank, b, k, j, i, static_cast<int>(is_ghost), rho, eps,
+                u(IEN, k, j, i), ek, eb, u(IEN, k, j, i) - ek - eb,
+                u(IM1, k, j, i), u(IM2, k, j, i), u(IM3, k, j, i),
+                u(IB1, k, j, i), u(IB2, k, j, i), u(IB3, k, j, i));
+          }
+          const auto s = this_on_device.StateFromDensityInternalEnergy(rho, eps);
           out(iT, k, j, i) = s.temperature;
           out(ics, k, j, i) = s.sound_speed;
           out(iz, k, j, i) = s.zbar;
@@ -86,5 +106,5 @@ void AdiabaticCTMHDEOS::ConservedToPrimitive(MeshData<Real> *md) const {
           out(imue, k, j, i) = s.mu_e;
         });
   }
-  CheckDiagnostics("CT-MHD conserved-to-primitive conversion");
+  CheckDiagnostics("CT-MHD EOS output-field reconstruction");
 }

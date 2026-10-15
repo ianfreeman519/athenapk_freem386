@@ -392,10 +392,22 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
         // Try full dt. If error is too large adaptive timestepping will reduce sub_dt
         Real sub_dt = dt;
 
-        // Check if cooling is actually happening, e.g., when T below T_cool_min or if
-        // temperature is already below floor.
+        // Apply the floor before asking the cooling table to convert internal energy to
+        // temperature. Apart from avoiding an out-of-domain EOS query, this ensures that
+        // an already under-floored state is repaired even when no cooling is performed.
+        if (internal_e_initial <= internal_e_floor) {
+          internal_e = internal_e_floor;
+          cons(IEN, k, j, i) += rho * (internal_e - internal_e_initial);
+          prim(IPR, k, j, i) =
+              general_eos
+                  ? eos.StateFromDensityInternalEnergy(rho, internal_e).pressure
+                  : rho * internal_e * gm1;
+          return;
+        }
+
+        // Check if cooling is actually happening, e.g., when T is below T_cool_min.
         const Real dedt_initial = DeDt_wrapper(0.0, internal_e_initial, dedt_valid);
-        if (dedt_initial == 0.0 || internal_e_initial <= internal_e_floor) {
+        if (dedt_initial == 0.0) {
           return;
         }
 
@@ -524,6 +536,7 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
                                        .pressure
                                  : rho * internal_e * gm1;
       });
+  if (general_eos) eos_.CheckDiagnostics("tabular cooling source");
 }
 
 void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
@@ -697,7 +710,11 @@ Real TabularCooling::EstimateTimeStep(MeshData<Real> *md) const {
                                                 rho, temp_floor)
                                           : ideal_internal_e_floor;
 
-        const Real de_dt = cooling_table_obj.DeDt(internal_e, rho);
+        // Do not sample the cooling table below the configured temperature floor. The
+        // general-EOS DeDt path converts internal energy through the rho-e table.
+        const Real de_dt = internal_e > internal_e_floor
+                               ? cooling_table_obj.DeDt(internal_e, rho)
+                               : 0.0;
 
         // Compute cooling time
         // If de_dt is zero (temperature is smaller than lower end of cooling table) or
@@ -709,6 +726,8 @@ Real TabularCooling::EstimateTimeStep(MeshData<Real> *md) const {
         thread_min_cooling_time = std::min(cooling_time, thread_min_cooling_time);
       },
       reducer_min);
+
+  if (general_eos) eos_.CheckDiagnostics("tabular cooling timestep estimate");
 
   return cooling_time_cfl_ * min_cooling_time;
 }

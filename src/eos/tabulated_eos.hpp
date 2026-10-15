@@ -51,8 +51,10 @@ class TabulatedEOS {
                                                    const parthenon::Real eps) const {
     const auto lr = SafeLog(rho, rho_e_lr0_);
     const auto le = SafeLog(eps, rho_e_lx0_);
-    RecordBounds(lr, rho_e_lr0_, rho_e_dlr_, nrho_e_, rho_low, rho_high);
-    RecordBounds(le, rho_e_lx0_, rho_e_dlx_, neps_, energy_low, energy_high);
+    RecordBounds(lr, rho_e_lr0_, rho_e_dlr_, nrho_e_, rho_low, rho_high,
+                 "rho-e/density");
+    RecordBounds(le, rho_e_lx0_, rho_e_dlx_, neps_, energy_low, energy_high,
+                 "rho-e/energy");
     const auto lp = Interpolate(log_pressure_, lr, le, rho_e_lr0_, rho_e_dlr_, nrho_e_,
                                 rho_e_lx0_, rho_e_dlx_, neps_);
     const auto lt = Interpolate(log_temperature_, lr, le, rho_e_lr0_, rho_e_dlr_,
@@ -71,11 +73,14 @@ class TabulatedEOS {
                                                     const parthenon::Real pressure) const {
     const auto lr = SafeLog(rho, rho_p_lr0_);
     const auto lp = SafeLog(pressure, rho_p_lx0_);
-    RecordBounds(lr, rho_p_lr0_, rho_p_dlr_, nrho_p_, rho_low, rho_high);
-    RecordBounds(lp, rho_p_lx0_, rho_p_dlx_, npres_, pressure_low, pressure_high);
+    RecordBounds(lr, rho_p_lr0_, rho_p_dlr_, nrho_p_, rho_low, rho_high,
+                 "rho-p/density");
+    RecordBounds(lp, rho_p_lx0_, rho_p_dlx_, npres_, pressure_low, pressure_high,
+                 "rho-p/pressure");
     const auto le = Interpolate(log_energy_rho_p_, lr, lp, rho_p_lr0_, rho_p_dlr_,
                                 nrho_p_, rho_p_lx0_, rho_p_dlx_, npres_);
-    RecordBounds(le, rho_e_lx0_, rho_e_dlx_, neps_, energy_low, energy_high);
+    RecordBounds(le, rho_e_lx0_, rho_e_dlx_, neps_, energy_low, energy_high,
+                 "rho-p/result-energy");
     return Pow10(le);
   }
 
@@ -84,12 +89,14 @@ class TabulatedEOS {
       const parthenon::Real rho, const parthenon::Real temperature_kelvin) const {
     const auto lr = SafeLog(rho, rho_t_lr0_);
     const auto lt = SafeLog(temperature_kelvin, rho_t_lx0_);
-    RecordBounds(lr, rho_t_lr0_, rho_t_dlr_, nrho_t_, rho_low, rho_high);
+    RecordBounds(lr, rho_t_lr0_, rho_t_dlr_, nrho_t_, rho_low, rho_high,
+                 "rho-T/density");
     RecordBounds(lt, rho_t_lx0_, rho_t_dlx_, ntemp_, temperature_low,
-                 temperature_high);
+                 temperature_high, "rho-T/temperature");
     const auto le = Interpolate(log_energy_rho_t_, lr, lt, rho_t_lr0_, rho_t_dlr_,
                                 nrho_t_, rho_t_lx0_, rho_t_dlx_, ntemp_);
-    RecordBounds(le, rho_e_lx0_, rho_e_dlx_, neps_, energy_low, energy_high);
+    RecordBounds(le, rho_e_lx0_, rho_e_dlx_, neps_, energy_low, energy_high,
+                 "rho-T/result-energy");
     return Pow10(le);
   }
 
@@ -112,6 +119,12 @@ class TabulatedEOS {
   void CheckDiagnostics(const std::string &where) const;
   std::string Fingerprint() const;
 
+  KOKKOS_INLINE_FUNCTION
+  bool IsEnergyMoreThanOneDecadeLow(const parthenon::Real eps) const {
+    return eps > 0.0 && Kokkos::isfinite(eps) &&
+           Kokkos::log10(eps) < rho_e_lx0_ - 1.0;
+  }
+
  private:
   using View1D = parthenon::ParArray1D<parthenon::Real>;
   using View2D = parthenon::ParArray2D<parthenon::Real>;
@@ -120,7 +133,11 @@ class TabulatedEOS {
   parthenon::Real SafeLog(const parthenon::Real x,
                           const parthenon::Real fallback) const {
     if (!(x > 0.0) || !Kokkos::isfinite(x)) {
-      Kokkos::atomic_add(&diagnostics_(invalid_input), 1);
+      const int occurrence = Kokkos::atomic_fetch_add(&diagnostics_(invalid_input), 1);
+      if (occurrence < 32) {
+        Kokkos::printf("TABULATED_EOS_INVALID value=%.17e fallback_log10=%.17e\n", x,
+                       fallback);
+      }
       // The host checkpoint will terminate after this kernel. Returning an in-domain
       // coordinate keeps the remainder of the active kernel numerically bounded.
       return fallback;
@@ -136,14 +153,32 @@ class TabulatedEOS {
   KOKKOS_INLINE_FUNCTION
   void RecordBounds(const parthenon::Real x, const parthenon::Real x0,
                     const parthenon::Real dx, const int n, const int ilo,
-                    const int ihi) const {
+                    const int ihi, const char *coordinate) const {
     const auto xmax = x0 + dx * (n - 1);
     if (x < x0) {
       Kokkos::atomic_add(&diagnostics_(ilo), 1);
-      if (x < x0 - 1.0) Kokkos::atomic_add(&diagnostics_(far_out_of_bounds), 1);
+      if (x < x0 - 1.0) {
+        const int occurrence =
+            Kokkos::atomic_fetch_add(&diagnostics_(far_out_of_bounds), 1);
+        if (occurrence < 32) {
+          Kokkos::printf(
+              "TABULATED_EOS_FAR coordinate=%s side=low log10_query=%.17e "
+              "log10_bound=%.17e decades_outside=%.17e\n",
+              coordinate, x, x0, x0 - x);
+        }
+      }
     } else if (x > xmax) {
       Kokkos::atomic_add(&diagnostics_(ihi), 1);
-      if (x > xmax + 1.0) Kokkos::atomic_add(&diagnostics_(far_out_of_bounds), 1);
+      if (x > xmax + 1.0) {
+        const int occurrence =
+            Kokkos::atomic_fetch_add(&diagnostics_(far_out_of_bounds), 1);
+        if (occurrence < 32) {
+          Kokkos::printf(
+              "TABULATED_EOS_FAR coordinate=%s side=high log10_query=%.17e "
+              "log10_bound=%.17e decades_outside=%.17e\n",
+              coordinate, x, xmax, x - xmax);
+        }
+      }
     }
   }
 
