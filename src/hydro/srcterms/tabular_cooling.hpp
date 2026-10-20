@@ -27,66 +27,13 @@
 #include "../../main.hpp"
 #include "../../eos/tabulated_eos.hpp"
 #include "../../units.hpp"
+#include "cooling_integrator.hpp"
 
 #ifdef MPI_PARALLEL
 #include <mpi.h>
 #endif
 
 namespace cooling {
-
-// Struct to take one RK step using heun's method to compute 2nd and 1st order estimations
-// in y1_h and y1_l
-struct RK12Stepper {
-  template <typename Function>
-  static KOKKOS_INLINE_FUNCTION void
-  Step(const parthenon::Real t0, const parthenon::Real h, const parthenon::Real y0,
-       Function f, parthenon::Real &y1_h, parthenon::Real &y1_l, bool &valid) {
-    const parthenon::Real f_t0_y0 = f(t0, y0, valid);
-    y1_l = y0 + h * f_t0_y0;                                 // 1st order
-    y1_h = y0 + h / 2. * (f_t0_y0 + f(t0 + h, y1_l, valid)); // 2nd order
-  }
-  static KOKKOS_INLINE_FUNCTION parthenon::Real OptimalStep(const parthenon::Real h,
-                                                            const parthenon::Real err,
-                                                            const parthenon::Real tol) {
-    return 0.95 * h * pow(tol / err, 2);
-  }
-};
-
-// Struct to take a 5th and 4th order RK step to compute 5th and 4th order estimations in
-// y1_h and y1_l
-struct RK45Stepper {
-  template <typename Function>
-  static KOKKOS_INLINE_FUNCTION void
-  Step(const parthenon::Real t0, const parthenon::Real h, const parthenon::Real y0,
-       Function f, parthenon::Real &y1_h, parthenon::Real &y1_l, bool &valid) {
-    const parthenon::Real k1 = h * f(t0, y0, valid);
-    const parthenon::Real k2 = h * f(t0 + 1. / 4. * h, y0 + 1. / 4. * k1, valid);
-    const parthenon::Real k3 =
-        h * f(t0 + 3. / 8. * h, y0 + 3. / 32. * k1 + 9. / 32. * k2, valid);
-    const parthenon::Real k4 =
-        h * f(t0 + 12. / 13. * h,
-              y0 + 1932. / 2197. * k1 - 7200. / 2197. * k2 + 7296. / 2197. * k3, valid);
-    const parthenon::Real k5 =
-        h * f(t0 + h,
-              y0 + 439. / 216. * k1 - 8. * k2 + 3680. / 513. * k3 - 845. / 4104. * k4,
-              valid);
-    const parthenon::Real k6 = h * f(t0 + 1. / 2. * h,
-                                     y0 - 8. / 27. * k1 + 2. * k2 - 3544. / 2565. * k3 +
-                                         1859. / 4104. * k4 - 11. / 40. * k5,
-                                     valid); // TODO(forrestglines): Check k2?
-    y1_l = y0 + 25. / 216. * k1 + 1408. / 2565. * k3 + 2197. / 4104. * k4 -
-           1. / 5. * k5; // 4th order
-    y1_h = y0 + 16. / 135. * k1 + 6656. / 12825. * k3 + 28561. / 56430. * k4 -
-           9. / 50. * k5 + 2. / 55. * k6; // 5th order
-  }
-  static KOKKOS_INLINE_FUNCTION parthenon::Real OptimalStep(const parthenon::Real h,
-                                                            const parthenon::Real err,
-                                                            const parthenon::Real tol) {
-    return 0.95 * h * pow(tol / err, 5);
-  }
-};
-
-enum class CoolIntegrator { undefined, rk12, rk45, townsend };
 
 class CoolingTableObj {
   /************************************************************
@@ -169,8 +116,9 @@ class CoolingTableObj {
       // Inside table, interpolate assuming log spaced temperatures
 
       // Determine where temp is in the table
-      const unsigned int i_temp =
-          static_cast<unsigned int>((log_temp - log_temp_start_) / d_log_temp_);
+      const unsigned int i_temp = std::min(
+          n_temp_ - 2,
+          static_cast<unsigned int>((log_temp - log_temp_start_) / d_log_temp_));
       const Real log_temp_i = log_temp_start_ + d_log_temp_ * i_temp;
 
       // log_temp should be between log_temps[i_temp] and log_temps[i_temp+1]
@@ -246,12 +194,14 @@ class TabularCooling {
   // Tolerances
   parthenon::Real d_log_temp_tol_, d_e_tol_;
 
-  // Used for roundoff as subcycle approaches end of timestep
-  static constexpr parthenon::Real KEpsilon_ = 1e-12;
-
   CoolingTableObj cooling_table_obj_;
   bool general_eos_ = false;
   TabulatedEOS eos_;
+
+  CoolingSettings IntegrationSettings() const {
+    return {general_eos_, eos_, std::max(T_floor_, std::pow(10.0, log_temp_start_)),
+            max_iter_, d_e_tol_, cooling_time_cfl_};
+  }
 
  public:
   TabularCooling(parthenon::ParameterInput *pin,

@@ -200,7 +200,6 @@ class TestCase(utils.test_case.TestCaseAbs):
         """
         analyze_status = True
 
-        H_mass_fraction = 1.0 - self.He_mass_fraction
         Yp = self.He_mass_fraction
         mu = 1 / (Yp * 3.0 / 4.0 + (1 - Yp) * 2)
         mu_e = 1 / (Yp * 2.0 / 4.0 + (1 - Yp))
@@ -208,14 +207,18 @@ class TestCase(utils.test_case.TestCaseAbs):
         gm1 = self.adiabatic_index - 1.0
 
         # First evolve the analytic model
-        # Compute the hydrogen number density
+        # Match the branch's n_e^2 normalization and physical constants in Units.
         initial_internal_e = (
             self.uniform_gas_pres / (self.uniform_gas_rho * (self.adiabatic_index - 1))
         ).in_units("erg/g")
-        n_h = (self.uniform_gas_rho * H_mass_fraction / unyt.mh).in_units("1/cm**3")
+        atomic_mass_unit = unyt.unyt_quantity(1.660538921e-24, "g")
+        boltzmann = unyt.unyt_quantity(1.3806488e-16, "erg/K")
+        # The ideal-gas temperature conversion retains the hydrogen-mass convention.
+        thermal_mass = 1.007947 * atomic_mass_unit
+        n_e = (self.uniform_gas_rho / (mu_e * atomic_mass_unit)).in_units("1/cm**3")
 
         # Compute temperature
-        initial_temp = initial_internal_e * (mu * unyt.mh * gm1 / unyt.kb)
+        initial_temp = initial_internal_e * (mu * thermal_mass * gm1 / boltzmann)
 
         # Unit helpers
         Ta = unyt.unyt_quantity(1, "K")
@@ -227,8 +230,8 @@ class TestCase(utils.test_case.TestCaseAbs):
         )
         cooling_b = self.log_lambda1 - self.log_temp1 * cooling_m
         B = unyt.unyt_quantity(10**cooling_b, "erg*cm**3/s")
-        X = mu * unyt.mh * (self.adiabatic_index - 1) / (unyt.kb * Ta)
-        Y = B * n_h**2 / self.uniform_gas_rho
+        X = mu * thermal_mass * (self.adiabatic_index - 1) / (boltzmann * Ta)
+        Y = B * n_e**2 / self.uniform_gas_rho
 
         # Integrate for the final internal energy
         analytic_internal_e = lambda t: ea * (

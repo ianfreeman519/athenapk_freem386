@@ -49,9 +49,10 @@ after device diagnostics have been reduced. The table fingerprint is inserted in
 the parameter stream and verified when restarting.
 
 The first supported evolution combinations are Euler-HLLE, GLM-MHD-HLLE, and
-UCT-HLLE MHD. HLLC and HLLD remain ideal-gas-only. Cooling and diffusion/transport are
-currently rejected with the tabulated EOS so they cannot silently use ideal-gas
-temperature formulas.
+UCT-HLLE MHD. HLLC and HLLD remain ideal-gas-only. Adaptive tabular cooling and
+analytic free-free cooling query the EOS at each integration stage. See
+[cooling notes](cooling_notes.md#eos-aware-free-free-cooling) for the mean-charge
+free-free model and its required Gaunt factor.
 
 The sample [`tabulated_sod.in`](../inputs/tabulated_sod.in) uses SI-scaled code units
 and the aluminum table in `inputs/tables/tabulated_eos.h5`.

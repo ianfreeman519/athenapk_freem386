@@ -24,6 +24,9 @@ add_executable(
         hydro/srcterms/gravitational_field.hpp
         hydro/srcterms/tabular_cooling.hpp
         hydro/srcterms/tabular_cooling.cpp
+        hydro/srcterms/cooling_integrator.hpp
+        hydro/srcterms/free_free_cooling.hpp
+        hydro/srcterms/free_free_cooling.cpp
         refinement/gradient.cpp
         refinement/other.cpp
         tracers/tracers.cpp

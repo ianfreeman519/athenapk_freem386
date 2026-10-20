@@ -51,7 +51,7 @@ KOKKOS_INLINE_FUNCTION constexpr bool IsUCTFluid(const Fluid fluid) {
 KOKKOS_INLINE_FUNCTION constexpr bool IsCTFluid(const Fluid fluid) {
   return fluid == Fluid::ctmhd || IsUCTFluid(fluid);
 }
-enum class Cooling { none, tabular };
+enum class Cooling { none, tabular, free_free };
 enum class Conduction { none, isotropic, anisotropic };
 enum class ConductionCoeff { none, fixed, spitzer };
 enum class Viscosity { none, isotropic };

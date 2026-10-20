@@ -40,6 +40,7 @@
 #include "prolongation/custom_ops.hpp"
 #include "rsolvers/rsolvers.hpp"
 #include "srcterms/tabular_cooling.hpp"
+#include "srcterms/free_free_cooling.hpp"
 #include "utils/error_checking.hpp"
 
 using namespace parthenon::package::prelude;
@@ -322,6 +323,8 @@ TaskStatus AddUnsplitSources(MeshData<Real> *md, const SimTime &tm, const Real b
         hydro_pkg->Param<TabularCooling>("tabular_cooling");
 
     tabular_cooling.SrcTerm(md, beta_dt);
+  } else if (enable_cooling == Cooling::free_free) {
+    hydro_pkg->Param<cooling::FreeFreeCooling>("free_free_cooling").SrcTerm(md, beta_dt);
   }
   if (ProblemSourceUnsplit != nullptr) {
     ProblemSourceUnsplit(md, tm, beta_dt);
@@ -1144,15 +1147,19 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   auto cooling = Cooling::none;
   if (enable_cooling_str == "tabular") {
     cooling = Cooling::tabular;
+  } else if (enable_cooling_str == "free_free") {
+    cooling = Cooling::free_free;
   } else if (enable_cooling_str != "none") {
     PARTHENON_FAIL("AthenaPK hydro: Unknown cooling string. Supported options are "
-                   "'none' and 'tabular'");
+                   "'none', 'tabular', and 'free_free'");
   }
   pkg->AddParam<>("enable_cooling", cooling);
 
   if (cooling == Cooling::tabular) {
     TabularCooling tabular_cooling(pin, pkg);
     pkg->AddParam<>("tabular_cooling", tabular_cooling);
+  } else if (cooling == Cooling::free_free) {
+    pkg->AddParam<>("free_free_cooling", cooling::FreeFreeCooling(pin, pkg));
   }
 
   auto scratch_level = pin->GetOrAddInteger("hydro", "scratch_level", 0);
@@ -1454,6 +1461,9 @@ Real EstimateTimestep(MeshData<Real> *md) {
         hydro_pkg->Param<TabularCooling>("tabular_cooling");
 
     min_dt = std::min(min_dt, tabular_cooling.EstimateTimeStep(md));
+  } else if (enable_cooling == Cooling::free_free) {
+    min_dt = std::min(min_dt, hydro_pkg->Param<cooling::FreeFreeCooling>(
+                                "free_free_cooling").EstimateTimeStep(md));
   }
 
   auto dt_diff = std::numeric_limits<Real>::max();

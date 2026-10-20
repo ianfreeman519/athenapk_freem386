@@ -78,3 +78,9 @@ setup_test_both("cluster_agn_triggering" "--driver ${PROJECT_BINARY_DIR}/bin/ath
 
   setup_test_serial("lw_implode_symmetry" "--driver ${PROJECT_BINARY_DIR}/bin/athenaPK \
   --driver_input ${PROJECT_SOURCE_DIR}/inputs/lw_implode.in --num_steps 1" "regression")
+
+add_test(NAME free_free_cooling
+  COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/free_free_cooling/check_free_free.py
+    --driver $<TARGET_FILE:athenaPK>)
+set_tests_properties(free_free_cooling PROPERTIES LABELS "regression" TIMEOUT 600)

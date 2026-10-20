@@ -47,6 +47,9 @@ class TabulatedEOS {
   bool IsInitialized() const { return nrho_e_ > 1; }
 
   KOKKOS_INLINE_FUNCTION
+  parthenon::Real MeanIonMass() const { return mean_ion_mass_; }
+
+  KOKKOS_INLINE_FUNCTION
   TabulatedEOSState StateFromDensityInternalEnergy(const parthenon::Real rho,
                                                    const parthenon::Real eps) const {
     const auto lr = SafeLog(rho, rho_e_lr0_);

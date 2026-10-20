@@ -114,3 +114,62 @@ where $S_{cool}$ is the volumetric cooling source term, $n_e$ is the number dens
 For the case of a hydrogen-only fully-ionized plasma *only*, this is equivalent to the $n_H^2 \Lambda$ convention, since each hydrogen atom contributes exactly one electron and there are no other sources of electrons.
 
 I am not aware of any common tables that use this convention. However, it is noted as one of the possible conventions by Sutherland and Dopita (1993).
+
+## EOS-aware free-free cooling
+
+For a single-component plasma using `hydro/eos = tabulated`, select the analytic
+free-free source instead of a temperature-only cooling table:
+
+```ini
+<cooling>
+enable_cooling = free_free
+free_free_gaunt_factor = 1.2  # illustrative; choose explicitly for your model
+free_free_temperature_floor = 1e3  # K; default 1e3
+integrator = rk45           # default; rk12 also supported
+cfl = 0.1                  # cooling timestep safety factor; <=0 disables limit
+max_iter = 100              # maximum adaptive subcycles
+d_e_tol = 1e-8              # relative specific-energy integration tolerance
+```
+
+The finite, positive, frequency-integrated Gaunt factor is required. No table file,
+`lambda_units_cgs`, or density normalization parameter is used by this mode.
+`none`, `tabular`, and `free_free` are mutually exclusive values of
+`cooling/enable_cooling`. Townsend integration is not supported for free-free.
+
+At **every Runge–Kutta stage**, the EOS supplies temperature $T$ in kelvin and
+mean charge $\bar Z$ at the current density and specific internal energy. With
+$A$ from `tabulated_eos/mean_ion_mass_hydrogen` (the EOS's ion mass in atomic mass
+units), the source computes
+
+$$
+n_i=\rho/(A m_u),\quad n_e=\bar Z n_i,\quad
+Q_{\rm ff}=1.426\times10^{-27}g_B\bar Z^2 n_e n_i\sqrt{T}
+\quad[\mathrm{erg\,cm^{-3}\,s^{-1}}].
+$$
+
+The integrated specific-energy rate is $d\epsilon/dt=-Q_{\rm ff}/\rho$.
+The implementation converts the coefficient and ion mass to code units through
+`Units`; the numerical temperature remains in kelvin. Exactly neutral material
+has zero emission. At fixed ion density and temperature, the rate scales as
+$\bar Z^3$, equivalently $n_e^2\bar Z\sqrt T$.
+
+The effective temperature floor is the larger of `hydro/Tfloor` and
+`free_free_temperature_floor`. As with existing adaptive cooling, an initial state
+below this floor is repaired to it. Cooling changes total energy and updates EOS
+pressure, preserving density, momentum, and magnetic fields. There is no artificial
+upper temperature cutoff; the tabulated EOS's own bounds and diagnostics still
+apply. The cooling timestep estimate is `cfl * epsilon / abs(deps_dt)`, or infinity
+when no cooling occurs. Existing subcycle controls retain their behavior, including
+floor saturation for unresolved stiff cooling; `d_e_tol` is not a guarantee of
+accuracy once the subcycle budget is exhausted.
+
+This is an optically thin, nonrelativistic, single-temperature **mean-charge
+approximation**: $\bar Z^2$ replaces the charge-resolved second moment. It includes
+neither charge-state populations nor charge-dependent Gaunt factors, radiation
+transport, electron-electron bremsstrahlung, or separate electron/ion temperatures.
+A constant $g_B$ must be selected with these accuracy limits in mind.
+
+`scripts/generate_free_free_cooling.py` is now a reference rate calculator rather
+than a temperature-only table generator. Supply CSV rows `rho[g/cm^3], T[K], Zbar`
+and explicit `--mean-ion-mass` and `--gaunt-factor`; it writes the states,
+volumetric emissivity, and specific-energy loss as CSV. It imposes no fixed charge.

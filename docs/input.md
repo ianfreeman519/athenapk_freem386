@@ -470,3 +470,12 @@ They are being used by specifying the name as parameter value for the
 `ix1_bc`, `ox1_bc`, `ix2_bc`, `ox2_bc`, `ix3_bc`, and `ox3_bc` paraemters
 in the `<parthenon/mesh>` block of the input file for the inner and outer
 (say left and right in x1 direction) in each coordinate direction, respectively.
+
+#### Analytic free-free cooling
+
+Set `cooling/enable_cooling = free_free` with `hydro/eos = tabulated` to evaluate
+free-free losses using the current EOS mean charge and temperature. The positive
+`cooling/free_free_gaunt_factor` is required; the temperature floor defaults to
+`cooling/free_free_temperature_floor = 1e3` K. RK45 is the default integrator;
+RK12 is also supported. See [cooling notes](cooling_notes.md#eos-aware-free-free-cooling)
+for the rate definition, units, controls, and mean-charge approximation.
