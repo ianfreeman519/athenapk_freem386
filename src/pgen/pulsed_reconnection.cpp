@@ -91,6 +91,8 @@ struct PulsedReconnectionParams {
   Real rho_inner_reservoir;
   Real T_inner_reservoir;
   Real inner_reservoir_radius;
+  Real inner_reservoir_rho_transition_width;
+  Real inner_reservoir_T_transition_width;
   Real v0;
   Real velocity_normalization;
   int azimuthal_mode_number;
@@ -200,14 +202,14 @@ Real SmootherStep01(const Real x) {
 
 KOKKOS_INLINE_FUNCTION
 Real EvaluateInnerReservoirProfile(const RadialProfileParams &params,
-                                   const Real reservoir_radius, const Real r) {
+                                   const Real reservoir_radius,
+                                   const Real transition_width, const Real r) {
   if (params.shape != ProfileShape::annulus || r >= reservoir_radius) {
     return 0.0;
   }
-  const Real transition_start = reservoir_radius - params.annulus_transition_width;
+  const Real transition_start = reservoir_radius - transition_width;
   if (r <= transition_start) return 1.0;
-  return 1.0 - SmootherStep01((r - transition_start) /
-                              params.annulus_transition_width);
+  return 1.0 - SmootherStep01((r - transition_start) / transition_width);
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -614,10 +616,12 @@ DriveSupportState EvaluateDriveSupportState(const PulsedReconnectionParams &para
     if (params.inner_reservoir_support_enabled) {
       const Real rho_inner_weight =
           EvaluateInnerReservoirProfile(params.initial_rho_profile,
-                                        params.inner_reservoir_radius, r);
+                                        params.inner_reservoir_radius,
+                                        params.inner_reservoir_rho_transition_width, r);
       const Real T_inner_weight =
           EvaluateInnerReservoirProfile(params.initial_T_profile,
-                                        params.inner_reservoir_radius, r);
+                                        params.inner_reservoir_radius,
+                                        params.inner_reservoir_T_transition_width, r);
       support.rho_inner_target += params.drive_rho_inner_reservoir_floor *
                                   inner_reservoir_envelope * rho_inner_weight;
       support.T_inner_floor += params.drive_T_inner_reservoir_floor *
@@ -1059,6 +1063,21 @@ LoadSourceParams(StateDescriptor *hydro_pkg, ParameterInput *pin) {
                              params.initial_rho_profile.annulus_inner_radius)
           : 0.0;
 
+  // Inputs are lengths in cm. Preserve the old masks when widths are omitted,
+  // without coupling explicitly configured reservoir widths to the wire annulus.
+  const Real inner_reservoir_rho_transition_width_cgs = pin->GetOrAddReal(
+      kInputBlock, "inner_reservoir_rho_transition_width",
+      params.initial_rho_profile.annulus_transition_width);
+  const Real inner_reservoir_T_transition_width_cgs = pin->GetOrAddReal(
+      kInputBlock, "inner_reservoir_T_transition_width",
+      params.initial_T_profile.annulus_transition_width);
+  PARTHENON_REQUIRE_THROWS(
+      std::isfinite(inner_reservoir_rho_transition_width_cgs) &&
+          inner_reservoir_rho_transition_width_cgs >= 0.0 &&
+          std::isfinite(inner_reservoir_T_transition_width_cgs) &&
+          inner_reservoir_T_transition_width_cgs >= 0.0,
+      "Inner reservoir transition widths must be finite and nonnegative.");
+
   CheckProfile(params.initial_rho_profile, "initial_rho", false);
   CheckProfile(params.initial_T_profile, "initial_T", false);
   CheckProfile(params.initial_magnetic_profile, "initial_magnetic", true);
@@ -1070,21 +1089,24 @@ LoadSourceParams(StateDescriptor *hydro_pkg, ParameterInput *pin) {
                "A negative inner_reservoir_radius produces no reservoir mask.");
     // Overlap is permitted: the existing initialization/source sums both profiles.
     const auto warn_reservoir = [&](const RadialProfileParams &profile,
-                                    const std::string &name, const bool enabled) {
+                                    const std::string &name, const Real transition_width,
+                                    const bool enabled) {
       if (!enabled || profile.shape == ProfileShape::none) return;
       WarnUnless(profile.shape == ProfileShape::annulus,
                  name + " has no annular reservoir mask; its reservoir contribution "
                         "will be zero.");
       if (profile.shape != ProfileShape::annulus) return;
-      WarnUnless(inner_reservoir_radius_cgs >= profile.annulus_transition_width,
+      WarnUnless(inner_reservoir_radius_cgs >= transition_width,
                  "inner_reservoir_radius is smaller than the " + name +
                      " transition width; the reservoir has no flat central region.");
       WarnUnless(inner_reservoir_radius_cgs <= profile.annulus_inner_radius,
                  "The inner reservoir overlaps " + name + "; their contributions add.");
     };
     warn_reservoir(params.initial_rho_profile, "initial_rho",
+                   inner_reservoir_rho_transition_width_cgs,
                    rho_inner_reservoir_cgs != 0.0 || params.inner_reservoir_support_enabled);
     warn_reservoir(params.initial_T_profile, "initial_T",
+                   inner_reservoir_T_transition_width_cgs,
                    params.T_inner_reservoir != 0.0 || params.inner_reservoir_support_enabled);
     WarnUnless(rho_inner_reservoir_cgs >= 0.0 && params.T_inner_reservoir >= 0.0,
                "Negative initial reservoir density/temperature subtracts from the "
@@ -1138,6 +1160,10 @@ LoadSourceParams(StateDescriptor *hydro_pkg, ParameterInput *pin) {
   params.rho_wire = rho_wire_cgs * units.g_cm3();
   params.rho_inner_reservoir = rho_inner_reservoir_cgs * units.g_cm3();
   params.inner_reservoir_radius = inner_reservoir_radius_cgs * units.cm();
+  params.inner_reservoir_rho_transition_width =
+      inner_reservoir_rho_transition_width_cgs * units.cm();
+  params.inner_reservoir_T_transition_width =
+      inner_reservoir_T_transition_width_cgs * units.cm();
   params.drive_rho_inner_reservoir_floor =
       drive_rho_inner_reservoir_floor_cgs * units.g_cm3();
   params.rho_background = rho_background_cgs * units.g_cm3();
@@ -1234,6 +1260,10 @@ LoadSourceParams(StateDescriptor *hydro_pkg, ParameterInput *pin) {
               << "rho inner reservoir ==== " << rho_inner_reservoir_cgs
               << " g/cm^3" << '\n'
               << "inner reservoir radius = " << inner_reservoir_radius_cgs
+              << " cm" << '\n'
+              << "inner rho transition == " << inner_reservoir_rho_transition_width_cgs
+              << " cm" << '\n'
+              << "inner T transition ==== " << inner_reservoir_T_transition_width_cgs
               << " cm" << '\n'
               << "rho_background [g/cm^3]= " << rho_background_cgs << '\n'
               << "T_wire(core) [K] ======= " << params.T_wire << '\n'
@@ -1375,10 +1405,12 @@ InitialState EvaluateInitialState(const PulsedReconnectionParams &params,
     rho_profile_sum += rho_profile * density_perturbation;
     T_inner_reservoir_sum +=
         EvaluateInnerReservoirProfile(params.initial_T_profile,
-                                      params.inner_reservoir_radius, r);
+                                      params.inner_reservoir_radius,
+                                      params.inner_reservoir_T_transition_width, r);
     rho_inner_reservoir_sum +=
         EvaluateInnerReservoirProfile(params.initial_rho_profile,
-                                      params.inner_reservoir_radius, r);
+                                      params.inner_reservoir_radius,
+                                      params.inner_reservoir_rho_transition_width, r);
     magnetic_support_sum += EvaluateSupportTable(params.initial_support_table, r);
 
     if (r > 0.0) {

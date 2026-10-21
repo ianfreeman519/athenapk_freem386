@@ -479,3 +479,25 @@ free-free losses using the current EOS mean charge and temperature. The positive
 `cooling/free_free_temperature_floor = 1e3` K. RK45 is the default integrator;
 RK12 is also supported. See [cooling notes](cooling_notes.md#eos-aware-free-free-cooling)
 for the rate definition, units, controls, and mean-charge approximation.
+
+#### Pulsed-reconnection inner reservoir transitions
+
+In `<problem/pulsed_reconnection>`, the inner reservoir cutoff has independent
+smootherstep widths, specified in cm:
+
+```ini
+inner_reservoir_T_transition_width = 0.10
+innter_reservoir_rho_transition_width = 0.10
+```
+
+The density parameter is spelled `innter_reservoir_rho_transition_width`.
+If omitted, the temperature and density widths default to
+`initial_T_transition_width` and `initial_rho_transition_width`, respectively.
+These defaults preserve the previous reservoir profiles. Explicit reservoir widths
+do not change either wire-annulus profile.
+
+For each quantity, the reservoir is flat through `inner_reservoir_radius - width`,
+then tapers to zero at `inner_reservoir_radius`. Widths must be finite and
+nonnegative; zero gives a sharp cutoff. The same masks are used by optional inner
+reservoir replenishment. Increasing a width at fixed radius reduces the flat core
+and the integrated reservoir contribution.
