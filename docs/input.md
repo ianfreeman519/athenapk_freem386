@@ -114,6 +114,7 @@ resistivity_coeff = fixed   # fixed or spitzer
 ohm_diff_coeff_code = 0.25  # fixed magnetic diffusivity in code_length^2/code_time
 #spitzer_log_lambda = 10.0  # Coulomb logarithm
 #spitzer_zbar = 3.0         # optional override of hydro/zbar
+#spitzer_eta_min = -1.0     # floor in CGS cm^2/s; <= 0 disables it
 #spitzer_eta_max = -1.0     # optional cap in CGS cm^2/s; <= 0 disables it
 ```
 (An)isotropic thermal conduction (with fixed or Spitzer coefficient), and isotropic viscosity and
@@ -233,7 +234,7 @@ mom_diff_coeff_code = 0.25  # fixed coefficent of the kinetmatic viscosity in co
 
 Ohmic resistivity supports either a fixed magnetic diffusivity in code units or a
 temperature-dependent Spitzer magnetic diffusivity. Spitzer resistivity requires a `<units>`
-block and gas composition. Its value and optional cap are converted from CGS cm^2/s to
+block and gas composition. Its value and optional bounds are converted from CGS cm^2/s to
 `code_length`^2/`code_time`, so non-unity code units are supported.
 To enable set (in the `<diffusion>` block)
 ```
@@ -249,11 +250,15 @@ resistivity = ohmic
 resistivity_coeff = spitzer
 spitzer_log_lambda = 10.0
 #spitzer_zbar = 3.0       # defaults to hydro/mean_ionization_state (zbar)
+#spitzer_eta_min = -1.0   # floor in CGS cm^2/s; <= 0 disables it
 #spitzer_eta_max = -1.0   # cap in CGS cm^2/s; <= 0 disables it
 ```
 
 The implemented diffusivity is
 $\eta = 1.02688\times10^{12}\,\bar{Z}\ln\Lambda\,T^{-3/2}$ cm$^2$ s$^{-1}$.
+When enabled, `spitzer_eta_min` floors the diffusivity, including in tabulated-EOS
+cells with zero ionization. Both bounds default to disabled (`-1.0`); when both
+are positive, `spitzer_eta_min` must not exceed `spitzer_eta_max`.
 
 
 ### Additional MHD options in `<hydro>` block

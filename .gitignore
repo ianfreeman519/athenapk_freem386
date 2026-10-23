@@ -9,6 +9,7 @@ __pycache__/
 test_runs/
 test-suite-uct-ct-glm/
 suit_staging/
+analysis/*
 
 # Validation folder
 validation/
