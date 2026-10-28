@@ -21,6 +21,9 @@
 // Initialize defaults for package specific callback functions
 namespace Hydro {
 InitPackageDataFun_t ProblemInitPackageData = nullptr;
+ModifyCTEMFFun_t ProblemModifyCTEMF = nullptr;
+std::function<TaskStatus(MeshData<Real> *, Real)> ProblemCorrectCTEnergy = nullptr;
+SourceFun_t ProblemSourceStage = nullptr;
 SourceFun_t ProblemSourceFirstOrder = nullptr;
 SourceFun_t ProblemSourceStrangSplit = nullptr;
 SourceFun_t ProblemSourceUnsplit = nullptr;

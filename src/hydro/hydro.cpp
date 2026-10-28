@@ -889,17 +889,26 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
                                  "The Spitzer mean ionization state must be positive.");
 
         // Convert CGS magnetic diffusivity [cm^2/s] to
-        // [code_length^2/code_time], including an optional cap in CGS.
+        // [code_length^2/code_time], including optional bounds in CGS.
         const Real eta_cgs_to_code = SQR(units.cm()) / units.s();
         const Real spitzer_eta_max_cgs =
             pin->GetOrAddReal("diffusion", "spitzer_eta_max", -1.0);
+        const Real spitzer_eta_min_cgs =
+            pin->GetOrAddReal("diffusion", "spitzer_eta_min", -1.0);
+        PARTHENON_REQUIRE_THROWS(
+            !(spitzer_eta_min_cgs > 0.0 && spitzer_eta_max_cgs > 0.0) ||
+                spitzer_eta_min_cgs <= spitzer_eta_max_cgs,
+            "diffusion/spitzer_eta_min must not exceed spitzer_eta_max.");
+        const Real spitzer_eta_min = spitzer_eta_min_cgs > 0.0
+                                         ? spitzer_eta_min_cgs * eta_cgs_to_code
+                                         : -1.0;
         const Real spitzer_eta_max = spitzer_eta_max_cgs > 0.0
                                          ? spitzer_eta_max_cgs * eta_cgs_to_code
                                          : -1.0;
         auto ohm_diff = OhmicDiffusivity(
             resistivity, resistivity_coeff, spitzer_log_lambda,
             pkg->Param<Real>("mbar_over_kb"), zbar, eta_cgs_to_code,
-            spitzer_eta_max);
+            spitzer_eta_max, spitzer_eta_min);
         pkg->AddParam<>("ohm_diff", ohm_diff);
 
       } else if (resistivity_coeff_str == "fixed") {
@@ -1079,18 +1088,25 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         const auto eta_conv = SQR(units.cm()) / units.s();
         const auto eta_max_cgs =
             pin->GetOrAddReal("diffusion", "spitzer_eta_max", -1.0);
+        const auto eta_min_cgs =
+            pin->GetOrAddReal("diffusion", "spitzer_eta_min", -1.0);
+        PARTHENON_REQUIRE_THROWS(
+            !(eta_min_cgs > 0.0 && eta_max_cgs > 0.0) ||
+                eta_min_cgs <= eta_max_cgs,
+            "diffusion/spitzer_eta_min must not exceed spitzer_eta_max.");
         pkg->AddParam<>(
             "ohm_diff",
             OhmicDiffusivity(resistivity, ResistivityCoeff::spitzer, log_lambda,
                              NAN, NAN, eta_conv,
                              eta_max_cgs > 0.0 ? eta_max_cgs * eta_conv : -1.0,
+                             eta_min_cgs > 0.0 ? eta_min_cgs * eta_conv : -1.0,
                              table));
       } else if (coeff_str == "fixed") {
         pkg->AddParam<>("ohm_diff",
                         OhmicDiffusivity(resistivity, ResistivityCoeff::fixed,
                                          pin->GetReal("diffusion",
                                                       "ohm_diff_coeff_code"),
-                                         0.0, 0.0, 0.0, -1.0, table));
+                                         0.0, 0.0, 0.0, -1.0, -1.0, table));
       } else {
         PARTHENON_FAIL("Resistivity requires a fixed or spitzer coefficient.");
       }

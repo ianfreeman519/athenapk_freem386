@@ -31,6 +31,12 @@ using SourceFun_t =
     std::function<void(MeshData<Real> *md, const SimTime &tm, const Real dt)>;
 using EstimateTimestepFun_t = std::function<Real(MeshData<Real> *md)>;
 
+// Optional prescribed-apparatus hooks. CT hooks bracket the synchronized CT update.
+using ModifyCTEMFFun_t =
+    std::function<TaskStatus(MeshData<Real> *, MeshData<Real> *, Real, Real)>;
+extern ModifyCTEMFFun_t ProblemModifyCTEMF;
+extern std::function<TaskStatus(MeshData<Real> *, Real)> ProblemCorrectCTEnergy;
+extern SourceFun_t ProblemSourceStage;
 extern SourceFun_t ProblemSourceFirstOrder;
 extern SourceFun_t ProblemSourceUnsplit;
 extern SourceFun_t ProblemSourceStrangSplit;

@@ -813,6 +813,11 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
       ct_emf = tl.AddTask(ct_emf, AddOhmicEdgeEMF, mu0.get());
     }
 
+    if (ProblemModifyCTEMF != nullptr) {
+      ct_emf = tl.AddTask(ct_emf, ProblemModifyCTEMF, mu0.get(), mu1.get(),
+                          integrator->gam0[stage - 1], integrator->gam1[stage - 1]);
+    }
+
     // TODO(pgrete) figure out what to do about the sources from the first stage
     // that are potentially disregarded when the (m)hd fluxes are corrected in the second
     // stage.
@@ -847,6 +852,10 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
           mu1.get(), integrator->gam0[stage - 1], integrator->gam1[stage - 1],
           integrator->beta[stage - 1] * integrator->dt);
     }
+    if (ProblemCorrectCTEnergy != nullptr) {
+      update_face = tl.AddTask(update_face, ProblemCorrectCTEnergy, mu0.get(),
+                               integrator->beta[stage - 1] * integrator->dt);
+    }
     // Add non-operator split source terms.
     // Note: Directly update the "cons" variables of mu0 based on the "prim" variables
     // of mu0 as the "cons" variables have already been updated in this stage from the
@@ -869,6 +878,16 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
       // problem types, see random blasts.
       source_split_first_order =
           tl.AddTask(source_split_strang_final, AddSplitSourcesFirstOrder, mu0.get(), tm);
+    }
+
+    if (ProblemSourceStage != nullptr) {
+      source_split_first_order = tl.AddTask(
+          source_split_first_order,
+          [](MeshData<Real> *md, const SimTime &time, Real dt) {
+            ProblemSourceStage(md, time, dt);
+            return TaskStatus::complete;
+          },
+          mu0.get(), tm, integrator->dt / integrator->nstages);
     }
 
     // -------------- CT step 4 (apply boundary conditions) --------------

@@ -12,6 +12,7 @@
 
 // AthenaPK headers
 #include "../../main.hpp"
+#include "../reservoir_mask.hpp"
 #include "config.hpp"
 #include "diffusion.hpp"
 #include "kokkos_abstraction.hpp"
@@ -23,12 +24,16 @@ using TE = parthenon::TopologicalElement;
 Real EstimateResistivityTimestep(MeshData<Real> *md) {
   // get to package via first block in Meshdata (which exists by construction)
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const auto mask = GetReservoirMask(*hydro_pkg);
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
 
   IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
   IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
   IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
 
+  const auto diag = md->PackVariables(
+      std::vector<std::string>{mask.enabled ? "reservoir_mask_diagnostics" : "prim"});
+  const Real cfl_diff = hydro_pkg->Param<Real>("cfl_diff");
   Real min_dt_resist = std::numeric_limits<Real>::max();
   const auto ndim = prim_pack.GetNdim();
 
@@ -51,10 +56,14 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
         KOKKOS_LAMBDA(const int b, const int k, const int j, const int i, Real &min_dt) {
           const auto &coords = prim_pack.GetCoords(b);
           const auto &prim = prim_pack(b);
+          if (mask.ContainsStencil(coords, k, j, i)) {
+            diag(b, 1, k, j, i) = std::numeric_limits<Real>::max();
+            return;
+          }
           const auto eta =
               ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i));
-          min_dt =
-              fmin(min_dt, SQR(coords.Dxc<1>(k, j, i)) / (eta + TINY_NUMBER));
+          Real cell_dt = SQR(coords.Dxc<1>(k, j, i)) / (eta + TINY_NUMBER);
+          min_dt = fmin(min_dt, cell_dt);
           if (ndim >= 2) {
             min_dt = fmin(min_dt,
                           SQR(coords.Dxc<2>(k, j, i)) / (eta + TINY_NUMBER));
@@ -63,13 +72,19 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
             min_dt = fmin(min_dt,
                           SQR(coords.Dxc<3>(k, j, i)) / (eta + TINY_NUMBER));
           }
+          if (mask.enabled) {
+            if (ndim >= 2)
+              cell_dt = fmin(cell_dt, SQR(coords.Dxc<2>(k, j, i)) / (eta + TINY_NUMBER));
+            if (ndim >= 3)
+              cell_dt = fmin(cell_dt, SQR(coords.Dxc<3>(k, j, i)) / (eta + TINY_NUMBER));
+            diag(b, 1, k, j, i) = cfl_diff * fac * cell_dt;
+          }
         },
         Kokkos::Min<Real>(min_dt_resist));
   } else {
     PARTHENON_THROW("Needs impl.");
   }
 
-  const auto &cfl_diff = hydro_pkg->Param<Real>("cfl_diff");
   const Real dt_diffusion = cfl_diff * fac * min_dt_resist;
 
   // Limit the fractional internal-energy increase from Ohmic heating,
@@ -91,6 +106,8 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
                     Real &min_time) {
         const auto &coords = prim_pack.GetCoords(b);
         const auto &prim = prim_pack(b);
+        if (mask.enabled) diag(b, 2, k, j, i) = std::numeric_limits<Real>::max();
+        if (mask.ContainsStencil(coords, k, j, i)) return;
         const Real rho = prim(IDN, k, j, i);
         const Real pres = prim(IPR, k, j, i);
         const Real eta = ohm_diff_val.Get(pres, rho);
@@ -125,7 +142,9 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
         if (heating_rate > 0.0) {
           const Real internal_energy_density =
               ohm_diff_val.InternalEnergy(rho, pres, gm1);
-          min_time = fmin(min_time, internal_energy_density / heating_rate);
+          const Real time = internal_energy_density / heating_rate;
+          min_time = fmin(min_time, time);
+          if (mask.enabled) diag(b, 2, k, j, i) = cfl_diff * time;
         }
       },
       Kokkos::Min<Real>(min_heating_time));
@@ -151,6 +170,7 @@ void OhmicDiffFlux(MeshData<Real> *md) {
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
   auto hydro_pkg = pmb->packages.Get("Hydro");
 
+  const auto mask = GetReservoirMask(*hydro_pkg);
   auto const &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
 
   const int ndim = pmb->pmy_mesh->ndim;
@@ -166,9 +186,13 @@ void OhmicDiffFlux(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-        const auto eta =
-            0.5 * (ohm_diff.Get(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1)) +
-                   ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
+        const Real transmission =
+            1.0 - mask.Weight(coords.X<1, parthenon::TopologicalElement::F1>(k, j, i),
+                              coords.X<2, parthenon::TopologicalElement::F1>(k, j, i));
+        if (transmission == 0.0) return;
+        const auto eta = transmission * 0.5 *
+                         (ohm_diff.Get(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1)) +
+                          ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
 
         // Face centered current densities
         // j2 = d3B1 - d1B3
@@ -216,9 +240,13 @@ void OhmicDiffFlux(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-        const auto eta =
-            0.5 * (ohm_diff.Get(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i)) +
-                   ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
+        const Real transmission =
+            1.0 - mask.Weight(coords.X<1, parthenon::TopologicalElement::F2>(k, j, i),
+                              coords.X<2, parthenon::TopologicalElement::F2>(k, j, i));
+        if (transmission == 0.0) return;
+        const auto eta = transmission * 0.5 *
+                         (ohm_diff.Get(prim(IPR, k, j - 1, i), prim(IDN, k, j - 1, i)) +
+                          ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
 
         // Face centered current densities
         // j3 = d1B2 - d2B1
@@ -264,9 +292,13 @@ void OhmicDiffFlux(MeshData<Real> *md) {
         const auto &coords = prim_pack.GetCoords(b);
         auto &cons = cons_pack(b);
         const auto &prim = prim_pack(b);
-        const auto eta =
-            0.5 * (ohm_diff.Get(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i)) +
-                   ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
+        const Real transmission =
+            1.0 - mask.Weight(coords.X<1, parthenon::TopologicalElement::F3>(k, j, i),
+                              coords.X<2, parthenon::TopologicalElement::F3>(k, j, i));
+        if (transmission == 0.0) return;
+        const auto eta = transmission * 0.5 *
+                         (ohm_diff.Get(prim(IPR, k - 1, j, i), prim(IDN, k - 1, j, i)) +
+                          ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
 
         // Face centered current densities
         // j1 = d2B3 - d3B2
@@ -313,6 +345,7 @@ TaskStatus AddOhmicEdgeEMF(MeshData<Real> *md) {
   auto bface_pack = md->PackVariablesAndFluxes(std::vector<std::string>{"Bface"});
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
   const auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto mask = GetReservoirMask(*hydro_pkg);
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
 
   // z-directed edges. In 1D only the x derivative and the two x-neighboring
@@ -324,6 +357,9 @@ TaskStatus AddOhmicEdgeEMF(MeshData<Real> *md) {
         auto &bface = bface_pack(b);
         const auto &prim = prim_pack(b);
         const auto &coords = prim_pack.GetCoords(b);
+        if (mask.Weight(coords.X<1, parthenon::TopologicalElement::NN>(k, j, i),
+                        coords.X<2, parthenon::TopologicalElement::NN>(k, j, i)) == 1.0)
+          return;
         const Real dby_dx =
             (bface(TE::F2, 0, k, j, i) - bface(TE::F2, 0, k, j, i - 1)) /
             coords.Dxc<1>(k, j, i);

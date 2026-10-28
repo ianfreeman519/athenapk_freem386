@@ -30,7 +30,11 @@
 
 // AthenaPK headers
 #include "../eos/adiabatic_ctmhd.hpp"
+#include "../hydro/ctmhd/ctmhd.hpp"
 #include "../hydro/diffusion/diffusion.hpp"
+#include "../hydro/hydro.hpp"
+#include "../hydro/prolongation/custom_ops.hpp"
+#include "../hydro/reservoir_mask.hpp"
 #include "../main.hpp"
 #include "../units.hpp"
 
@@ -78,6 +82,7 @@ struct SupportTable {
 // Runtime state in code units (temperatures in kelvin), shared by initialization and
 // driving. Physical input values used only for reporting stay local to setup.
 struct PulsedReconnectionParams {
+  ReservoirMask mask;
   // Thermodynamics and array geometry
   Real k_b;
   Real m_bar;
@@ -637,6 +642,11 @@ DriveSupportState EvaluateDriveSupportState(const PulsedReconnectionParams &para
       support.velocity_weight += velocity_weight;
     }
   }
+  if (params.mask.Weight(x, y) > 0.0) {
+    support.rho_inner_target = 0.0;
+    support.T_inner_floor = 0.0;
+    support.inner_reservoir_weight = 0.0;
+  }
   return support;
 }
 
@@ -1185,6 +1195,76 @@ LoadSourceParams(StateDescriptor *hydro_pkg, ParameterInput *pin) {
   // units per physical second, so multiply to convert seconds to code time.
   params.drive_t_peak = drive_t_peak_ns * 1.0e-9 * units.s();
 
+  params.mask.enabled = pin->GetOrAddBoolean(kInputBlock, "reservoir_mask_enable", false);
+  if (params.mask.enabled) {
+    auto &mask = params.mask;
+    mask.core_radius =
+        pin->GetReal(kInputBlock, "reservoir_mask_core_radius") * units.cm();
+    mask.outer_radius =
+        pin->GetReal(kInputBlock, "reservoir_mask_outer_radius") * units.cm();
+    mask.relaxation_time =
+        pin->GetOrAddReal(kInputBlock, "reservoir_mask_relaxation_time_ns", 5.0) * 1.e-9 *
+        units.s();
+    mask.half_separation = 0.5 * params.array_separation;
+    PARTHENON_REQUIRE_THROWS(
+        std::isfinite(mask.core_radius) && std::isfinite(mask.outer_radius) &&
+            std::isfinite(mask.relaxation_time) && mask.core_radius > 0.0 &&
+            mask.outer_radius > mask.core_radius && mask.relaxation_time > 0.0 &&
+            mask.outer_radius < mask.half_separation,
+        "Reservoir mask requires finite 0 < core < outer < array_separation/2 and tau > "
+        "0.");
+    PARTHENON_REQUIRE_THROWS(pin->GetInteger("parthenon/mesh", "nx2") > 1 &&
+                                 pin->GetOrAddInteger("parthenon/mesh", "nx3", 1) == 1 &&
+                                 IsUCTFluid(hydro_pkg->Param<Fluid>("fluid")),
+                             "Reservoir mask supports only two-dimensional UCT fluids.");
+    PARTHENON_REQUIRE_THROWS(
+        hydro_pkg->Param<DiffInt>("diffint") != DiffInt::rkl2 &&
+            hydro_pkg->Param<Conduction>("conduction") == Conduction::none &&
+            hydro_pkg->Param<Viscosity>("viscosity") == Viscosity::none,
+        "Reservoir mask requires no conduction, viscosity, or RKL2 diffusion.");
+    PARTHENON_REQUIRE_THROWS(hydro_pkg->Param<Cooling>("enable_cooling") !=
+                                 Cooling::tabular,
+                             "Reservoir mask supports cooling/enable_cooling=none or "
+                             "free_free; tabular cooling is not supported.");
+    const auto integrator = pin->GetOrAddString("parthenon/time", "integrator", "rk2");
+    PARTHENON_REQUIRE_THROWS(integrator == "rk1" || integrator == "rk2" ||
+                                 integrator == "rk3",
+                             "Reservoir mask supports rk1, rk2, and rk3 integration.");
+    const auto check_annulus = [&](const RadialProfileParams &profile) {
+      PARTHENON_REQUIRE_THROWS(
+          profile.shape == ProfileShape::none ||
+              (profile.shape == ProfileShape::annulus &&
+               mask.outer_radius < profile.annulus_inner_radius),
+          "Reservoir mask must lie strictly inside each initial/driven fluid annulus.");
+    };
+    check_annulus(params.initial_rho_profile);
+    check_annulus(params.initial_T_profile);
+    check_annulus(params.drive_rho_profile);
+    check_annulus(params.drive_T_profile);
+    for (const auto &profile :
+         {params.initial_magnetic_profile, params.drive_magnetic_profile}) {
+      if (profile.shape == ProfileShape::annulus) check_annulus(profile);
+      if (profile.shape == ProfileShape::confined_current)
+        PARTHENON_REQUIRE_THROWS(
+            mask.outer_radius < profile.wire_inner_radius,
+            "Reservoir mask overlaps the magnetic return-current annulus.");
+    }
+    PARTHENON_REQUIRE_THROWS(hydro_pkg->Param<Resistivity>("resistivity") ==
+                                     Resistivity::none ||
+                                 hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit,
+                             "Reservoir mask requires explicit unsplit Ohmic resistivity "
+                             "when resistivity is enabled.");
+    if (params.drive_velocity_mode != VelocityDriveMode::none) {
+      PARTHENON_REQUIRE_THROWS(mask.outer_radius < params.drive_velocity_inner_radius,
+                               "Reservoir mask overlaps the velocity injection annulus.");
+    }
+    PARTHENON_REQUIRE_THROWS(params.rho_background > 0.0 && params.T_background > 0.0 &&
+                                 params.rho_inner_reservoir >= 0.0 &&
+                                 params.T_inner_reservoir >= 0.0,
+                             "Reservoir mask target requires positive background and "
+                             "nonnegative reservoir state.");
+  }
+
   // A_z is the selected radial profile multiplied by an amplitude, so
   // |B_phi| = |dA_z/dr|. Normalize independently for the initial and driven
   // profiles so the requested values are their actual peak fields.
@@ -1243,6 +1323,21 @@ LoadSourceParams(StateDescriptor *hydro_pkg, ParameterInput *pin) {
               << (eos.IsTabulated() ? "tabulated" : "adiabatic ideal gas") << '\n';
     if (!eos.IsTabulated())
       std::cout << "gamma ================== " << eos.GetGamma() << '\n';
+    if (params.mask.enabled) {
+      std::cout << "reservoir mask [cm] ==== " << params.mask.core_radius / units.cm()
+                << " -> " << params.mask.outer_radius / units.cm()
+                << "; tau [ns] = " << params.mask.relaxation_time / (1.e-9 * units.s())
+                << "; follows prescribed magnetic pulse" << '\n';
+      const Real dx = (pin->GetReal("parthenon/mesh", "x1max") -
+                       pin->GetReal("parthenon/mesh", "x1min")) /
+                      pin->GetInteger("parthenon/mesh", "nx1");
+      const Real dy = (pin->GetReal("parthenon/mesh", "x2max") -
+                       pin->GetReal("parthenon/mesh", "x2min")) /
+                      pin->GetInteger("parthenon/mesh", "nx2");
+      WarnUnless(params.mask.outer_radius - params.mask.core_radius >= 4.0 * fmax(dx, dy),
+                 "Reservoir buffer has fewer than four cells at root resolution; ensure "
+                 "it is resolved on every admitted mesh level.");
+    }
     std::cout << "B_peak [gauss] ========= " << B_peak_gauss << '\n'
               << "drive_enable =========== " << params.drive_enable << '\n'
               << "drive_B_peak [gauss] === " << drive_B_peak_gauss << '\n'
@@ -1450,6 +1545,200 @@ InitialState EvaluateInitialState(const PulsedReconnectionParams &params,
 
 } // namespace
 
+// Cumulative source densities are carried through RK combinations just like the
+// conserved state, but have no transport flux. Volume integrals survive remeshing
+// and restart and measure the actual net externally supplied quantities.
+namespace {
+constexpr int kCTEnergy = 5, kPulseEnergy = 6;
+
+template <int component, bool minimum = false>
+Real ReservoirHistory(MeshData<Real> *md) {
+  const auto p = md->PackVariables(std::vector<std::string>{
+      minimum ? "reservoir_mask_diagnostics" : "reservoir_mask_exchange"});
+  auto ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  auto jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  auto kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  Real result = minimum ? std::numeric_limits<Real>::max() : 0.0;
+  if constexpr (minimum) {
+    Kokkos::parallel_reduce(
+        "Reservoir timestep history",
+        Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+            DevExecSpace(), {0, kb.s, jb.s, ib.s},
+            {p.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1}),
+        KOKKOS_LAMBDA(int b, int k, int j, int i, Real &v) {
+          v = fmin(v, p(b, component, k, j, i));
+        },
+        Kokkos::Min<Real>(result));
+  } else {
+    Kokkos::parallel_reduce(
+        "Reservoir exchange history",
+        Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+            DevExecSpace(), {0, kb.s, jb.s, ib.s},
+            {p.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1}),
+        KOKKOS_LAMBDA(int b, int k, int j, int i, Real &v) {
+          v += p(b, component, k, j, i) * p.GetCoords(b).CellVolume(k, j, i);
+        },
+        result);
+  }
+  return result;
+}
+
+void ApplyReservoirFluid(MeshData<Real> *md, Real dt, bool entire = false) {
+  auto pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  auto params = g_source_params;
+  if (!params.mask.enabled) return;
+  const auto eos = pkg->Param<AdiabaticCTMHDEOS>("eos");
+  const int nscalars = pkg->Param<int>("nscalars");
+  const auto u = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto f = md->PackVariables(std::vector<std::string>{"Bface"});
+  const auto budget =
+      md->PackVariables(std::vector<std::string>{"reservoir_mask_exchange"});
+  const auto diag =
+      md->PackVariables(std::vector<std::string>{"reservoir_mask_diagnostics"});
+  auto domain = entire ? IndexDomain::entire : IndexDomain::interior;
+  auto ib = md->GetBlockData(0)->GetBoundsI(domain);
+  auto jb = md->GetBlockData(0)->GetBoundsJ(domain);
+  auto kb = md->GetBlockData(0)->GetBoundsK(domain);
+  // Only the initial fluid profiles enter the target, never perturbations,
+  // initial velocities, magnetic force-balance support, or the drive envelopes.
+  params.density_perturb_amplitude = params.temperature_perturb_amplitude = 0.0;
+  params.initial_force_balance = false;
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Prescribed reservoir fluid", DevExecSpace(), 0,
+      u.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(int b, int k, int j, int i) {
+        const auto &c = u.GetCoords(b);
+        const Real x = c.Xc<1>(i), y = c.Xc<2>(j);
+        const Real w = params.mask.Weight(x, y);
+        diag(b, 0, k, j, i) = w;
+        if (entire) {
+          diag(b, 1, k, j, i) = std::numeric_limits<Real>::max();
+          diag(b, 2, k, j, i) = std::numeric_limits<Real>::max();
+          diag(b, 3, k, j, i) = std::numeric_limits<Real>::max();
+        }
+        if (w == 0.0 || (w < 1.0 && dt <= 0.0)) return;
+        const Real decay =
+            w == 1.0 ? 0.0 : exp(-dt * w / (params.mask.relaxation_time * (1.0 - w)));
+        const auto target = EvaluateInitialState(params, eos, x, y);
+        Real old[5];
+        for (int n = 0; n < 5; ++n)
+          old[n] = u(b, n, k, j, i);
+        const Real rho = old[IDN];
+        const Real invrho = rho > 0.0 ? 1.0 / rho : 0.0;
+        const Real bx = 0.5 * (f(b, TE::F1, 0, k, j, i) + f(b, TE::F1, 0, k, j, i + 1));
+        const Real by = 0.5 * (f(b, TE::F2, 0, k, j, i) + f(b, TE::F2, 0, k, j + 1, i));
+        const Real bz = u(b, IB3, k, j, i);
+        const Real me = 0.5 * (SQR(bx) + SQR(by) + SQR(bz));
+        const Real ke = 0.5 * invrho * (SQR(old[IM1]) + SQR(old[IM2]) + SQR(old[IM3]));
+        const Real eps = fmax(0.0, (old[IEN] - ke - me) * invrho);
+        const Real newrho = target.rho + decay * (rho - target.rho);
+        const Real neweps = target.specific_internal_energy +
+                            decay * (eps - target.specific_internal_energy);
+        u(b, IDN, k, j, i) = newrho;
+        for (int n = 0; n < nscalars; ++n)
+          u(b, 8 + n, k, j, i) *= newrho * invrho;
+        Real newke = 0.0;
+        for (int n = IM1; n <= IM3; ++n) {
+          const Real v = decay * old[n] * invrho;
+          u(b, n, k, j, i) = newrho * v;
+          newke += 0.5 * newrho * SQR(v);
+        }
+        u(b, IEN, k, j, i) = newrho * neweps + newke + me;
+        for (int n = 0; n < 5; ++n)
+          budget(b, n, k, j, i) += u(b, n, k, j, i) - old[n];
+        u(b, IB1, k, j, i) = bx;
+        u(b, IB2, k, j, i) = by;
+      });
+  eos.CheckDiagnostics("prescribed reservoir fluid");
+}
+
+TaskStatus MaskReservoirEMF(MeshData<Real> *md, MeshData<Real> *initial, Real gam0,
+                            Real gam1) {
+  const auto mask = g_source_params.mask;
+  const auto f = md->PackVariablesAndFluxes(std::vector<std::string>{"Bface"});
+  const auto f1 = initial->PackVariables(std::vector<std::string>{"Bface"});
+  const auto ref =
+      md->PackVariablesAndFluxes(std::vector<std::string>{"reservoir_ct_reference"});
+  const auto budget =
+      md->PackVariables(std::vector<std::string>{"reservoir_mask_exchange"});
+  const auto budget1 =
+      initial->PackVariables(std::vector<std::string>{"reservoir_mask_exchange"});
+  auto ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  auto jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  auto kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Reservoir reference stage", DevExecSpace(), 0,
+      f.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e + 1, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(int b, int k, int j, int i) {
+        if (j <= jb.e)
+          ref(b, TE::F1, 0, k, j, i) =
+              gam0 * f(b, TE::F1, 0, k, j, i) + gam1 * f1(b, TE::F1, 0, k, j, i);
+        if (i <= ib.e)
+          ref(b, TE::F2, 0, k, j, i) =
+              gam0 * f(b, TE::F2, 0, k, j, i) + gam1 * f1(b, TE::F2, 0, k, j, i);
+        const auto &c = f.GetCoords(b);
+        const Real w = mask.Weight(c.X<1, TE::NN>(k, j, i), c.X<2, TE::NN>(k, j, i));
+        auto &e = f(b).template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i);
+        ref(b).template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) = e;
+        e *= 1.0 - w;
+        if (i <= ib.e && j <= jb.e)
+          for (int n = 0; n < 7; ++n) {
+            if (gam0 == 0.0) budget1(b, n, k, j, i) = budget(b, n, k, j, i);
+            budget(b, n, k, j, i) =
+                gam0 * budget(b, n, k, j, i) + gam1 * budget1(b, n, k, j, i);
+          }
+      });
+  return TaskStatus::complete;
+}
+
+TaskStatus CorrectReservoirCTEnergy(MeshData<Real> *md, Real beta_dt) {
+  const auto u = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto f = md->PackVariables(std::vector<std::string>{"Bface"});
+  const auto ref =
+      md->PackVariablesAndFluxes(std::vector<std::string>{"reservoir_ct_reference"});
+  const auto budget =
+      md->PackVariables(std::vector<std::string>{"reservoir_mask_exchange"});
+  const bool correct_baseline =
+      md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro")->Param<bool>(
+          "ct_energy_correction");
+  auto ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  auto jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  auto kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "Reservoir CT energy correction", DevExecSpace(), 0,
+      u.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+      KOKKOS_LAMBDA(int b, int k, int j, int i) {
+        const auto &c = u.GetCoords(b);
+        const auto &r = ref(b);
+        const Real e00 =
+            r.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i);
+        const Real e10 =
+            r.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i + 1);
+        const Real e01 =
+            r.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j + 1, i);
+        const Real e11 =
+            r.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j + 1, i + 1);
+        const Real bxref = 0.5 * (r(TE::F1, 0, k, j, i) + r(TE::F1, 0, k, j, i + 1)) +
+                           0.5 * beta_dt * (e00 + e10 - e01 - e11) / c.Dxc<2>(k, j, i);
+        const Real byref = 0.5 * (r(TE::F2, 0, k, j, i) + r(TE::F2, 0, k, j + 1, i)) -
+                           0.5 * beta_dt * (e10 + e11 - e00 - e01) / c.Dxc<1>(k, j, i);
+        const Real bx = 0.5 * (f(b, TE::F1, 0, k, j, i) + f(b, TE::F1, 0, k, j, i + 1));
+        const Real by = 0.5 * (f(b, TE::F2, 0, k, j, i) + f(b, TE::F2, 0, k, j + 1, i));
+        const Real delta = 0.5 * (SQR(bx) + SQR(by) - SQR(bxref) - SQR(byref));
+        if (correct_baseline)
+          u(b, IEN, k, j, i) += 0.5 * (SQR(bxref) + SQR(byref) - SQR(u(b, IB1, k, j, i)) -
+                                       SQR(u(b, IB2, k, j, i)));
+        u(b, IEN, k, j, i) += delta;
+        budget(b, kCTEnergy, k, j, i) += delta;
+        // Synchronize here so subsequent driving and primitive recovery cannot
+        // apply the same magnetic correction a second time.
+        u(b, IB1, k, j, i) = bx;
+        u(b, IB2, k, j, i) = by;
+      });
+  return TaskStatus::complete;
+}
+} // namespace
+
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hydro_pkg) {
   const auto fluid = hydro_pkg->Param<Fluid>("fluid");
   PARTHENON_REQUIRE(IsCTFluid(fluid),
@@ -1461,6 +1750,64 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
   // survives a restart.
   g_source_params = LoadSourceParams(hydro_pkg, pin);
   g_source_params_initialized = true;
+  hydro_pkg->AddParam<ReservoirMask>("reservoir_mask", g_source_params.mask);
+  if (g_source_params.mask.enabled) {
+    // The reference field's edge fluxes receive the same AMR/MPI synchronization
+    // as the physical CT field before the energy correction uses them.
+    auto ref = Metadata({Metadata::Face, Metadata::Derived, Metadata::OneCopy,
+                         Metadata::WithFluxes, Metadata::FillGhost});
+    ref.RegisterRefinementOps<parthenon::refinement_ops::ProlongateSharedMinMod,
+                              parthenon::refinement_ops::RestrictAverage,
+                              parthenon::refinement_ops::ProlongateInternalTothAndRoe>();
+    hydro_pkg->AddField("reservoir_ct_reference", ref);
+    auto exchange = Metadata({Metadata::Cell, Metadata::Derived, Metadata::Restart,
+                              Metadata::FillGhost, Metadata::Conserved},
+                             std::vector<int>{7},
+                             {"reservoir_mass", "reservoir_mom1", "reservoir_mom2",
+                              "reservoir_mom3", "reservoir_fluid_energy",
+                              "reservoir_ct_energy", "reservoir_pulse_energy"});
+    exchange.RegisterRefinementOps<Hydro::refinement_ops::ProlongateCellMinModMultiD,
+                                   parthenon::refinement_ops::RestrictAverage>();
+    hydro_pkg->AddField("reservoir_mask_exchange", exchange);
+    hydro_pkg->AddField("reservoir_mask_diagnostics",
+                        Metadata({Metadata::Cell, Metadata::Derived, Metadata::OneCopy},
+                                 std::vector<int>{4},
+                                 {"reservoir_mask_weight", "reservoir_dt_diffusion",
+                                  "reservoir_dt_heating", "reservoir_dt_cooling"}));
+    Hydro::ProblemModifyCTEMF = MaskReservoirEMF;
+    Hydro::ProblemCorrectCTEnergy = CorrectReservoirCTEnergy;
+    Hydro::ProblemSourceStage = [](MeshData<Real> *md, const parthenon::SimTime &,
+                                   Real dt) { ApplyReservoirFluid(md, dt); };
+    hydro_pkg->PreCommFillDerivedMesh = [](MeshData<Real> *md) {
+      ApplyReservoirFluid(md, 0.0);
+    };
+    hydro_pkg->PreFillDerivedMesh = [](MeshData<Real> *md) {
+      Hydro::CTMHD::center_Mag_Field(md);
+      ApplyReservoirFluid(md, 0.0, true);
+    };
+    auto hst = hydro_pkg->Param<parthenon::HstVar_list>(parthenon::hist_param_key);
+    const std::array<std::function<Real(MeshData<Real> *)>, 7> functions = {
+        ReservoirHistory<0>, ReservoirHistory<1>, ReservoirHistory<2>,
+        ReservoirHistory<3>, ReservoirHistory<4>, ReservoirHistory<5>,
+        ReservoirHistory<6>};
+    const char *names[] = {"reservoir_mass",         "reservoir_mom1",
+                           "reservoir_mom2",         "reservoir_mom3",
+                           "reservoir_fluid_energy", "reservoir_ct_energy",
+                           "reservoir_pulse_energy"};
+    for (int n = 0; n < 7; ++n)
+      hst.emplace_back(parthenon::HistoryOutputVar(parthenon::UserHistoryOperation::sum,
+                                                   functions[n], names[n]));
+    hst.emplace_back(parthenon::HistoryOutputVar(parthenon::UserHistoryOperation::min,
+                                                 ReservoirHistory<1, true>,
+                                                 "reservoir_dt_diffusion"));
+    hst.emplace_back(parthenon::HistoryOutputVar(parthenon::UserHistoryOperation::min,
+                                                 ReservoirHistory<2, true>,
+                                                 "reservoir_dt_heating"));
+    hst.emplace_back(parthenon::HistoryOutputVar(parthenon::UserHistoryOperation::min,
+                                                 ReservoirHistory<3, true>,
+                                                 "reservoir_dt_cooling"));
+    hydro_pkg->UpdateParam(parthenon::hist_param_key, hst);
+  }
 
   const auto diagnostics = RequestedDiagnostics(pin);
   hydro_pkg->AddParam<DiagnosticSelection>("pulsed_reconnection/diagnostics", diagnostics);
@@ -1662,6 +2009,9 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
             (delta_az1 - delta_az0) / coords.Dxc<1>(k, j, i);
       });
 
+  const auto exchange_pack = md->PackVariables(
+      std::vector<std::string>{params.mask.enabled ? "reservoir_mask_exchange" : "cons"});
+
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "pulsed_reconnection::DriveCellState",
       parthenon::DevExecSpace(), 0, cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e,
@@ -1683,6 +2033,10 @@ void Driving(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
         cons(IEN, k, j, i) +=
             0.5 * (SQR(new_B1) + SQR(new_B2) + SQR(new_B3) - SQR(old_B1) -
                    SQR(old_B2) - SQR(old_B3));
+        if (params.mask.enabled)
+          exchange_pack(b, kPulseEnergy, k, j, i) +=
+              0.5 * (SQR(new_B1) + SQR(new_B2) + SQR(new_B3) - SQR(old_B1) - SQR(old_B2) -
+                     SQR(old_B3));
 
         const Real x = coords.Xc<1>(i);
         const Real y = coords.Xc<2>(j);

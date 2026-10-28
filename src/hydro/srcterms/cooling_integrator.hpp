@@ -2,15 +2,16 @@
 #ifndef HYDRO_SRCTERMS_COOLING_INTEGRATOR_HPP_
 #define HYDRO_SRCTERMS_COOLING_INTEGRATOR_HPP_
 
+#include "../../eos/tabulated_eos.hpp"
+#include "../../main.hpp"
+#include "../reservoir_mask.hpp"
 #include <algorithm>
 #include <cmath>
-#include <limits>
-#include <vector>
 #include <interface/mesh_data.hpp>
 #include <interface/variable_pack.hpp>
+#include <limits>
 #include <mesh/domain.hpp>
-#include "../../main.hpp"
-#include "../../eos/tabulated_eos.hpp"
+#include <vector>
 
 namespace cooling {
 using namespace parthenon;
@@ -84,6 +85,7 @@ void IntegrateCooling(MeshData<Real> *md, const Real dt_, const RKStepper rk_ste
 
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const auto mask = GetReservoirMask(*hydro_pkg);
   const auto fluid = hydro_pkg->Param<Fluid>("fluid");
   const bool mhd_enabled = fluid != Fluid::euler;
   // Grab member variables for compiler
@@ -121,6 +123,11 @@ void IntegrateCooling(MeshData<Real> *md, const Real dt_, const RKStepper rk_ste
       KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i) {
         auto &cons = cons_pack(b);
         auto &prim = prim_pack(b);
+        const auto &coords = cons_pack.GetCoords(b);
+        const Real cooling_weight = 1.0 - mask.Weight(coords.Xc<1>(i), coords.Xc<2>(j));
+        // A prescribed core has no radiative ODE or cooling-floor update. Return
+        // before querying the EOS or computing a rate in that region.
+        if (cooling_weight == 0.0) return;
         // Need to use `cons` here as prim may still contain state at t_0;
         const Real rho = cons(IDN, k, j, i);
         // TODO(pgrete) with potentially more EOS, a separate get_pressure (or similar)
@@ -155,7 +162,7 @@ void IntegrateCooling(MeshData<Real> *md, const Real dt_, const RKStepper rk_ste
             return Real(0.0);
           }
           if (e <= internal_e_floor) return Real(0.0);
-          return cooling_rate.DeDt(e, rho, valid);
+          return cooling_weight * cooling_rate.DeDt(e, rho, valid);
         };
 
         Real sub_t = 0; // current subcycle time
@@ -322,6 +329,9 @@ Real EstimateCoolingTimeStep(MeshData<Real> *md, const Rate cooling_rate,
   }
 
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const auto mask = GetReservoirMask(*hydro_pkg);
+  const auto mask_diag = md->PackVariables(
+      std::vector<std::string>{mask.enabled ? "reservoir_mask_diagnostics" : "prim"});
 
   const bool general_eos = settings.general_eos;
   const auto eos = settings.eos;
@@ -352,6 +362,10 @@ Real EstimateCoolingTimeStep(MeshData<Real> *md, const Rate cooling_rate,
       KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i,
                     Real &thread_min_cooling_time) {
         auto &prim = prim_pack(b);
+        const auto &coords = prim_pack.GetCoords(b);
+        const Real cooling_weight = 1.0 - mask.Weight(coords.Xc<1>(i), coords.Xc<2>(j));
+        if (mask.enabled) mask_diag(b, 3, k, j, i) = std::numeric_limits<Real>::max();
+        if (cooling_weight == 0.0) return;
 
         const Real rho = prim(IDN, k, j, i);
         const Real pres = prim(IPR, k, j, i);
@@ -367,7 +381,7 @@ Real EstimateCoolingTimeStep(MeshData<Real> *md, const Rate cooling_rate,
         // Do not sample the cooling table below the configured temperature floor. The
         // general-EOS DeDt path converts internal energy through the rho-e table.
         const Real de_dt = internal_e > internal_e_floor
-                               ? cooling_rate.DeDt(internal_e, rho)
+                               ? cooling_weight * cooling_rate.DeDt(internal_e, rho)
                                : 0.0;
 
         // Compute cooling time
@@ -377,6 +391,8 @@ Real EstimateCoolingTimeStep(MeshData<Real> *md, const Rate cooling_rate,
                                       ? std::numeric_limits<Real>::infinity()
                                       : fabs(internal_e / de_dt);
 
+        if (mask.enabled && std::isfinite(cooling_time))
+          mask_diag(b, 3, k, j, i) = settings.cfl * cooling_time;
         thread_min_cooling_time = std::min(cooling_time, thread_min_cooling_time);
       },
       reducer_min);

@@ -207,17 +207,19 @@ struct OhmicDiffusivity {
   Real zbar_;
   Real eta_cgs_to_code_;
   Real eta_max_;
+  Real eta_min_;
   TabulatedEOS eos_;
 
  public:
   KOKKOS_INLINE_FUNCTION
   OhmicDiffusivity(Resistivity resistivity, ResistivityCoeff resistivity_coeff_type,
                    Real coeff, Real temperature_from_p_over_rho, Real zbar,
-                   Real eta_cgs_to_code, Real eta_max,
+                   Real eta_cgs_to_code, Real eta_max, Real eta_min = -1.0,
                    TabulatedEOS eos = TabulatedEOS())
       : resistivity_(resistivity), resistivity_coeff_type_(resistivity_coeff_type),
         coeff_(coeff), temperature_from_p_over_rho_(temperature_from_p_over_rho),
-        zbar_(zbar), eta_cgs_to_code_(eta_cgs_to_code), eta_max_(eta_max), eos_(eos) {}
+        zbar_(zbar), eta_cgs_to_code_(eta_cgs_to_code), eta_max_(eta_max),
+        eta_min_(eta_min), eos_(eos) {}
 
   KOKKOS_INLINE_FUNCTION
   Real Get(const Real pres, const Real rho, const Real temperature = NAN,
@@ -242,12 +244,17 @@ struct OhmicDiffusivity {
 
       // Magnetic diffusivity in Heaviside-Lorentz CGS [cm^2/s], then code units.
       local_zbar = Kokkos::isfinite(local_zbar) ? local_zbar : zbar_;
-      if (eos_.IsInitialized() && local_zbar <= 0.0) return 0.0;
+      if (eos_.IsInitialized() && local_zbar <= 0.0) {
+        return eta_min_ > 0.0 ? eta_min_ : 0.0;
+      }
       PARTHENON_REQUIRE(local_zbar > 0.0,
                         "Spitzer resistivity requires positive Zbar.");
       Real eta = 1.02688e12 * local_zbar * coeff_ /
                  std::pow(temperature_kelvin, 1.5) *
                  eta_cgs_to_code_;
+      if (eta_min_ > 0.0) {
+        eta = std::max(eta, eta_min_);
+      }
       if (eta_max_ > 0.0) {
         eta = std::min(eta, eta_max_);
       }

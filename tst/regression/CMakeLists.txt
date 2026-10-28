@@ -84,3 +84,15 @@ add_test(NAME free_free_cooling
     ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/free_free_cooling/check_free_free.py
     --driver $<TARGET_FILE:athenaPK>)
 set_tests_properties(free_free_cooling PROPERTIES LABELS "regression" TIMEOUT 600)
+
+add_test(NAME reservoir_mask
+  COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/reservoir_mask/check_reservoir_mask.py
+    --driver $<TARGET_FILE:athenaPK>)
+set_tests_properties(reservoir_mask PROPERTIES LABELS "regression" TIMEOUT 600)
+
+add_test(NAME reservoir_mask_cooling
+  COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/reservoir_mask/check_reservoir_cooling.py
+    --driver $<TARGET_FILE:athenaPK>)
+set_tests_properties(reservoir_mask_cooling PROPERTIES LABELS "regression" TIMEOUT 600)

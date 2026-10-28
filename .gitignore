@@ -6,9 +6,12 @@ __pycache__/
 *.py[cod]
 
 # test run files
+scripts
+tst
 test_runs/
 test-suite-uct-ct-glm/
 suit_staging/
+analysis/*
 
 # Validation folder
 validation/
