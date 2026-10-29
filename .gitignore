@@ -8,6 +8,14 @@ __pycache__/
 # test run files
 scripts
 tst
+# Keep the opt-in CT energy tests and pilot preparer reviewable.
+!tst/
+tst/*
+!tst/regression/
+tst/regression/*
+!tst/regression/test_suites/
+tst/regression/test_suites/*
+!tst/regression/test_suites/compatible_ct_energy/
 test_runs/
 test-suite-uct-ct-glm/
 suit_staging/
@@ -72,3 +80,5 @@ inputs/cluster/my_cluster.input
 
 # Local MARZ presentation plotting helper
 scripts/plot_pulsed_reconnection_profiles.py
+
+/ct_validation*/

@@ -96,7 +96,8 @@ class AdiabaticCTMHDEOS : public EquationOfState {
                                          const int &nscalars, const int &k, const int &j,
                                          const int &i, const int rank = -1,
                                          const int block = -1,
-                                         const bool is_ghost = false) const {
+                                         const bool is_ghost = false,
+                                         Real *energy_change = nullptr) const {
     auto gam = GetGamma();
     auto gm1 = gam - 1.0;
     auto density_floor_ = GetDensityFloor();
@@ -111,6 +112,7 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     Real &u_m2 = cons(IM2, k, j, i);
     Real &u_m3 = cons(IM3, k, j, i);
     Real &u_e = cons(IEN, k, j, i);
+    const Real energy_before_recovery = u_e;
     Real &u_b1 = cons(IB1, k, j, i);
     Real &u_b2 = cons(IB2, k, j, i);
     Real &u_b3 = cons(IB3, k, j, i);
@@ -192,6 +194,15 @@ class AdiabaticCTMHDEOS : public EquationOfState {
 
     // Let's apply floors explicitly, i.e., by default floor will be disabled (<=0)
     // and the code will fail if a negative pressure is encountered.
+    if (!(w_p > 0.0) && !(pressure_floor_ > 0.0) && !(e_floor_ > 0.0) &&
+        energy_change != nullptr) {
+      Kokkos::printf(
+          "CT_ENERGY_NONPOSITIVE_PRESSURE rank=%d block=%d k=%d j=%d i=%d "
+          "ghost=%d rho=%.17e pressure=%.17e raw_eps=%.17e "
+          "Etot=%.17e Ek=%.17e EB=%.17e\n",
+          rank, block, k, j, i, static_cast<int>(is_ghost), u_d, w_p, raw_eps,
+          u_e, e_k, e_B);
+    }
     PARTHENON_REQUIRE(w_p > 0.0 || pressure_floor_ > 0.0 || e_floor_ > 0.0,
                       "Got negative pressure. Consider enabling first-order flux "
                       "correction or setting a reasonble pressure or temperature floor.");
@@ -249,6 +260,9 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     for (auto n = nhydro; n < nhydro + nscalars; ++n) {
       prim(n, k, j, i) = cons(n, k, j, i) * di;
     }
+    // Signed net EOS energy adjustment, including floors and ceilings. This
+    // observes the actual writes rather than estimating floor energy afterward.
+    if (energy_change != nullptr) *energy_change = u_e - energy_before_recovery;
   }
 
  private:

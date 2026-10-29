@@ -96,3 +96,9 @@ add_test(NAME reservoir_mask_cooling
     ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/reservoir_mask/check_reservoir_cooling.py
     --driver $<TARGET_FILE:athenaPK>)
 set_tests_properties(reservoir_mask_cooling PROPERTIES LABELS "regression" TIMEOUT 600)
+
+add_test(NAME compatible_ct_energy
+  COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/compatible_ct_energy/check_compatible_energy.py
+    --driver $<TARGET_FILE:athenaPK>)
+set_tests_properties(compatible_ct_energy PROPERTIES LABELS "regression" TIMEOUT 1800)

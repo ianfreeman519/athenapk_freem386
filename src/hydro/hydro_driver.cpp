@@ -25,6 +25,7 @@
 #include "diffusion/diffusion.hpp"
 #include "glmmhd/glmmhd.hpp"
 #include "ctmhd/ctmhd.hpp"
+#include "ctmhd/compatible_energy.hpp"
 #include "ctmhd/ucthlldmhd.hpp"
 #include "hydro.hpp"
 #include "hydro_driver.hpp"
@@ -807,6 +808,11 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     if (IsUCTFluid(fluid)) {
       ct_emf = tl.AddTask(calc_flux, Hydro::UCT::Assemble_Edge_EMF, mu0.get());
     }
+    const bool compatible_energy = hydro_pkg->Param<bool>("compatible_ct_energy");
+    if (compatible_energy) {
+      ct_emf = tl.AddTask(ct_emf, CTMHD::PrepareCompatibleEnergy, mu0.get(), mu1.get(),
+                          integrator->gam0[stage - 1], integrator->gam1[stage - 1]);
+    }
     if (IsUCTFluid(fluid) &&
         hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none &&
         hydro_pkg->Param<DiffInt>("diffint") == DiffInt::unsplit) {
@@ -838,6 +844,22 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     auto set_flx = tl.AddTask(recv_flx | first_order_flux_correct,
                               parthenon::SetFluxCorrections, mu0);
 
+    if (compatible_energy) {
+      // First synchronize edge EMFs. Only then construct Poynting fluxes and
+      // synchronize their face values. Reuse the communication buffers only
+      // after the previous send and receive/set have both completed.
+      auto energy_flux = tl.AddTask(set_flx | send_flx,
+                                    CTMHD::CompatibleResistiveEnergyFlux, mu0.get());
+      auto start_energy_recv =
+          tl.AddTask(energy_flux, parthenon::StartReceiveFluxCorrections, mu0);
+      auto send_energy =
+          tl.AddTask(energy_flux, parthenon::LoadAndSendFluxCorrections, mu0);
+      auto recv_energy = tl.AddTask(start_energy_recv,
+                                    parthenon::ReceiveFluxCorrections, mu0);
+      set_flx = tl.AddTask(recv_energy | send_energy,
+                           parthenon::SetFluxCorrections, mu0);
+    }
+
     // compute the divergence of fluxes of conserved variables
     // -------------- CT Step 3a. (RK update the flux) --------------
     auto update_flx = tl.AddTask(
@@ -854,6 +876,10 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     }
     if (ProblemCorrectCTEnergy != nullptr) {
       update_face = tl.AddTask(update_face, ProblemCorrectCTEnergy, mu0.get(),
+                               integrator->beta[stage - 1] * integrator->dt);
+    }
+    if (compatible_energy) {
+      update_face = tl.AddTask(update_face, CTMHD::CorrectCompatibleEnergy, mu0.get(),
                                integrator->beta[stage - 1] * integrator->dt);
     }
     // Add non-operator split source terms.

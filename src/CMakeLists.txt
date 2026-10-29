@@ -11,6 +11,7 @@ add_executable(
         bvals/boundary_conditions_apk.hpp
         eos/adiabatic_hydro.cpp
         hydro/ctmhd/ctmhd.cpp
+        hydro/ctmhd/compatible_energy.cpp
         hydro/ctmhd/ucthlldmhd.cpp
         hydro/diffusion/conduction.cpp
         hydro/diffusion/diffusion.cpp

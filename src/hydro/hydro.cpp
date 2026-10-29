@@ -33,6 +33,7 @@
 #include "diffusion/diffusion.hpp"
 #include "glmmhd/glmmhd.hpp"
 #include "ctmhd/ctmhd.hpp"
+#include "ctmhd/compatible_energy.hpp"
 #include "ctmhd/ucthlldmhd.hpp"
 #include "hydro.hpp"
 #include "interface/params.hpp"
@@ -408,6 +409,20 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         pin->GetOrAddBoolean("hydro", "ct_energy_correction", false);
   }
   pkg->AddParam<>("ct_energy_correction", ct_energy_correction);
+  const auto ct_energy_mode =
+      pin->GetOrAddString("hydro", "ct_energy_correction_mode", "legacy");
+  PARTHENON_REQUIRE_THROWS(ct_energy_mode == "legacy" || ct_energy_mode == "compatible",
+                           "hydro/ct_energy_correction_mode must be legacy or compatible.");
+  const bool compatible_ct_energy = ct_energy_mode == "compatible";
+  PARTHENON_REQUIRE_THROWS(!compatible_ct_energy || !ct_energy_correction,
+                           "compatible CT energy requires ct_energy_correction=false; "
+                           "the mode itself enables ideal-only correction.");
+  pkg->AddParam<>("compatible_ct_energy", compatible_ct_energy);
+  const bool ct_energy_diagnostics =
+      pin->GetOrAddBoolean("hydro", "ct_energy_diagnostics", false);
+  PARTHENON_REQUIRE_THROWS(!ct_energy_diagnostics || compatible_ct_energy,
+                           "ct_energy_diagnostics requires compatible CT energy mode.");
+  pkg->AddParam<>("ct_energy_diagnostics", ct_energy_diagnostics);
 
   // Following params should (currently) be present independent of solver because
   // they're all used in the main loop.
@@ -1337,6 +1352,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   if (ProblemInitPackageData != nullptr) {
     ProblemInitPackageData(pin, pkg.get());
   }
+
+  CTMHD::InitializeCompatibleEnergy(pin, pkg.get());
 
   return pkg;
 }
