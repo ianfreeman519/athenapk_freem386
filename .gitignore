@@ -80,3 +80,5 @@ inputs/cluster/my_cluster.input
 
 # Local MARZ presentation plotting helper
 scripts/plot_pulsed_reconnection_profiles.py
+
+/ct_validation*/
