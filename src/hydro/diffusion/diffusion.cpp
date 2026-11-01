@@ -39,7 +39,8 @@ TaskStatus CalcDiffFluxes(StateDescriptor *hydro_pkg, MeshData<Real> *md) {
     }
   }
   const auto &resistivity = hydro_pkg->Param<Resistivity>("resistivity");
-  if (resistivity != Resistivity::none) {
+  if (resistivity != Resistivity::none &&
+      !hydro_pkg->Param<bool>("compatible_ct_energy")) {
     OhmicDiffFlux(md);
   }
   return TaskStatus::complete;

@@ -347,6 +347,9 @@ TaskStatus AddOhmicEdgeEMF(MeshData<Real> *md) {
   const auto hydro_pkg = pmb->packages.Get("Hydro");
   const auto mask = GetReservoirMask(*hydro_pkg);
   const auto &ohm_diff = hydro_pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const bool compatible = hydro_pkg->Param<bool>("compatible_ct_energy");
+  const auto ohmic_reference = md->PackVariablesAndFluxes(std::vector<std::string>{
+      compatible ? "ct_ohmic_reference" : "Bface"});
 
   // z-directed edges. In 1D only the x derivative and the two x-neighboring
   // coefficient values contribute; in 2D/3D eta is bilinearly interpolated.
@@ -379,8 +382,17 @@ TaskStatus AddOhmicEdgeEMF(MeshData<Real> *md) {
                  ohm_diff.Get(prim(IPR, k, j, i - 1), prim(IDN, k, j, i - 1)) +
                  ohm_diff.Get(prim(IPR, k, j, i), prim(IDN, k, j, i)));
         }
-        bface.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) +=
-            eta * (dby_dx - dbx_dy);
+        if (compatible) {
+          const Real electric = eta * (dby_dx - dbx_dy);
+          bface.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) += electric;
+          ohmic_reference(b).template flux<parthenon::TopologicalType::Edge>(
+              X3DIR, 0, k, j, i) = electric;
+        } else {
+          // Preserve the original expression, including its FMA opportunities,
+          // in the legacy path.
+          bface.template flux<parthenon::TopologicalType::Edge>(X3DIR, 0, k, j, i) +=
+              eta * (dby_dx - dbx_dy);
+        }
       });
 
   if (ndim < 3) {

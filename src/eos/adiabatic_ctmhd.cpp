@@ -47,6 +47,12 @@ void AdiabaticCTMHDEOS::ConservedToPrimitive(MeshData<Real> *md) const {
   auto pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
   const auto nhydro = pkg->Param<int>("nhydro");
   const auto nscalars = pkg->Param<int>("nscalars");
+  const bool compatible = pkg->Param<bool>("compatible_ct_energy");
+  const bool diagnostics = pkg->Param<bool>("ct_energy_diagnostics");
+  const auto exchange = md->PackVariables(std::vector<std::string>{
+      compatible ? "ct_energy_exchange" : "cons"});
+  const auto diag = md->PackVariables(std::vector<std::string>{
+      diagnostics ? "ct_energy_diagnostics" : "cons"});
 
   auto this_on_device = (*this);
 
@@ -60,8 +66,19 @@ void AdiabaticCTMHDEOS::ConservedToPrimitive(MeshData<Real> *md) const {
 
         const bool is_ghost = i < iib.s || i > iib.e || j < ijb.s || j > ijb.e ||
                               k < ikb.s || k > ikb.e;
-        return this_on_device.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i, rank, b,
-                                         is_ghost);
+        Real change = 0.;
+        if (diagnostics) {
+          const Real rho = cons(IDN, k, j, i);
+          diag(b, 3, k, j, i) = cons(IEN, k, j, i) -
+              .5 * (SQR(cons(IB1,k,j,i)) + SQR(cons(IB2,k,j,i)) +
+                    SQR(cons(IB3,k,j,i))) -
+              (rho > 0. ? .5 * (SQR(cons(IM1,k,j,i)) + SQR(cons(IM2,k,j,i)) +
+                               SQR(cons(IM3,k,j,i))) / rho : 0.);
+        }
+        this_on_device.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i, rank, b,
+                                  is_ghost, compatible ? &change : nullptr);
+        if (compatible && !is_ghost) exchange(b, 1, k, j, i) += change;
+        if (diagnostics) diag(b, 4, k, j, i) = change;
       });
   if (IsTabulated()) {
     CheckDiagnostics("CT-MHD conserved-to-primitive state conversion");
