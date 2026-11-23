@@ -11,6 +11,11 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+import time
+import hashlib
+import json
+import os
+import signal
 
 import h5py
 import numpy as np
@@ -88,7 +93,8 @@ def read(path):
                     q=np.sum(q*volume[:, None], axis=(0, 2, 3)) if q is not None else np.zeros(2),
                     time=float(f['Info'].attrs['Time']), div=float(np.max(abs(div))),
                     blocks=nb, levels=f['Levels'][:],
-                    exchange=q)
+                    exchange=q, eos={name: f[name][:].reshape((nb, ny, nx)) for name in
+                        ('eos_temperature', 'eos_zbar') if name in f})
 
 
 def snapshots(directory):
@@ -124,6 +130,14 @@ def energy_check(a, b):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--resume', action='store_true',
+                        help='Reuse completed analytic/RKL2 cases with identical inputs')
+    parser.add_argument('--group', choices=('existing', 'analytic', 'rkl2', 'refinement-flow', 'interface-thermal'), default='existing')
+    parser.add_argument('--refinement-section', choices=('all','guard'), default='all')
+    parser.add_argument('--interface-section', choices=('all','base','resolution','temporal'), default='all')
+    parser.add_argument('--rkl2-section', choices=('all', 'fixed', 'spitzer', 'tabulated', 'temporal', 'controls'), default='all')
+    parser.add_argument('--batch-seconds', type=float, default=55.,
+                        help='Wall-time budget for RKL2 group; exit 75 means resume')
     parser.add_argument('--driver', required=True, type=Path)
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--launcher', default='')
@@ -137,26 +151,116 @@ def main():
     args = parser.parse_args()
     driver = args.driver.resolve()
     assert driver.is_file(), driver
+    if args.group in ('analytic', 'rkl2', 'refinement-flow', 'interface-thermal') and not args.output_dir:
+        args.output_dir = Path(tempfile.mkdtemp(prefix='ct_analytic_'))/'results'
     if args.output_dir:
-        args.output_dir.mkdir(parents=True, exist_ok=False)
+        args.output_dir.mkdir(parents=True, exist_ok=args.resume and args.group in ('analytic', 'rkl2', 'refinement-flow', 'interface-thermal'))
         root = args.output_dir.resolve()
         temporary = None
     else:
         temporary = tempfile.TemporaryDirectory(prefix='compatible_ct_energy_')
         root = Path(temporary.name)
 
-    def run(name, config, *, binary=driver, failure=None, restart=None):
+    if args.group in ('rkl2', 'refinement-flow', 'interface-thermal'):
+        print('Verification output directory:', root, flush=True)
+    deadline = (time.monotonic()+args.batch_seconds
+                if args.group in ('rkl2', 'refinement-flow', 'interface-thermal') and args.batch_seconds > 0 else float('inf'))
+    def hash_file(path):
+        digest = hashlib.sha256()
+        with Path(path).open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024*1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    fingerprint = hash_file(driver) if args.group in ('rkl2', 'refinement-flow', 'interface-thermal') else None
+    table_hashes = {}
+
+    checkpoint_enabled=(args.group=='interface-thermal' or
+                        (args.group=='refinement-flow' and args.refinement_section=='guard'))
+
+    def run(name, config, *, binary=driver, failure=None, restart=None, launcher=None):
         directory = root/name
-        directory.mkdir()
+        signature = None
+        checkpoint_resume = False
+        if args.group in ('rkl2', 'refinement-flow', 'interface-thermal'):
+            table = config.get('tabulated_eos', {}).get('filename')
+            if table and table not in table_hashes:
+                table_hashes[table] = hash_file(table)
+            signature = dict(sha256=fingerprint, eos_sha256=table_hashes.get(table),
+                             launcher=args.launcher if launcher is None else launcher,
+                             driver_args=args.driver_arg)
+        if args.resume and args.group in ('analytic', 'rkl2', 'refinement-flow', 'interface-thermal') and directory.exists():
+            expected = '\n'.join(f'<{block}>\n' + '\n'.join(
+                f'{key} = {value}' for key, value in values.items()) + '\n'
+                for block, values in config.items())
+            assert (directory/'input.in').read_text() == expected, name
+            try:
+                states = snapshots(directory)
+                complete = abs(states[-1][0]['time']-float(config['parthenon/time']['tlim'])) < 1e-10
+            except (AssertionError, OSError, KeyError):
+                complete = False
+            if complete and args.group in ('rkl2', 'refinement-flow', 'interface-thermal'):
+                stamp = directory/'execution.json'
+                complete = stamp.exists() and json.loads(stamp.read_text()) == dict(
+                    signature, returncode=0)
+            if complete:
+                print(f'reusing {name}', flush=True)
+                return states[0][0], states[-1][0], directory
+            launch_stamp=directory/'launch_signature.json'
+            execution_stamp=directory/'execution.json'
+            if (checkpoint_enabled and restart is None and
+                launch_stamp.exists() and json.loads(launch_stamp.read_text())==signature and
+                (not execution_stamp.exists() or json.loads(execution_stamp.read_text())['returncode']==75)):
+                candidates=[]
+                for path in directory.glob('*.rhdf'):
+                    try:
+                        when=read_restart_time(path)
+                        if 0<when<float(config['parthenon/time']['tlim']): candidates.append((when,path))
+                    except (OSError,KeyError): pass  # Interrupted checkpoint write.
+                if candidates:
+                    when,restart=max(candidates)
+                    checkpoint_resume=True
+                    print(f'resuming {name} checkpoint at t={when:.8g}',flush=True)
+            if not checkpoint_resume:
+                attempt = 1
+                while (root/f'{name}.incomplete_{attempt}').exists():
+                    attempt += 1
+                directory.rename(root/f'{name}.incomplete_{attempt}')
+        if time.monotonic()+2 >= deadline:
+            print('BATCH INCOMPLETE: resume with the same --output-dir and --resume', flush=True)
+            raise SystemExit(75)
+        directory.mkdir(exist_ok=checkpoint_resume)
         inp = directory/'input.in'
         write_input(inp, config)
-        cmd = shlex.split(args.launcher)+[str(binary)]
+        cmd = shlex.split(args.launcher if launcher is None else launcher)+[str(binary)]
         cmd += (['-r', str(restart), f'parthenon/time/tlim={config["parthenon/time"]["tlim"]}']
                 if restart else ['-i', str(inp)])
         cmd += args.driver_arg
-        result = subprocess.run(cmd, cwd=directory, text=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, timeout=args.timeout)
-        (directory/'run.log').write_text(result.stdout)
+        if checkpoint_enabled:
+            (directory/'launch_signature.json').write_text(json.dumps(signature))
+        previous_log=(directory/'run.log').read_text() if checkpoint_resume else ''
+        if checkpoint_resume:
+            previous_log+=f'\nCheckpoint continuation from {restart.name}\n'
+        with subprocess.Popen(cmd, cwd=directory, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, start_new_session=True) as process:
+            try:
+                stdout, _ = process.communicate(
+                    timeout=min(args.timeout, max(.1, deadline-time.monotonic())))
+            except subprocess.TimeoutExpired:
+                # Kill the entire launcher/driver group, including MPI children.
+                os.killpg(process.pid, signal.SIGKILL)
+                stdout, _ = process.communicate()
+                (directory/'run.log').write_text(previous_log+stdout)
+                if time.monotonic() >= deadline:
+                    if checkpoint_enabled:
+                        (directory/'execution.json').write_text(json.dumps(dict(signature,returncode=75)))
+                    print('BATCH INCOMPLETE: resume with --resume', flush=True)
+                    raise SystemExit(75)
+                raise
+            result = subprocess.CompletedProcess(cmd, process.returncode, stdout)
+        if args.group in ('rkl2', 'refinement-flow', 'interface-thermal'):
+            (directory/'execution.json').write_text(json.dumps(dict(
+                signature, returncode=result.returncode)))
+        (directory/'run.log').write_text(previous_log+result.stdout)
         if failure:
             assert result.returncode != 0, f'{name}: unsupported setup accepted'
             assert failure in result.stdout, result.stdout[-4000:]
@@ -171,6 +275,33 @@ def main():
         assert abs(states[-1][0]['time']-float(config['parthenon/time']['tlim'])) < 1e-10
         print(f'completed {name}', flush=True)
         return states[0][0], states[-1][0], directory
+
+    if args.group == 'interface-thermal':
+        from interface_thermal import run_suite
+        run_suite(run, fixture, snapshots, energy_check, root, args.interface_section)
+        return
+
+    if args.group == 'refinement-flow':
+        from refinement_flow import run_suite, run_guard_suite
+        selected=run_guard_suite if args.refinement_section=='guard' else run_suite
+        selected(run, fixture, snapshots, energy_check, root)
+        print('PASS coarse-to-fine flow tests; outputs:', root)
+        return
+
+    if args.group == 'rkl2':
+        from rkl2_diffusion import run_suite
+        run_suite(run, fixture, snapshots, energy_check, root,
+                  section=args.rkl2_section, eos_table=args.eos_table,
+                  compare_mpi=bool(args.launcher))
+        print('PASS compatible RKL2 tests; outputs:', root)
+        return
+
+    if args.group == 'analytic':
+        from analytic_diffusion import run_suite
+        run_suite(run, fixture, legacy, snapshots, energy_check, root,
+                  compare_mpi=bool(args.launcher))
+        print('PASS analytic CT heating tests; outputs:', root)
+        return
 
     config = fixture()
     a = run('legacy_default', legacy(config, explicit=False))
@@ -299,7 +430,8 @@ def main():
     run('reject_mode', bad, failure='must be legacy or compatible')
     bad = fixture()
     bad['diffusion']['integrator'] = 'rkl2'
-    run('reject_rkl2', bad, failure='compatible CT energy supports')
+    case = run('accept_rkl2', bad)
+    energy_check(case[0], case[1])
     for operator in ('conduction', 'viscosity'):
         bad = fixture()
         bad['diffusion'][operator] = 'isotropic'

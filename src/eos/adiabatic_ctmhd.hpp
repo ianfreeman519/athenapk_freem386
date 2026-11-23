@@ -57,6 +57,9 @@ class AdiabaticCTMHDEOS : public EquationOfState {
                                                                    Real T) const {
     return table_.InternalEnergyFromDensityTemperature(rho, T);
   }
+  KOKKOS_INLINE_FUNCTION bool ContainsDensityEnergy(Real rho, Real eps) const {
+    return !IsTabulated() || table_.ContainsDensityEnergy(rho, eps);
+  }
   void CheckDiagnostics(const std::string &where) const {
     if (IsTabulated()) table_.CheckDiagnostics(where);
   }

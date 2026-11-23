@@ -12,6 +12,7 @@
 // C++ headers
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // Parthenon headers
 #include <parthenon/package.hpp>
@@ -276,7 +277,93 @@ struct OhmicDiffusivity {
   }
 };
 
-Real EstimateResistivityTimestep(MeshData<Real> *md);
+// Compatible CT uses cell coefficients on the interior plus the first x/y halo,
+// including corners (the four-cell edge-EMF average). The second halo is not used.
+KOKKOS_INLINE_FUNCTION
+bool InCompatibleOhmicStencil(int i, int j, int k, IndexRange ib, IndexRange jb,
+                              IndexRange kb) {
+  return i >= ib.s-1 && i <= ib.e+1 && j >= jb.s-1 && j <= jb.e+1 &&
+         k >= kb.s && k <= kb.e;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real CompatibleOhmicCellTimestep(Real coeff, Real cfl, Real dx) {
+  if (!Kokkos::isfinite(coeff) || coeff < 0.) return 0.;
+  return coeff == 0. ? std::numeric_limits<Real>::max() : .25*cfl*dx*dx/coeff;
+}
+
+// Validate all cells recovered by FillDerived, including the outer ghost halo.
+// Keep this identical for base-step estimation and intermediate-stage guards.
+template <typename Pack, typename EOS>
+KOKKOS_INLINE_FUNCTION
+int CheckCompatibleOhmicState(const Pack &u, const EOS &eos,
+                              int b, int k, int j, int i, Real &pressure) {
+  bool valid = true;
+  for (int n = 0; n < 8; ++n) valid = valid && Kokkos::isfinite(u(b,n,k,j,i));
+  const Real rho = u(b,IDN,k,j,i);
+  if (!valid || !(rho > 0.) || rho < eos.GetDensityFloor()) {
+    return 1;
+  }
+  const Real vsq = (SQR(u(b,IM1,k,j,i))+SQR(u(b,IM2,k,j,i))+
+                    SQR(u(b,IM3,k,j,i)))/SQR(rho);
+  const Real magnetic = .5*(SQR(u(b,IB1,k,j,i))+SQR(u(b,IB2,k,j,i))+
+                             SQR(u(b,IB3,k,j,i)));
+  const Real eps = (u(b,IEN,k,j,i)-.5*rho*vsq-magnetic)/rho;
+  if (!(eps > 0.) || !Kokkos::isfinite(eps) || eps < eos.GetInternalEFloor() ||
+      eps > eos.GetInternalECeiling() ||
+      (eos.GetVelocityCeiling() > 0. && vsq > SQR(eos.GetVelocityCeiling())) ||
+      !eos.ContainsDensityEnergy(rho,eps)) {
+    return 2;
+  }
+  const auto state = eos.StateFromDensityInternalEnergy(rho,eps);
+  if (!(state.pressure > 0.) || !Kokkos::isfinite(state.pressure) ||
+      state.pressure < eos.GetPressureFloor() ||
+      (eos.IsTabulated() &&
+       (!Kokkos::isfinite(state.temperature) || !(state.temperature > 0.) ||
+        !Kokkos::isfinite(state.zbar) || state.zbar < 0. ||
+        !Kokkos::isfinite(state.sound_speed) || !(state.sound_speed > 0.) ||
+        state.temperature < eos.GetTemperatureFloor() ||
+        state.temperature > eos.GetTemperatureCeiling()))) {
+    return 3;
+  }
+  pressure=state.pressure;
+  return 0;
+}
+
+// Both reductions must be entered by every rank, including ranks with no local
+// rejection. Used by the driver and the two-rank focused regression test.
+inline void ReduceCompatibleRKLStage(int &failures, Real &observed_dt) {
+#ifdef MPI_PARALLEL
+  PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE,&failures,1,MPI_INT,MPI_BOR,
+                                    MPI_COMM_WORLD));
+  PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE,&observed_dt,1,MPI_PARTHENON_REAL,
+                                    MPI_MIN,MPI_COMM_WORLD));
+#endif
+}
+
+// Retry bookkeeping is independent of the RKL recurrence/state registers. A
+// rejected trial must be restored by the caller before requesting a new bound.
+struct CompatibleRKLRetry {
+  int halvings = 0;
+  Real learned_dt = std::numeric_limits<Real>::max();
+  Real Bound(Real base_dt) const { return .9*std::min(base_dt,learned_dt); }
+  bool Reject(int failures, Real observed_dt, Real &step) {
+    if (halvings == 8) return false;
+    if (!(failures & 3) && observed_dt > 0. && std::isfinite(observed_dt))
+      learned_dt=std::min(learned_dt,observed_dt);
+    step *= .5;
+    ++halvings;
+    return true;
+  }
+  void Accept() { halvings=0; }
+};
+
+// Uses centered conserved fields and the same pressure-to-coefficient lookup as
+// the Ohmic operator. Returns zero for an invalid state/coefficient, without floors.
+Real EstimateCompatibleOhmicTimestep(MeshData<Real> *md);
+
+Real EstimateResistivityTimestep(MeshData<Real> *md, Real *heating_dt = nullptr,
+                                 bool parabolic_only = false);
 
 //! Calculate Ohmic face fluxes, evaluating the configured coefficient at each face.
 void OhmicDiffFlux(MeshData<Real> *md);

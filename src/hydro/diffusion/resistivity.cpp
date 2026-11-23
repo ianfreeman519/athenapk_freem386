@@ -12,6 +12,7 @@
 
 // AthenaPK headers
 #include "../../main.hpp"
+#include "../../eos/adiabatic_ctmhd.hpp"
 #include "../reservoir_mask.hpp"
 #include "config.hpp"
 #include "diffusion.hpp"
@@ -21,7 +22,36 @@
 using namespace parthenon::package::prelude;
 using TE = parthenon::TopologicalElement;
 
-Real EstimateResistivityTimestep(MeshData<Real> *md) {
+Real EstimateCompatibleOhmicTimestep(MeshData<Real> *md) {
+  const auto pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  const auto eos = pkg->Param<AdiabaticCTMHDEOS>("eos");
+  const auto eta = pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const Real cfl = pkg->Param<Real>("cfl_diff");
+  const auto u = md->PackVariables(std::vector<std::string>{"cons"});
+  const auto ib = md->GetBoundsI(IndexDomain::interior);
+  const auto jb = md->GetBoundsJ(IndexDomain::interior);
+  const auto kb = md->GetBoundsK(IndexDomain::interior);
+  Real bound = std::numeric_limits<Real>::max();
+  Kokkos::parallel_reduce("Compatible Ohmic stencil bound",
+    Kokkos::MDRangePolicy<Kokkos::Rank<4>>(DevExecSpace(),
+      {0,kb.s,jb.s-1,ib.s-1}, {u.GetDim(5),kb.e+1,jb.e+2,ib.e+2}),
+    KOKKOS_LAMBDA(int b,int k,int j,int i,Real &result) {
+      if (!InCompatibleOhmicStencil(i,j,k,ib,jb,kb)) return;
+      Real pressure;
+      if (CheckCompatibleOhmicState(u,eos,b,k,j,i,pressure)) {
+        result=0.; return;
+      }
+      const Real coeff=eta.Get(pressure,u(b,IDN,k,j,i));
+      const auto &c=u.GetCoords(b);
+      const Real dt=CompatibleOhmicCellTimestep(coeff,cfl,
+                                               fmin(c.Dxc<1>(k,j,i),c.Dxc<2>(k,j,i)));
+      result=fmin(result,dt);
+    },Kokkos::Min<Real>(bound));
+  return bound;
+}
+
+Real EstimateResistivityTimestep(MeshData<Real> *md, Real *heating_dt,
+                                 bool parabolic_only) {
   // get to package via first block in Meshdata (which exists by construction)
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
   const auto mask = GetReservoirMask(*hydro_pkg);
@@ -150,7 +180,8 @@ Real EstimateResistivityTimestep(MeshData<Real> *md) {
       Kokkos::Min<Real>(min_heating_time));
 
   const Real dt_heating = cfl_diff * min_heating_time;
-  return std::min(dt_diffusion, dt_heating);
+  if (heating_dt != nullptr) *heating_dt = dt_heating;
+  return parabolic_only ? dt_diffusion : std::min(dt_diffusion, dt_heating);
 }
 
 //---------------------------------------------------------------------------------------

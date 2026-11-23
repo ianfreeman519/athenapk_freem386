@@ -10,6 +10,7 @@
 // AthenaPK headers
 #include "../../main.hpp"
 #include "ctmhd.hpp"
+#include "compatible_energy.hpp"
 
 using namespace parthenon::package::prelude;
 using TE = parthenon::TopologicalElement;
@@ -460,6 +461,7 @@ TaskStatus UpdateWithFaceMagDivergence(MeshData<Real> *mu0, MeshData<Real> *mu1,
 }
 
 void center_Mag_Field(MeshData<Real> *md) {
+    InterfaceEnergyProbe(md, 2);
     auto pmb = md->GetBlockData(0)->GetBlockPointer();
     auto hydro_pkg = pmb->packages.Get("Hydro");
     const bool correct_ct_energy =
@@ -510,6 +512,7 @@ void center_Mag_Field(MeshData<Real> *md) {
             cons(IB3, k, j, i) = b3_ct;
         });
 
+    InterfaceEnergyProbe(md, 3);
     // return TaskStatus::complete;
 }
 

@@ -109,7 +109,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
 
   const int iprob = pin->GetOrAddInteger("problem/resistive_diffusion", "iprob", 0);
   PARTHENON_REQUIRE_THROWS(iprob == 0 || iprob == 1 || iprob == 2 || iprob == 3 ||
-                               iprob == 10 || iprob == 20 || iprob == 30,
+                               iprob == 10 || iprob == 20 || iprob == 30 ||
+                               iprob == 40 || iprob == 41 || iprob == 42,
                            "Unknown problem/resistive_diffusion/iprob");
 
   const Real rho0 = pin->GetOrAddReal("problem/resistive_diffusion", "rho", 1.0);
@@ -136,10 +137,17 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   const Real ky = 2.0 * M_PI * mode_y / ly;
   const Real kz = 2.0 * M_PI * mode_z / lz;
   const Real gm1 = pin->GetOrAddReal("hydro", "gamma", 5.0/3.0) - 1.0;
+  const Real vx = pin->GetOrAddReal("problem/resistive_diffusion", "vx", 0.);
   const auto eos = pmb->packages.Get("Hydro")->Param<AdiabaticCTMHDEOS>("eos");
   // Tabulated EOS views live in device memory. Only the ideal-gas expression
   // can be evaluated in the host initialization loops below.
   const Real thermal_energy = eos.IsTabulated() ? 0. : p0/gm1;
+  // 40: axis helix; 41: oblique helix; 42: axis + half oblique. A_z=-A sin(k.x)/|k|.
+  const bool helical = iprob == 40 || iprob == 41 || iprob == 42;
+  const Real hy = iprob == 40 ? 0. : ky;
+  const Real hk = sqrt(kx*kx + hy*hy);
+  PARTHENON_REQUIRE_THROWS(!helical || ndim == 2,
+                           "Helical diffusion requires a 2D mesh.");
   const Real xc = .5*(mesh_size.xmin(parthenon::X1DIR)+mesh_size.xmax(parthenon::X1DIR));
   const Real yc = .5*(mesh_size.xmin(parthenon::X2DIR)+mesh_size.xmax(parthenon::X2DIR));
   const Real length = fmin(lx, ly);
@@ -166,6 +174,11 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         Real value = 0.0;
         if (iprob == 0) {
           value = bx0;
+        } else if (helical) {
+          const Real x = coords.Xf<1>(i);
+          const Real y0 = coords.Xf<2>(j), y1 = coords.Xf<2>(j+1);
+          value = -amp/hk*(sin(kx*x+hy*y1)-sin(kx*x+hy*y0))/(y1-y0);
+          if (iprob == 42) value *= .5;
         } else if (iprob == 10) {
           const Real x = coords.Xf<1>(i);
           const Real y0 = coords.Xf<2>(j);
@@ -196,6 +209,12 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           value = by0;
         } else if (iprob == 1) {
           value = amp * sin(kx * coords.Xc<1>(i));
+        } else if (helical) {
+          const Real y = coords.Xf<2>(j);
+          const Real x0 = coords.Xf<1>(i), x1 = coords.Xf<1>(i+1);
+          value = amp/hk*(sin(kx*x1+hy*y)-sin(kx*x0+hy*y))/(x1-x0);
+          if (iprob == 42)
+            value = .5*value + amp/kx*(sin(kx*x1)-sin(kx*x0))/(x1-x0);
         } else if (iprob == 10) {
           const Real y = coords.Xf<2>(j);
           const Real x0 = coords.Xf<1>(i);
@@ -224,6 +243,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         Real value = 0.0;
         if (iprob == 0) {
           value = bz0;
+        } else if (helical) {
+          const Real dx = coords.Xf<1>(i+1)-coords.Xf<1>(i);
+          const Real dy = coords.Xf<2>(j+1)-coords.Xf<2>(j);
+          const Real sx = sin(.5*kx*dx)/(.5*kx*dx);
+          const Real sy = hy == 0. ? 1. : sin(.5*hy*dy)/(.5*hy*dy);
+          value = amp*sx*sy*sin(kx*coords.Xc<1>(i)+hy*coords.Xc<2>(j));
+          if (iprob == 42)
+            value = .5*value + amp*sx*sin(kx*coords.Xc<1>(i));
         } else if (iprob == 2) {
           value = amp * sin(kx * coords.Xc<1>(i));
         } else if (iprob == 3) {
@@ -242,7 +269,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
     for (int j = jb.s; j <= jb.e; ++j) {
       for (int i = ib.s; i <= ib.e; ++i) {
         u(IDN, k, j, i) = rho0;
-        u(IM1, k, j, i) = 0.0;
+        u(IM1, k, j, i) = rho0 * vx;
         u(IM2, k, j, i) = 0.0;
         u(IM3, k, j, i) = 0.0;
         u(IB1, k, j, i) = 0.5 * (b1f(k, j, i) + b1f(k, j, i + 1));
@@ -263,13 +290,29 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         // the device kernel. No EOS lookup may access these tables on the host.
         u(IEN, k, j, i) = eos.IsTabulated() ? local_pressure : local_thermal +
             0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) +
-                   SQR(u(IB3, k, j, i)));
+                   SQR(u(IB3, k, j, i))) + .5*rho0*vx*vx;
       }
     }
   }
 
   bface_dev.DeepCopy(bface);
   u_dev.DeepCopy(u);
+  const auto hydro = pmb->packages.Get("Hydro");
+  if (hydro->Param<bool>("compatible_ct_energy") &&
+      hydro->Param<bool>("ct_interface_diagnostics")) {
+    const auto probe = pmb->meshblock_data.Get()->Get("ct_interface_diagnostics").data;
+    pmb->par_for("Initialize interface probes", kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+      KOKKOS_LAMBDA(int k,int j,int i) {
+        for (int n=0;n<26;++n) probe(n,k,j,i)=0.;
+      });
+    if (hydro->Param<bool>("ct_energy_diagnostics")) {
+      const auto stage=pmb->meshblock_data.Get()->Get("ct_energy_diagnostics").data;
+      pmb->par_for("Initialize interface energy diagnostics",kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+        KOKKOS_LAMBDA(int k,int j,int i) {
+          for(int n=0;n<5;++n) stage(n,k,j,i)=0.;
+        });
+    }
+  }
   if (eos.IsTabulated()) {
     const auto state = u_dev;
     pmb->par_for(
@@ -279,7 +322,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
           const Real pressure = state(IEN, k, j, i);
           const Real thermal = rho0 * eos.InternalEnergyFromDensityPressure(rho0, pressure);
           state(IEN, k, j, i) = thermal + .5 *
-              (SQR(state(IB1,k,j,i)) + SQR(state(IB2,k,j,i)) + SQR(state(IB3,k,j,i)));
+              (SQR(state(IB1,k,j,i)) + SQR(state(IB2,k,j,i)) + SQR(state(IB3,k,j,i))) +
+              .5*rho0*vx*vx;
         });
   }
 }

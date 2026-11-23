@@ -4,6 +4,8 @@
 // Licensed under the BSD 3-Clause License (the "LICENSE").
 //========================================================================================
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <string>
@@ -19,6 +21,7 @@
 #include <parthenon/parthenon.hpp>
 // AthenaPK headers
 #include "../eos/adiabatic_hydro.hpp"
+#include "../eos/adiabatic_ctmhd.hpp"
 #include "../pgen/cluster/agn_triggering.hpp"
 #include "../pgen/cluster/magnetic_tower.hpp"
 #include "../tracers/tracers.hpp"
@@ -195,7 +198,7 @@ TaskStatus FaceMagneticDerivative(MeshData<Real> *src, MeshData<Real> *dst) {
 
 TaskStatus RKL2StepFirst(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
                          MeshData<Real> *md_Yjm2, MeshData<Real> *md_MY0, const int s_rkl,
-                         const Real tau, const bool evolve_bface) {
+                         const Real tau, const bool evolve_bface, const bool compatible) {
   auto pmb = md_Y0->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
@@ -226,6 +229,28 @@ TaskStatus RKL2StepFirst(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
             Y0(b, v, k, j, i) + mu_tilde_1 * tau * MY0(b, v, k, j, i); // Y_1
         Yjm2(b, v, k, j, i) = Y0(b, v, k, j, i);                       // Y_0
       });
+
+  if (compatible) {
+    const auto q0 = md_Y0->PackVariables(std::vector<std::string>{"ct_energy_exchange"});
+    const auto q1 = md_Yjm1->PackVariables(std::vector<std::string>{"ct_energy_exchange"});
+    const auto q2 = md_Yjm2->PackVariables(std::vector<std::string>{"ct_energy_exchange"});
+    parthenon::par_for(DEFAULT_LOOP_PATTERN,"RKL first source history",DevExecSpace(),
+      0,q0.GetDim(5)-1,0,1,kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+      KOKKOS_LAMBDA(int b,int n,int k,int j,int i) {
+        q1(b,n,k,j,i)=q0(b,n,k,j,i);
+        q2(b,n,k,j,i)=q0(b,n,k,j,i);
+      });
+  }
+
+  if (compatible && pmb->packages.Get("Hydro")->Param<bool>("ct_interface_diagnostics")) {
+    const auto d=md_Yjm1->PackVariables(std::vector<std::string>{"ct_interface_diagnostics"});
+    parthenon::par_for(DEFAULT_LOOP_PATTERN,"RKL diagnostic transport first",DevExecSpace(),
+      0,Y0.GetDim(5)-1,kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+      KOKKOS_LAMBDA(int b,int k,int j,int i) {
+        d(b,21,k,j,i)=mu_tilde_1*tau*d(b,13,k,j,i);
+        d(b,22,k,j,i)=0.;d(b,23,k,j,i)=d(b,13,k,j,i);
+      });
+  }
 
   if (evolve_bface) {
     auto B0 = md_Y0->PackVariables(std::vector<std::string>{"Bface"});
@@ -269,7 +294,7 @@ TaskStatus RKL2StepFirst(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
 TaskStatus RKL2StepOther(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
                          MeshData<Real> *md_Yjm2, MeshData<Real> *md_MY0, const Real mu_j,
                          const Real nu_j, const Real mu_tilde_j, const Real gamma_tilde_j,
-                         const Real tau, const bool evolve_bface) {
+                         const Real tau, const bool evolve_bface, const bool compatible) {
   auto pmb = md_Y0->GetBlockData(0)->GetBlockPointer();
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
@@ -303,6 +328,34 @@ TaskStatus RKL2StepOther(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
         Yjm2(b, v, k, j, i) = Yjm1(b, v, k, j, i);
         Yjm1(b, v, k, j, i) = Yj;
       });
+
+  if (compatible) {
+    const auto q0 = md_Y0->PackVariables(std::vector<std::string>{"ct_energy_exchange"});
+    const auto q1 = md_Yjm1->PackVariables(std::vector<std::string>{"ct_energy_exchange"});
+    const auto q2 = md_Yjm2->PackVariables(std::vector<std::string>{"ct_energy_exchange"});
+    // There is no diffusive source-history operator. Only roundoff from the
+    // admissible EOS recovery can change this accumulator between stages.
+    parthenon::par_for(DEFAULT_LOOP_PATTERN,"RKL source history recurrence",DevExecSpace(),
+      0,q0.GetDim(5)-1,0,1,kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+      KOKKOS_LAMBDA(int b,int n,int k,int j,int i) {
+        const Real next=mu_j*q1(b,n,k,j,i)+nu_j*q2(b,n,k,j,i)+
+                        (1.-mu_j-nu_j)*q0(b,n,k,j,i);
+        q2(b,n,k,j,i)=q1(b,n,k,j,i);
+        q1(b,n,k,j,i)=next;
+      });
+  }
+
+  if (compatible && pmb->packages.Get("Hydro")->Param<bool>("ct_interface_diagnostics")) {
+    const auto d=md_Yjm1->PackVariables(std::vector<std::string>{"ct_interface_diagnostics"});
+    parthenon::par_for(DEFAULT_LOOP_PATTERN,"RKL diagnostic transport recurrence",DevExecSpace(),
+      0,Y0.GetDim(5)-1,kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+      KOKKOS_LAMBDA(int b,int k,int j,int i) {
+        const Real previous=d(b,21,k,j,i);
+        d(b,21,k,j,i)=mu_j*previous+nu_j*d(b,22,k,j,i)+
+            mu_tilde_j*tau*d(b,13,k,j,i)+gamma_tilde_j*tau*d(b,23,k,j,i);
+        d(b,22,k,j,i)=previous;
+      });
+  }
 
   if (evolve_bface) {
     auto B0 = md_Y0->PackVariables(std::vector<std::string>{"Bface"});
@@ -388,10 +441,173 @@ TaskStatus RKL2StepOther(MeshData<Real> *md_Y0, MeshData<Real> *md_Yjm1,
   return TaskStatus::complete;
 }
 
+// A collective stage gate runs only after all exchanges have completed. Returning
+// fail stops the trial collection before primitive recovery can apply EOS floors.
+struct CompatibleRKLStageReport {
+  Real observed_dt = std::numeric_limits<Real>::max();
+  int failures = 0; // bit 1: state/EOS, bit 2: coefficient, bit 4: bound exceeded
+};
+
+TaskStatus CheckCompatibleRKLStage(Mesh *mesh, Real dt_bound,
+                                    CompatibleRKLStageReport *trial_report) {
+  const auto pkg = mesh->packages.Get("Hydro");
+  const auto eos = pkg->Param<AdiabaticCTMHDEOS>("eos");
+  const auto eta = pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const Real cfl = pkg->Param<Real>("cfl_diff");
+  int invalid = 0;
+  for (int part = 0; part < mesh->DefaultNumPartitions(); ++part) {
+    auto md = mesh->mesh_data.GetOrAdd("base", part);
+    CTMHD::center_Mag_Field(md.get()); // compatible mode never replaces total energy here
+    const auto u = md->PackVariables(std::vector<std::string>{"cons"});
+    const auto ib = md->GetBoundsI(IndexDomain::entire);
+    const auto jb = md->GetBoundsJ(IndexDomain::entire);
+    const auto kb = md->GetBoundsK(IndexDomain::entire);
+    const auto ii=md->GetBoundsI(IndexDomain::interior);
+    const auto jj=md->GetBoundsJ(IndexDomain::interior);
+    const auto kk=md->GetBoundsK(IndexDomain::interior);
+    const int ni=ib.e-ib.s+1,nj=jb.e-jb.s+1,nk=kb.e-kb.s+1;
+    int bad = std::numeric_limits<int>::max();
+    int local_failures = 0;
+    Kokkos::parallel_reduce(
+        "Admissible compatible RKL stage",
+        Kokkos::MDRangePolicy<Kokkos::Rank<4>>(DevExecSpace(),
+          {0,kb.s,jb.s,ib.s}, {u.GetDim(5),kb.e+1,jb.e+1,ib.e+1}),
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int &result, int &flags) {
+          const int cell=(((b*nk+k-kb.s)*nj+j-jb.s)*ni+i-ib.s)*8;
+          Real pressure;
+          const int state_failure=CheckCompatibleOhmicState(u,eos,b,k,j,i,pressure);
+          if (state_failure) {
+            flags |= 1;
+            result=result < cell+state_failure ? result : cell+state_failure;
+            return;
+          }
+          if (!InCompatibleOhmicStencil(i,j,k,ii,jj,kk)) return;
+          const Real coeff = eta.Get(pressure,u(b,IDN,k,j,i));
+          const auto &c = u.GetCoords(b);
+          const Real d = fmin(c.Dxc<1>(k,j,i),c.Dxc<2>(k,j,i));
+          const Real dt = CompatibleOhmicCellTimestep(coeff,cfl,d);
+          const int reason = (!Kokkos::isfinite(coeff) || coeff < 0.) ? 5 :
+                             (dt < dt_bound*(1.-1.e-10) ? 4 : 0);
+          if (reason) {
+            flags |= reason == 5 ? 2 : 4;
+            result = result < cell+reason ? result : cell+reason;
+          }
+        }, Kokkos::Min<int>(bad), Kokkos::BOr<int>(local_failures));
+    invalid |= local_failures;
+    if (bad != std::numeric_limits<int>::max()) {
+      const int reason=bad%8;
+      int cell=bad/8;
+      const int i=ib.s+cell%ni;cell/=ni;
+      const int j=jb.s+cell%nj;cell/=nj;
+      const int k=kb.s+cell%nk;const int b=cell/nk;
+      Kokkos::View<Real*> report("RKL rejected cell",8);
+      Kokkos::parallel_for("RKL rejection details",Kokkos::RangePolicy<DevExecSpace>(0,1),
+        KOKKOS_LAMBDA(int) {
+          const Real rho=u(b,IDN,k,j,i);
+          const Real kinetic=.5*(SQR(u(b,IM1,k,j,i))+SQR(u(b,IM2,k,j,i))+SQR(u(b,IM3,k,j,i)))/rho;
+          const Real magnetic=.5*(SQR(u(b,IB1,k,j,i))+SQR(u(b,IB2,k,j,i))+SQR(u(b,IB3,k,j,i)));
+          const Real eps=(u(b,IEN,k,j,i)-kinetic-magnetic)/rho;
+          report(0)=rho;report(1)=eps;report(2)=u(b,IEN,k,j,i);
+          report(3)=report(4)=report(5)=report(6)=report(7)=NAN;
+          if(reason==4 || reason==5) {
+            const auto state=eos.StateFromDensityInternalEnergy(rho,eps);
+            const Real coeff=eta.Get(state.pressure,rho);
+            const auto &c=u.GetCoords(b);
+            const Real dx=fmin(c.Dxc<1>(k,j,i),c.Dxc<2>(k,j,i));
+            report(3)=state.pressure;report(4)=state.temperature;report(5)=coeff;
+            report(6)=CompatibleOhmicCellTimestep(coeff,cfl,dx);
+          }
+          report(7)=u.GetCoords(b).Xc<1>(i);
+        });
+      const auto host=Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),report);
+      const auto block=md->GetBlockData(b)->GetBlockPointer();
+      const auto ii=md->GetBoundsI(IndexDomain::interior),jj=md->GetBoundsJ(IndexDomain::interior),
+                 kk=md->GetBoundsK(IndexDomain::interior);
+      const bool ghost=i<ii.s||i>ii.e||j<jj.s||j>jj.e||k<kk.s||k>kk.e;
+      std::cout << "Compatible RKL rejection detail: rank=" << parthenon::Globals::my_rank
+                << " block=" << block->gid << " level=" << block->loc.level()
+                << " i=" << i << " j=" << j << " k=" << k << " ghost=" << ghost
+                << " reason=" << (reason==4 ? "diffusivity_bound" :
+                                  (reason==5 ? "invalid_coefficient" : "positivity_or_eos"))
+                << " check=" << reason << " rho=" << host(0) << " eps=" << host(1)
+                << " E=" << host(2) << " pressure=" << host(3) << " temperature=" << host(4)
+                << " eta=" << host(5) << " cell_dt=" << host(6) << " bound=" << dt_bound
+                << " x=" << host(7) << std::endl;
+    }
+  }
+  Real observed = std::numeric_limits<Real>::max();
+  // Invalid states never enter the EOS/coefficient evaluator again. Valid ranks
+  // still contribute their bound; invalid flags prevent learning a partial bound.
+  if (!(invalid & 3)) {
+    for (int part=0; part<mesh->DefaultNumPartitions(); ++part)
+      observed=std::min(observed,EstimateCompatibleOhmicTimestep(
+          mesh->mesh_data.GetOrAdd("base",part).get()));
+  }
+  ReduceCompatibleRKLStage(invalid,observed);
+  if (trial_report) {
+    trial_report->failures |= invalid;
+    trial_report->observed_dt=std::min(trial_report->observed_dt,observed);
+  }
+  return invalid ? TaskStatus::fail : TaskStatus::complete;
+}
+
+// Stage diagnostics are relative to the beginning of this diffusion superstep;
+// ct_energy_exchange remains the cumulative, restartable physical source budget.
+TaskStatus FinishCompatibleRKLStage(MeshData<Real> *md, MeshData<Real> *initial) {
+  const auto pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  if (pkg->Param<bool>("ct_energy_diagnostics")) {
+    const auto u = md->PackVariables(std::vector<std::string>{"cons"});
+    const auto u0 = initial->PackVariables(std::vector<std::string>{"cons"});
+    const auto d = md->PackVariables(std::vector<std::string>{"ct_energy_diagnostics"});
+    const auto ib = md->GetBoundsI(IndexDomain::interior);
+    const auto jb = md->GetBoundsJ(IndexDomain::interior);
+    const auto kb = md->GetBoundsK(IndexDomain::interior);
+    parthenon::par_for(DEFAULT_LOOP_PATTERN,"Compatible RKL stage diagnostics",
+      DevExecSpace(),0,u.GetDim(5)-1,kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+      KOKKOS_LAMBDA(int b,int k,int j,int i) {
+        d(b,0,k,j,i) = 0.;
+        d(b,1,k,j,i) = .5*(SQR(u(b,IB1,k,j,i))+SQR(u(b,IB2,k,j,i))+
+                            SQR(u(b,IB3,k,j,i))-SQR(u0(b,IB1,k,j,i))-
+                            SQR(u0(b,IB2,k,j,i))-SQR(u0(b,IB3,k,j,i)));
+        d(b,2,k,j,i) = u(b,IEN,k,j,i)-u0(b,IEN,k,j,i);
+      });
+  }
+  if (pkg->Param<bool>("ct_interface_diagnostics")) {
+    const auto u=md->PackVariables(std::vector<std::string>{"cons"});
+    const auto u0=initial->PackVariables(std::vector<std::string>{"cons"});
+    const auto d=md->PackVariables(std::vector<std::string>{"ct_interface_diagnostics"});
+    const auto ib=md->GetBoundsI(IndexDomain::interior),jb=md->GetBoundsJ(IndexDomain::interior),
+               kb=md->GetBoundsK(IndexDomain::interior);
+    parthenon::par_for(DEFAULT_LOOP_PATTERN,"RKL independent thermal balance",DevExecSpace(),
+      0,u.GetDim(5)-1,kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+      KOKKOS_LAMBDA(int b,int k,int j,int i) {
+        const Real dm=.5*(SQR(u(b,IB1,k,j,i))+SQR(u(b,IB2,k,j,i))+SQR(u(b,IB3,k,j,i))-
+                         SQR(u0(b,IB1,k,j,i))-SQR(u0(b,IB2,k,j,i))-SQR(u0(b,IB3,k,j,i)));
+        const Real dk=.5*((SQR(u(b,IM1,k,j,i))+SQR(u(b,IM2,k,j,i))+SQR(u(b,IM3,k,j,i)))/u(b,IDN,k,j,i)-
+                          (SQR(u0(b,IM1,k,j,i))+SQR(u0(b,IM2,k,j,i))+SQR(u0(b,IM3,k,j,i)))/u0(b,IDN,k,j,i));
+        d(b,18,k,j,i)=u(b,IEN,k,j,i)-u0(b,IEN,k,j,i)-dm-dk;
+        d(b,19,k,j,i)=d(b,18,k,j,i)-(d(b,21,k,j,i)-dm);
+      });
+  }
+  return parthenon::Update::FillDerived<MeshData<Real>>(md);
+}
+
+void AddCompatibleRKLStageGate(TaskCollection *tc, Mesh *mesh, Real dt_bound,
+                               CompatibleRKLStageReport *report) {
+  tc->AddRegion(1)[0].AddTask(TaskID(0),CheckCompatibleRKLStage,mesh,dt_bound,report);
+  auto &region = tc->AddRegion(mesh->DefaultNumPartitions());
+  for (int part = 0; part < mesh->DefaultNumPartitions(); ++part) {
+    auto md = mesh->mesh_data.GetOrAdd("base",part);
+    auto initial = mesh->mesh_data.GetOrAdd("u1",part);
+    region[part].AddTask(TaskID(0),FinishCompatibleRKLStage,md.get(),initial.get());
+  }
+}
+
 // Assumes that prim and cons are in sync initially.
 // Guarantees that prim and cons are in sync at the end.
 void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
-                 const Real tau) {
+                 const Real tau, bool checked = false,
+                 CompatibleRKLStageReport *report = nullptr) {
 
   auto hydro_pkg = blocks[0]->packages.Get("Hydro");
   auto mindt_diff = hydro_pkg->Param<Real>("dt_diff");
@@ -426,13 +642,16 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
     auto &base = blocks[i]->meshblock_data.Get();
     tl.AddTask(
         none,
-        [](MeshBlockData<Real> *dst, MeshBlockData<Real> *src, const bool copy_bface) {
+        [](MeshBlockData<Real> *dst, MeshBlockData<Real> *src, const bool copy_bface,
+           const bool copy_exchange) {
           dst->Get("cons").data.DeepCopy(src->Get("cons").data);
           dst->Get("prim").data.DeepCopy(src->Get("prim").data);
           if (copy_bface) dst->Get("Bface").data.DeepCopy(src->Get("Bface").data);
+          if (copy_exchange)
+            dst->Get("ct_energy_exchange").data.DeepCopy(src->Get("ct_energy_exchange").data);
           return TaskStatus::complete;
         },
-        Y0.get(), base.get(), evolve_bface);
+        Y0.get(), base.get(), evolve_bface, checked);
   }
 
   TaskRegion &region_init = ptask_coll->AddRegion(blocks.size());
@@ -467,6 +686,11 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
           reset_fluxes | tl.AddTask(none, ResetFaceFluxes, base.get());
     }
 
+    if (checked) {
+      reset_all_fluxes = tl.AddTask(reset_all_fluxes, CTMHD::PrepareCompatibleEnergy,
+                                    base.get(), base.get(), 1., 0., true);
+    }
+
     // Calculate the diffusive fluxes for Y0 (here still "base" as nothing has been
     // updated yet) so that we can store the result as MY0 and reuse later
     // (in every subsetp).
@@ -478,13 +702,25 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
           hydro_diff_fluxes | tl.AddTask(reset_all_fluxes, AddOhmicEdgeEMF, base.get());
     }
 
+    diffusion_operator = tl.AddTask(diffusion_operator, CTMHD::InterfaceEnergyProbe, base.get(), 4);
     auto send_flx =
         tl.AddTask(diffusion_operator, parthenon::LoadAndSendFluxCorrections, base);
     auto recv_flx =
         tl.AddTask(start_flxcor_recv, parthenon::ReceiveFluxCorrections, base);
     auto set_flx =
         tl.AddTask(recv_flx | diffusion_operator, parthenon::SetFluxCorrections, base);
+    if (checked) {
+      set_flx = tl.AddTask(set_flx | send_flx, CTMHD::InterfaceEnergyProbe, base.get(), 5);
+      auto energy = tl.AddTask(set_flx | send_flx,
+                              CTMHD::CompatibleResistiveEnergyFlux, base.get());
+      auto start = tl.AddTask(energy, parthenon::StartReceiveFluxCorrections, base);
+      auto send = tl.AddTask(energy, parthenon::LoadAndSendFluxCorrections, base);
+      auto recv = tl.AddTask(start, parthenon::ReceiveFluxCorrections, base);
+      set_flx = tl.AddTask(send | recv, parthenon::SetFluxCorrections, base);
+    }
 
+    set_flx = tl.AddTask(set_flx, CTMHD::InterfaceEnergyProbe, base.get(), 6);
+    set_flx = tl.AddTask(set_flx, CTMHD::InterfaceEnergyProbe, base.get(), 0);
     auto &Y0 = pmesh->mesh_data.GetOrAdd("u1", i);
     auto &MY0 = pmesh->mesh_data.GetOrAdd("MY0", i);
     auto &Yjm2 = pmesh->mesh_data.GetOrAdd("Yjm2", i);
@@ -500,8 +736,9 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
     // Initialize Y0 and Y1 and the recursion relation starting with j = 2 needs data from
     // the two preceeding stages.
     auto rkl2_step_first = tl.AddTask(init_operator, RKL2StepFirst, Y0.get(), base.get(),
-                                      Yjm2.get(), MY0.get(), s_rkl, tau, evolve_bface);
+                                      Yjm2.get(), MY0.get(), s_rkl, tau, evolve_bface, checked);
 
+    rkl2_step_first = tl.AddTask(rkl2_step_first, CTMHD::InterfaceEnergyProbe, base.get(), 1);
     TaskID synced_history = rkl2_step_first;
     if (evolve_bface) {
       auto start_hist_bnd =
@@ -520,9 +757,11 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
     auto bounds_exchange = parthenon::AddBoundaryExchangeTasks(
         synced_history | start_bnd, tl, base, pmesh->multilevel);
 
-    tl.AddTask(bounds_exchange, parthenon::Update::FillDerived<MeshData<Real>>,
-               base.get());
+    if (!checked) tl.AddTask(bounds_exchange,
+                            parthenon::Update::FillDerived<MeshData<Real>>, base.get());
   }
+
+  if (checked) AddCompatibleRKLStageGate(ptask_coll,pmesh,mindt_diff,report);
 
   // Compute coefficients. Meyer+2012 eq. (16)
   Real b_j = 1. / 3.;
@@ -560,6 +799,11 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
             reset_fluxes | tl.AddTask(none, ResetFaceFluxes, base.get());
       }
 
+      if (checked) {
+        reset_all_fluxes = tl.AddTask(reset_all_fluxes, CTMHD::PrepareCompatibleEnergy,
+                                      base.get(), base.get(), 1., 0., true);
+      }
+
       // Calculate the diffusive fluxes for Yjm1 (here u1)
       auto hydro_diff_fluxes =
           tl.AddTask(reset_all_fluxes, CalcDiffFluxes, hydro_pkg.get(), base.get());
@@ -569,21 +813,34 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
             hydro_diff_fluxes | tl.AddTask(reset_all_fluxes, AddOhmicEdgeEMF, base.get());
       }
 
+      diffusion_operator = tl.AddTask(diffusion_operator, CTMHD::InterfaceEnergyProbe, base.get(), 4);
       auto send_flx =
           tl.AddTask(diffusion_operator, parthenon::LoadAndSendFluxCorrections, base);
       auto recv_flx =
           tl.AddTask(start_flxcor_recv, parthenon::ReceiveFluxCorrections, base);
       auto set_flx =
           tl.AddTask(recv_flx | diffusion_operator, parthenon::SetFluxCorrections, base);
+      if (checked) {
+        set_flx = tl.AddTask(set_flx | send_flx, CTMHD::InterfaceEnergyProbe, base.get(), 5);
+        auto energy = tl.AddTask(set_flx | send_flx,
+                                CTMHD::CompatibleResistiveEnergyFlux, base.get());
+        auto start = tl.AddTask(energy, parthenon::StartReceiveFluxCorrections, base);
+        auto send = tl.AddTask(energy, parthenon::LoadAndSendFluxCorrections, base);
+        auto recv = tl.AddTask(start, parthenon::ReceiveFluxCorrections, base);
+        set_flx = tl.AddTask(send | recv, parthenon::SetFluxCorrections, base);
+      }
 
+      set_flx = tl.AddTask(set_flx, CTMHD::InterfaceEnergyProbe, base.get(), 6);
+      set_flx = tl.AddTask(set_flx, CTMHD::InterfaceEnergyProbe, base.get(), 0);
       auto &Y0 = pmesh->mesh_data.GetOrAdd("u1", i);
       auto &MY0 = pmesh->mesh_data.GetOrAdd("MY0", i);
       auto &Yjm2 = pmesh->mesh_data.GetOrAdd("Yjm2", i);
 
       auto rkl2_step_other = tl.AddTask(
           set_flx, RKL2StepOther, Y0.get(), base.get(), Yjm2.get(), MY0.get(), mu_j,
-          nu_j, mu_tilde_j, gamma_tilde_j, tau, evolve_bface);
+          nu_j, mu_tilde_j, gamma_tilde_j, tau, evolve_bface, checked);
 
+      rkl2_step_other = tl.AddTask(rkl2_step_other, CTMHD::InterfaceEnergyProbe, base.get(), 1);
       TaskID synced_history = rkl2_step_other;
       if (evolve_bface) {
         auto start_hist_bnd =
@@ -601,12 +858,114 @@ void AddSTSTasks(TaskCollection *ptask_coll, Mesh *pmesh, BlockList_t &blocks,
       auto bounds_exchange = parthenon::AddBoundaryExchangeTasks(
           synced_history | start_bnd, tl, base, pmesh->multilevel);
 
-      tl.AddTask(bounds_exchange, parthenon::Update::FillDerived<MeshData<Real>>,
-                 base.get());
+      if (!checked) tl.AddTask(bounds_exchange,
+                              parthenon::Update::FillDerived<MeshData<Real>>, base.get());
     }
+
+    if (checked) AddCompatibleRKLStageGate(ptask_coll,pmesh,mindt_diff,report);
 
     b_jm2 = b_jm1;
     b_jm1 = b_j;
+  }
+}
+
+// Execute a trial using a private task pool: using TaskCollection::Execute()'s
+// static pool here would re-enter the outer driver's pool.
+TaskStatus AdvanceCompatibleRKL2(Mesh *mesh, BlockList_t *blocks, Real interval) {
+  auto pkg = mesh->packages.Get("Hydro");
+  const Real saved_dt_diff = pkg->Param<Real>("dt_diff");
+  const bool resistive = pkg->Param<Resistivity>("resistivity") != Resistivity::none;
+  if (!resistive) return TaskStatus::complete;
+  struct RestoreTimestep {
+    decltype(pkg) package;
+    Real value;
+    ~RestoreTimestep() { package->UpdateParam("dt_diff",value); }
+  } restore_timestep{pkg,saved_dt_diff};
+  const std::vector<std::string> saved_fields{"cons","prim","Bface","ct_energy_exchange"};
+  for (auto &block : *blocks)
+    block->meshblock_data.Add("compatible_rkl_backup",block->meshblock_data.Get(),saved_fields);
+  Real remaining = interval;
+  Real step = interval;
+  CompatibleRKLRetry retry;
+  while (remaining > 0.) {
+    CompatibleRKLStageReport base_report;
+    if (CheckCompatibleRKLStage(mesh,0.,&base_report) != TaskStatus::complete) {
+      pkg->UpdateParam("dt_diff",saved_dt_diff);
+      PARTHENON_THROW("Invalid restored compatible RKL base state/coefficient; "
+                      "reducing the diffusion substep cannot repair it.");
+    }
+    step = std::min(step,remaining);
+    Real dt = std::numeric_limits<Real>::max();
+    Real heat = std::numeric_limits<Real>::max();
+    for (int part=0; part<mesh->DefaultNumPartitions(); ++part) {
+      Real local_heat;
+      auto md = mesh->mesh_data.GetOrAdd("base",part);
+      EstimateResistivityTimestep(md.get(),&local_heat,true);
+      dt = std::min(dt,EstimateCompatibleOhmicTimestep(md.get()));
+      heat = std::min(heat,local_heat);
+    }
+#ifdef MPI_PARALLEL
+    Real limits[2]{dt,heat};
+    PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE,limits,2,MPI_PARTHENON_REAL,
+                                      MPI_MIN,MPI_COMM_WORLD));
+    dt=limits[0]; heat=limits[1];
+#endif
+    PARTHENON_REQUIRE_THROWS(dt > 0. && heat > 0.,"Invalid compatible RKL timestep");
+    step=std::min(step,heat);
+    PARTHENON_REQUIRE_THROWS(remaining-step < remaining,
+                             "Compatible RKL timestep underflow");
+    for (auto &block : *blocks) {
+      auto base = block->meshblock_data.Get();
+      auto backup = block->meshblock_data.Get("compatible_rkl_backup");
+      for (const auto &field : saved_fields)
+        backup->Get(field).data.DeepCopy(base->Get(field).data);
+    }
+    // Reserve a 10% coefficient-growth margin for nonlinear stage evolution.
+    pkg->UpdateParam("dt_diff",retry.Bound(dt));
+    CompatibleRKLStageReport report;
+    TaskCollection trial;
+    AddSTSTasks(&trial,mesh,*blocks,step,true,&report);
+    parthenon::Pool_t pool(300,1);
+    const bool accepted = trial.Execute(pool) == TaskListStatus::complete;
+    if (accepted) {
+      remaining = std::max(0.,remaining-step);
+      // Keep the reduced subdivision for the remainder of this halfstep.
+      if (parthenon::Globals::my_rank == 0)
+        std::cout << "Compatible RKL accepted: tau=" << step
+                  << " explicit_dt=" << dt << " superstep_ratio=" << step/dt
+                  << " halvings=" << retry.halvings << std::endl;
+      retry.Accept(); // eight halvings per attempted substep, not per Strang halfstep
+    } else {
+      for (auto &block : *blocks) {
+        auto base = block->meshblock_data.Get();
+        auto backup = block->meshblock_data.Get("compatible_rkl_backup");
+        for (const auto &field : saved_fields)
+          base->Get(field).data.DeepCopy(backup->Get(field).data);
+      }
+      // The failed collection has drained its exchanges before the collective
+      // gate. Derived stage diagnostics will be overwritten by the next trial.
+      if (!retry.Reject(report.failures,report.observed_dt,step)) {
+        pkg->UpdateParam("dt_diff",saved_dt_diff);
+        PARTHENON_THROW("Compatible RKL exhausted eight substep halvings; "
+                        "state and cumulative energy budgets restored.");
+      }
+      if (parthenon::Globals::my_rank == 0)
+        std::cout << "Compatible RKL rejected: failures=" << report.failures
+                  << " observed_dt=" << report.observed_dt
+                  << " retry_bound=" << retry.Bound(dt)
+                  << " retry tau=" << step << " halving=" << retry.halvings << std::endl;
+    }
+  }
+  pkg->UpdateParam("dt_diff",saved_dt_diff);
+  return TaskStatus::complete;
+}
+
+void AddSplitDiffusionTasks(TaskCollection *tc, Mesh *mesh, BlockList_t &blocks,
+                            Real tau) {
+  if (mesh->packages.Get("Hydro")->Param<bool>("compatible_ct_energy")) {
+    tc->AddRegion(1)[0].AddTask(TaskID(0),AdvanceCompatibleRKL2,mesh,&blocks,tau);
+  } else {
+    AddSTSTasks(tc,mesh,blocks,tau);
   }
 }
 
@@ -721,7 +1080,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     // the STS tasks should be updated to not assume prim and cons are in sync.
     const auto &diffint = hydro_pkg->Param<DiffInt>("diffint");
     if (diffint == DiffInt::rkl2) {
-      AddSTSTasks(&tc, pmesh, blocks, 0.5 * tm.dt);
+      AddSplitDiffusionTasks(&tc, pmesh, blocks, 0.5 * tm.dt);
     }
     TaskRegion &strang_init_region = tc.AddRegion(num_partitions);
     for (int i = 0; i < num_partitions; i++) {
@@ -811,7 +1170,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     const bool compatible_energy = hydro_pkg->Param<bool>("compatible_ct_energy");
     if (compatible_energy) {
       ct_emf = tl.AddTask(ct_emf, CTMHD::PrepareCompatibleEnergy, mu0.get(), mu1.get(),
-                          integrator->gam0[stage - 1], integrator->gam1[stage - 1]);
+                          integrator->gam0[stage - 1], integrator->gam1[stage - 1], false);
     }
     if (IsUCTFluid(fluid) &&
         hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none &&
@@ -827,6 +1186,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     // TODO(pgrete) figure out what to do about the sources from the first stage
     // that are potentially disregarded when the (m)hd fluxes are corrected in the second
     // stage.
+    ct_emf = tl.AddTask(ct_emf, CTMHD::InterfaceEnergyProbe, mu0.get(), 4);
     TaskID first_order_flux_correct = ct_emf;
     if (hydro_pkg->Param<bool>("first_order_flux_correct")) {
       auto *first_order_flux_correct_fun =
@@ -848,6 +1208,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
       // First synchronize edge EMFs. Only then construct Poynting fluxes and
       // synchronize their face values. Reuse the communication buffers only
       // after the previous send and receive/set have both completed.
+      set_flx = tl.AddTask(set_flx | send_flx, CTMHD::InterfaceEnergyProbe, mu0.get(), 5);
       auto energy_flux = tl.AddTask(set_flx | send_flx,
                                     CTMHD::CompatibleResistiveEnergyFlux, mu0.get());
       auto start_energy_recv =
@@ -860,6 +1221,8 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
                            parthenon::SetFluxCorrections, mu0);
     }
 
+    set_flx = tl.AddTask(set_flx, CTMHD::InterfaceEnergyProbe, mu0.get(), 6);
+    set_flx = tl.AddTask(set_flx, CTMHD::InterfaceEnergyProbe, mu0.get(), 0);
     // compute the divergence of fluxes of conserved variables
     // -------------- CT Step 3a. (RK update the flux) --------------
     auto update_flx = tl.AddTask(
@@ -882,6 +1245,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
       update_face = tl.AddTask(update_face, CTMHD::CorrectCompatibleEnergy, mu0.get(),
                                integrator->beta[stage - 1] * integrator->dt);
     }
+    update_face = tl.AddTask(update_face, CTMHD::InterfaceEnergyProbe, mu0.get(), 1);
     // Add non-operator split source terms.
     // Note: Directly update the "cons" variables of mu0 based on the "prim" variables
     // of mu0 as the "cons" variables have already been updated in this stage from the
@@ -949,7 +1313,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
   // If any tasks modify the conserved variables before this place and after FillDerived,
   // then the STS tasks should be updated to not assume prim and cons are in sync.
   if (diffint == DiffInt::rkl2 && stage == integrator->nstages) {
-    AddSTSTasks(&tc, pmesh, blocks, 0.5 * tm.dt);
+    AddSplitDiffusionTasks(&tc, pmesh, blocks, 0.5 * tm.dt);
   }
 
   // Single task in single (serial) region to reset global vars used in reductions in the

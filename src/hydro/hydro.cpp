@@ -1508,7 +1508,14 @@ Real EstimateTimestep(MeshData<Real> *md) {
       dt_diff = std::min(dt_diff, EstimateViscosityTimestep(md));
     }
     if (hydro_pkg->Param<Resistivity>("resistivity") != Resistivity::none) {
-      dt_diff = std::min(dt_diff, EstimateResistivityTimestep(md));
+      const bool compatible_rkl = hydro_pkg->Param<bool>("compatible_ct_energy") &&
+                                  hydro_pkg->Param<DiffInt>("diffint") == DiffInt::rkl2;
+      Real heating_dt;
+      const Real resistive_dt = EstimateResistivityTimestep(md, &heating_dt,
+                                                            compatible_rkl);
+      dt_diff = std::min(dt_diff, compatible_rkl ? EstimateCompatibleOhmicTimestep(md)
+                                               : resistive_dt);
+      if (compatible_rkl) min_dt = std::min(min_dt, heating_dt);
     }
 
     // For unsplit ingegration use strict limit

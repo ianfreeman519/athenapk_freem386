@@ -47,6 +47,14 @@ class TabulatedEOS {
   bool IsInitialized() const { return nrho_e_ > 1; }
 
   KOKKOS_INLINE_FUNCTION
+  bool ContainsDensityEnergy(parthenon::Real rho, parthenon::Real eps) const {
+    if (!(rho > 0.) || !(eps > 0.)) return false;
+    const parthenon::Real lr = Kokkos::log10(rho), le = Kokkos::log10(eps);
+    return lr >= rho_e_lr0_ && lr <= rho_e_lr0_ + (nrho_e_-1)*rho_e_dlr_ &&
+           le >= rho_e_lx0_ && le <= rho_e_lx0_ + (neps_-1)*rho_e_dlx_;
+  }
+
+  KOKKOS_INLINE_FUNCTION
   parthenon::Real MeanIonMass() const { return mean_ion_mass_; }
 
   KOKKOS_INLINE_FUNCTION

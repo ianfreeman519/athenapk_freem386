@@ -33,6 +33,24 @@ Real ExchangeHistory(MeshData<Real> *md) {
 
 void InitializeCompatibleEnergy(ParameterInput *pin, StateDescriptor *pkg) {
   if (!pkg->Param<bool>("compatible_ct_energy")) return;
+  const bool interface_diagnostics = pin->GetOrAddBoolean(
+      "hydro", "ct_interface_diagnostics", false);
+  pkg->AddParam("ct_interface_diagnostics", interface_diagnostics);
+  if (interface_diagnostics) {
+    pkg->AddField("ct_interface_diagnostics",
+        Metadata({Metadata::Cell, Metadata::Derived, Metadata::OneCopy},
+          std::vector<int>{26}, std::vector<std::string>{
+            "current_before_sync", "current_after_sync", "eta_j2",
+            "ohmic_ez_before_sync", "ohmic_ez_after_sync",
+            "update_total", "update_magnetic", "update_kinetic", "update_thermal",
+            "boundary_thermal", "boundary_face_magnetic", "center_thermal",
+            "pressure_work_rate", "resistive_transport_rate",
+            "baseline_total", "baseline_magnetic", "baseline_kinetic",
+            "baseline_face_magnetic", "rkl_thermal_increment", "rkl_balance_residual",
+            "probe_active", "rkl_transport_increment", "rkl_previous_transport",
+            "rkl_initial_transport_rate", "current_before_boundary",
+            "current_after_boundary"}));
+  }
   const auto integrator = pin->GetString("parthenon/time", "integrator");
   PARTHENON_REQUIRE_THROWS(
       IsUCTFluid(pkg->Param<Fluid>("fluid")) &&
@@ -44,12 +62,12 @@ void InitializeCompatibleEnergy(ParameterInput *pin, StateDescriptor *pkg) {
       !GetReservoirMask(*pkg).enabled,
       "compatible CT energy does not yet support the reservoir mask.");
   PARTHENON_REQUIRE_THROWS(
-      pkg->Param<DiffInt>("diffint") != DiffInt::rkl2 &&
-          pkg->Param<Conduction>("conduction") == Conduction::none &&
+      pkg->Param<Conduction>("conduction") == Conduction::none &&
           pkg->Param<Viscosity>("viscosity") == Viscosity::none &&
           (pkg->Param<Resistivity>("resistivity") == Resistivity::none ||
-           pkg->Param<DiffInt>("diffint") == DiffInt::unsplit),
-      "compatible CT energy supports no diffusion or explicit unsplit Ohmic "
+           (pkg->Param<DiffInt>("diffint") == DiffInt::unsplit ||
+            pkg->Param<DiffInt>("diffint") == DiffInt::rkl2)),
+      "compatible CT energy supports no diffusion or unsplit/RKL2 Ohmic "
       "resistivity, without conduction or viscosity.");
 
   auto face = Metadata({Metadata::Face, Metadata::Derived, Metadata::OneCopy,
@@ -90,10 +108,86 @@ void InitializeCompatibleEnergy(ParameterInput *pin, StateDescriptor *pkg) {
   pkg->UpdateParam(parthenon::hist_param_key, history);
 }
 
+TaskStatus InterfaceEnergyProbe(MeshData<Real> *md, int action) {
+  const auto pkg=md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+  if (!pkg->Param<bool>("compatible_ct_energy") ||
+      !pkg->Param<bool>("ct_interface_diagnostics")) return TaskStatus::complete;
+  const auto u=md->PackVariables(std::vector<std::string>{"cons"});
+  const auto p=md->PackVariables(std::vector<std::string>{"prim"});
+  const auto f=md->PackVariables(std::vector<std::string>{"Bface"});
+  const auto e=md->PackVariablesAndFluxes(std::vector<std::string>{"ct_ohmic_reference"});
+  const auto flux=md->PackVariablesAndFluxes(std::vector<std::string>{"ct_resistive_flux"});
+  const auto d=md->PackVariables(std::vector<std::string>{"ct_interface_diagnostics"});
+  const bool resistive=pkg->Param<Resistivity>("resistivity") != Resistivity::none;
+  const auto eta=!resistive
+      ? OhmicDiffusivity(Resistivity::none,ResistivityCoeff::none,0.,0.,0.,0.,-1.)
+      : pkg->Param<OhmicDiffusivity>("ohm_diff");
+  const auto ib=md->GetBoundsI(IndexDomain::interior);
+  const auto jb=md->GetBoundsJ(IndexDomain::interior);
+  const auto kb=md->GetBoundsK(IndexDomain::interior);
+  parthenon::par_for(DEFAULT_LOOP_PATTERN,"Interface energy probe",DevExecSpace(),
+    0,u.GetDim(5)-1,kb.s,kb.e,jb.s,jb.e,ib.s,ib.e,
+    KOKKOS_LAMBDA(int b,int k,int j,int i) {
+      const auto &c=u.GetCoords(b);
+      const Real total=u(b,IEN,k,j,i);
+      const Real kinetic=.5*(SQR(u(b,IM1,k,j,i))+SQR(u(b,IM2,k,j,i))+
+                            SQR(u(b,IM3,k,j,i)))/u(b,IDN,k,j,i);
+      const Real magnetic=.5*(SQR(u(b,IB1,k,j,i))+SQR(u(b,IB2,k,j,i))+
+                             SQR(u(b,IB3,k,j,i)));
+      const Real face=.5*(SQR(.5*(f(b,TE::F1,0,k,j,i)+f(b,TE::F1,0,k,j,i+1)))+
+                           SQR(.5*(f(b,TE::F2,0,k,j,i)+f(b,TE::F2,0,k,j+1,i)))+
+                           SQR(u(b,IB3,k,j,i)));
+      if (action==4 || action==5) {
+        Real current=0.,electric=0.;
+        for(int dj=0;dj<2;++dj) for(int di=0;di<2;++di) {
+          current+=.25*((f(b,TE::F2,0,k,j+dj,i+di)-f(b,TE::F2,0,k,j+dj,i+di-1))/c.Dxc<1>(k,j,i)-
+                        (f(b,TE::F1,0,k,j+dj,i+di)-f(b,TE::F1,0,k,j+dj-1,i+di))/c.Dxc<2>(k,j,i));
+          electric+=.25*e(b).template flux<parthenon::TopologicalType::Edge>(X3DIR,0,k,j+dj,i+di);
+        }
+        d(b,action==4?0:1,k,j,i)=current;
+        d(b,action==4?3:4,k,j,i)=electric;
+        const Real jx=(p(b,IB3,k,j+1,i)-p(b,IB3,k,j-1,i))/(2*c.Dxc<2>(k,j,i));
+        const Real jy=-(p(b,IB3,k,j,i+1)-p(b,IB3,k,j,i-1))/(2*c.Dxc<1>(k,j,i));
+        d(b,2,k,j,i)=resistive ?
+            eta.Get(p(b,IPR,k,j,i),p(b,IDN,k,j,i))*(SQR(current)+SQR(jx)+SQR(jy)) : 0.;
+      } else if (action==6) {
+        d(b,13,k,j,i)=-(flux(b).flux(X1DIR,0,k,j,i+1)-flux(b).flux(X1DIR,0,k,j,i))/c.Dxc<1>(k,j,i)-
+                      (flux(b).flux(X2DIR,0,k,j+1,i)-flux(b).flux(X2DIR,0,k,j,i))/c.Dxc<2>(k,j,i);
+        d(b,12,k,j,i)=-p(b,IPR,k,j,i)*(
+            (p(b,IV1,k,j,i+1)-p(b,IV1,k,j,i-1))/(2*c.Dxc<1>(k,j,i))+
+            (p(b,IV2,k,j+1,i)-p(b,IV2,k,j-1,i))/(2*c.Dxc<2>(k,j,i)));
+      } else {
+        if (action==1 || action==2) {
+          Real current=0.;
+          for(int dj=0;dj<2;++dj) for(int di=0;di<2;++di)
+            current+=.25*((f(b,TE::F2,0,k,j+dj,i+di)-f(b,TE::F2,0,k,j+dj,i+di-1))/c.Dxc<1>(k,j,i)-
+                          (f(b,TE::F1,0,k,j+dj,i+di)-f(b,TE::F1,0,k,j+dj-1,i+di))/c.Dxc<2>(k,j,i));
+          d(b,action==1?24:25,k,j,i)=current;
+        }
+        if(action==0) {
+          for(int n=5;n<=11;++n) d(b,n,k,j,i)=0.;
+          d(b,20,k,j,i)=1.;
+        } else if (d(b,20,k,j,i)==1.) {
+          const Real de=total-d(b,14,k,j,i),dm=magnetic-d(b,15,k,j,i),
+                     dk=kinetic-d(b,16,k,j,i);
+          if(action==1) {
+            d(b,5,k,j,i)=de;d(b,6,k,j,i)=dm;d(b,7,k,j,i)=dk;d(b,8,k,j,i)=de-dm-dk;
+          } else if(action==2) {
+            d(b,9,k,j,i)+=de-dm-dk;
+            d(b,10,k,j,i)+=face-d(b,17,k,j,i);
+          } else if(action==3) d(b,11,k,j,i)+=de-dm-dk;
+        }
+        d(b,14,k,j,i)=total;d(b,15,k,j,i)=magnetic;d(b,16,k,j,i)=kinetic;d(b,17,k,j,i)=face;
+      }
+    });
+  return TaskStatus::complete;
+}
+
 TaskStatus PrepareCompatibleEnergy(MeshData<Real> *md, MeshData<Real> *initial,
-                                   Real gam0, Real gam1) {
+                                   Real gam0, Real gam1, bool diffusion_only) {
   const auto pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
-  const bool resistive = pkg->Param<Resistivity>("resistivity") != Resistivity::none;
+  const bool resistive = pkg->Param<Resistivity>("resistivity") != Resistivity::none &&
+      (diffusion_only || pkg->Param<DiffInt>("diffint") == DiffInt::unsplit);
   const auto eta = resistive ? pkg->Param<OhmicDiffusivity>("ohm_diff")
                             : OhmicDiffusivity(Resistivity::none, ResistivityCoeff::none,
                                               0., 0., 0., 0., -1.);
@@ -148,7 +242,7 @@ TaskStatus PrepareCompatibleEnergy(MeshData<Real> *md, MeshData<Real> *initial,
           flux(b).flux(X2DIR, 1, k, j, i) = bzflux;
           u(b).flux(X2DIR, IB3, k, j, i) += bzflux;
         }
-        if (i <= ib.e && j <= jb.e) {
+        if (!diffusion_only && i <= ib.e && j <= jb.e) {
           for (int n = 0; n < 2; ++n) {
             // The first RK stage saves the original accumulator just as the state
             // updater saves u1. Derived budget fields are not updated by that task.
