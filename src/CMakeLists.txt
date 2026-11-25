@@ -30,4 +30,17 @@ add_executable(
 
 add_subdirectory(pgen)
 
-target_link_libraries(athenaPK PRIVATE parthenon)
+target_link_libraries(athenaPK PRIVATE parthenon singularity-eos)
+
+if(AthenaPK_ENABLE_EOS_TESTING)
+  add_executable(eos_tests ../tst/unit/eos.cpp eos/adiabatic_hydro.cpp eos/adiabatic_glmmhd.cpp)
+  target_include_directories(eos_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(eos_tests PRIVATE parthenon singularity-eos)
+  add_test(NAME eos_device COMMAND eos_tests)
+endif()
+
+if(AthenaPK_ENABLE_EOS_TESTING)
+  add_executable(eos_benchmark ../tst/unit/eos_benchmark.cpp)
+  target_include_directories(eos_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(eos_benchmark PRIVATE parthenon singularity-eos)
+endif()

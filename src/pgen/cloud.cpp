@@ -23,6 +23,7 @@
 #include <sstream>
 
 // AthenaPK headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 #include "../units.hpp"
 
@@ -45,10 +46,8 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
   // no access to package in this function so we use a local units object
   Units units(pin);
 
-  auto gamma = pin->GetReal("hydro", "gamma");
-  auto gm1 = (gamma - 1.0);
   const auto &pkg = mesh->packages.Get("Hydro");
-  const auto mbar_over_kb = pkg->Param<Real>("mbar_over_kb");
+  const auto thermo = pkg->Param<GasThermodynamics>("thermodynamics");
 
   r_cloud = pin->GetReal("problem/cloud", "r0_cgs") / units.code_length_cgs();
   rho_cloud = pin->GetReal("problem/cloud", "rho_cloud_cgs") / units.code_density_cgs();
@@ -58,14 +57,16 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
                 (units.code_length_cgs() / units.code_time_cgs());
 
   // mu_mh_gm1_by_k_B is already in code units
-  rhoe_wind = T_wind * rho_wind / mbar_over_kb / gm1;
-  const auto c_s_wind = std::sqrt(gamma * gm1 * rhoe_wind / rho_wind);
+  rhoe_wind = rho_wind * thermo.EnergyFromTemperature(rho_wind, T_wind);
+  const auto c_s_wind = std::sqrt(thermo.SoundSpeedSquared(
+      rho_wind, thermo.Pressure(rho_wind, rhoe_wind / rho_wind)));
   const auto chi_0 = rho_cloud / rho_wind;               // cloud to wind density ratio
   const auto t_cc = r_cloud * std::sqrt(chi_0) / v_wind; // cloud crushting time (code)
-  const auto pressure =
-      gm1 * rhoe_wind; // one value for entire domain given initial pressure equil.
+  const auto pressure = thermo.Pressure(
+      rho_wind,
+      rhoe_wind / rho_wind); // one value for entire domain given initial pressure equil.
 
-  const auto T_cloud = pressure / rho_cloud * mbar_over_kb;
+  const auto T_cloud = thermo.TemperatureFromPressure(rho_cloud, pressure);
 
   auto plasma_beta = pin->GetOrAddReal("problem/cloud", "plasma_beta", -1.0);
 
@@ -146,6 +147,7 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
 
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
   auto ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   auto jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   auto kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
@@ -192,7 +194,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IDN, k, j, i) = rho;
         u(IM2, k, j, i) = mom;
         // Can use rhoe_wind here as simulation is setup in pressure equil.
-        u(IEN, k, j, i) = rhoe_wind + 0.5 * mom * mom / rho;
+        u(IEN, k, j, i) =
+            thermo.EnergyDensity(rho, thermo.Pressure(rho_wind, rhoe_wind / rho_wind)) +
+            0.5 * mom * mom / rho;
 
         if (mhd_enabled) {
           u(IB1, k, j, i) = Bx;
@@ -257,6 +261,7 @@ parthenon::AmrTag ProblemCheckRefinementBlock(MeshBlockData<Real> *mbd) {
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
   auto hydro_pkg = pmb->packages.Get("Hydro");
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
   const auto nhydro = hydro_pkg->Param<int>("nhydro");
 
   Real maxscalar = 0.0;

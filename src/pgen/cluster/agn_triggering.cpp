@@ -53,8 +53,7 @@ AGNTriggeringMode ParseAGNTriggeringMode(const std::string &mode_str) {
 AGNTriggering::AGNTriggering(parthenon::ParameterInput *pin,
                              parthenon::StateDescriptor *hydro_pkg,
                              const std::string &block)
-    : gamma_(pin->GetReal("hydro", "gamma")),
-      triggering_mode_(
+    : triggering_mode_(
           ParseAGNTriggeringMode(pin->GetOrAddString(block, "triggering_mode", "NONE"))),
       accretion_radius_(pin->GetOrAddReal(block, "accretion_radius", 0)),
       cold_temp_thresh_(pin->GetOrAddReal(block, "cold_temp_thresh", 0)),
@@ -148,7 +147,6 @@ void AGNTriggering::ReduceColdMass(parthenon::Real &cold_mass,
 
   // Reduce just the cold gas
   const auto units = hydro_pkg->Param<Units>("units");
-  const Real mean_molecular_mass_by_kb = mean_molecular_mass_ / units.k_boltzmann();
 
   const Real cold_temp_thresh = cold_temp_thresh_;
   const Real cold_t_acc = cold_t_acc_;
@@ -172,7 +170,7 @@ void AGNTriggering::ReduceColdMass(parthenon::Real &cold_mass,
         if (r2 < accretion_radius2) {
 
           const Real temp =
-              mean_molecular_mass_by_kb * prim(IPR, k, j, i) / prim(IDN, k, j, i);
+              eos.TemperatureFromPressure(prim(IDN, k, j, i), prim(IPR, k, j, i));
 
           if (temp <= cold_temp_thresh) {
 
@@ -187,8 +185,7 @@ void AGNTriggering::ReduceColdMass(parthenon::Real &cold_mass,
             const Real cell_delta_rho = -prim(IDN, k, j, i) / cold_t_acc * dt;
 
             if (remove_accreted_mass) {
-              AddDensityToConsAtFixedVelTemp(cell_delta_rho, cons, prim, eos.GetGamma(),
-                                             k, j, i);
+              AddDensityToConsAtFixedVelTemp(cell_delta_rho, cons, prim, eos, k, j, i);
               // Update the Primitives
               eos.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i);
             }
@@ -225,7 +222,7 @@ void AGNTriggering::ReduceBondiTriggeringQuantities(
   Real total_mass_red, mass_weighted_density_red, mass_weighted_velocity_red,
       mass_weighted_cs_red;
 
-  const parthenon::Real gamma = gamma_;
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
 
   Kokkos::parallel_reduce(
       "AGNTriggering::ReduceBondi",
@@ -248,7 +245,8 @@ void AGNTriggering::ReduceBondiTriggeringQuantities(
               cell_mass * sqrt(pow(prim(IV1, k, j, i), 2) + pow(prim(IV2, k, j, i), 2) +
                                pow(prim(IV3, k, j, i), 2));
           const Real cell_mass_weighted_cs =
-              cell_mass * sqrt(gamma * prim(IPR, k, j, i) / prim(IDN, k, j, i));
+              cell_mass *
+              sqrt(thermo.SoundSpeedSquared(prim(IDN, k, j, i), prim(IPR, k, j, i)));
 
           ltotal_mass_red += cell_mass;
           lmass_weighted_density_red += cell_mass_weighted_density;
@@ -307,8 +305,7 @@ void AGNTriggering::RemoveBondiAccretedGas(parthenon::MeshData<parthenon::Real> 
           const Real cell_delta_rho =
               -prim(IDN, k, j, i) / total_mass * accretion_rate * dt;
 
-          AddDensityToConsAtFixedVelTemp(cell_delta_rho, cons, prim, eos.GetGamma(), k, j,
-                                         i);
+          AddDensityToConsAtFixedVelTemp(cell_delta_rho, cons, prim, eos, k, j, i);
 
           // Update the Primitives
           eos.ConsToPrim(cons, prim, nhydro, nscalars, k, j, i);

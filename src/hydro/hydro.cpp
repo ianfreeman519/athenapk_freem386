@@ -513,6 +513,14 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       pkg->AddParam<>("mbar_over_kb", mu * units.mh() / units.k_boltzmann());
     }
 
+    PARTHENON_REQUIRE(std::isfinite(gamma) && gamma > 1.0,
+                      "hydro/gamma must be finite and greater than one");
+    const Real cv = pkg->AllParams().hasKey("mbar_over_kb")
+                        ? 1.0 / (pkg->Param<Real>("mbar_over_kb") * (gamma - 1.0))
+                        : 1.0;
+    const GasThermodynamics thermo(singularity::IdealGas(gamma - 1.0, cv));
+    pkg->AddParam<>("thermodynamics", thermo);
+
     // By default disable floors by setting a negative value
     Real dfloor = pin->GetOrAddReal("hydro", "dfloor", -1.0);
     Real pfloor = pin->GetOrAddReal("hydro", "pfloor", -1.0);
@@ -525,8 +533,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
                        "input file or use a pressure floor "
                        "(defined code units) instead.");
       }
-      auto mbar_over_kb = pkg->Param<Real>("mbar_over_kb");
-      efloor = Tfloor / mbar_over_kb / (gamma - 1.0);
+      efloor = thermo.EnergyFromTemperature(1.0, Tfloor);
     }
 
     // By default disable ceilings by setting to infinity
@@ -542,8 +549,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
                        "input file or use a pressure floor "
                        "(defined code units) instead.");
       }
-      auto mbar_over_kb = pkg->Param<Real>("mbar_over_kb");
-      eceil = Tceil / mbar_over_kb / (gamma - 1.0);
+      eceil = thermo.EnergyFromTemperature(1.0, Tceil);
     }
 
     auto conduction = Conduction::none;
@@ -593,7 +599,7 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         const auto mbar = pkg->Param<Real>("mbar");
         auto thermal_diff =
             ThermalDiffusivity(conduction, conduction_coeff, spitzer_coeff, mbar,
-                               units.electron_mass(), units.k_boltzmann());
+                               units.electron_mass(), units.k_boltzmann(), thermo);
         pkg->AddParam<>("thermal_diff", thermal_diff);
 
         const auto mu = pkg->Param<Real>("mu");
@@ -606,8 +612,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         conduction_coeff = ConductionCoeff::fixed;
         Real thermal_diff_coeff_code =
             pin->GetReal("diffusion", "thermal_diff_coeff_code");
-        auto thermal_diff = ThermalDiffusivity(conduction, conduction_coeff,
-                                               thermal_diff_coeff_code, 0.0, 0.0, 0.0);
+        auto thermal_diff = ThermalDiffusivity(
+            conduction, conduction_coeff, thermal_diff_coeff_code, 0.0, 0.0, 0.0, thermo);
         pkg->AddParam<>("thermal_diff", thermal_diff);
         // 5.0 prefactor comes from eq (8) in Cowie & McKee 1977
         // https://doi.org/10.1086/154911
@@ -712,12 +718,12 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     pkg->AddParam<>("diffint", diffint);
 
     if (fluid == Fluid::euler) {
-      AdiabaticHydroEOS eos(pfloor, dfloor, efloor, vceil, eceil, gamma);
+      AdiabaticHydroEOS eos(pfloor, dfloor, efloor, vceil, eceil, thermo);
       pkg->AddParam<>("eos", eos);
       pkg->FillDerivedMesh = ConsToPrim<AdiabaticHydroEOS>;
       pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::euler>;
     } else if (fluid == Fluid::glmmhd) {
-      AdiabaticGLMMHDEOS eos(pfloor, dfloor, efloor, vceil, eceil, gamma);
+      AdiabaticGLMMHDEOS eos(pfloor, dfloor, efloor, vceil, eceil, thermo);
       pkg->AddParam<>("eos", eos);
       pkg->FillDerivedMesh = ConsToPrim<AdiabaticGLMMHDEOS>;
       pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::glmmhd>;

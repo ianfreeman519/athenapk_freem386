@@ -2,7 +2,7 @@
 # Copyright (c) 2020-2023, Athena Parthenon Collaboration. All rights reserved.
 # Licensed under the 3-Clause License (the "LICENSE");
 
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.22)
 
 # Imports machine-specific configuration
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/parthenon/CMakeLists.txt)
@@ -23,7 +23,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 # make paths in target_source() absolute
 # used for sources in src/pgen folder
-# new behavior introduces in CMake 3.13 that's why this is the min. version above
+# This policy was introduced in CMake 3.13.
 cmake_policy(SET CMP0076 NEW)
 
 # Don't allow in-source builds
@@ -76,6 +76,33 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/parthenon/CMakeLists.txt)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/parthenon parthenon)
 else()
   find_package(parthenon REQUIRED)
+endif()
+
+# Share Parthenon's Kokkos instance; ideal gas needs no table or closure libraries.
+set(SINGULARITY_USE_KOKKOS ON CACHE BOOL "Use AthenaPK Kokkos")
+set(SINGULARITY_USE_CUDA ${Kokkos_ENABLE_CUDA} CACHE BOOL "Use CUDA portability")
+set(SINGULARITY_USE_FORTRAN OFF CACHE BOOL "No Fortran bindings")
+set(SINGULARITY_BUILD_CLOSURE OFF CACHE BOOL "No mixed-material closures")
+set(SINGULARITY_USE_EIGEN OFF CACHE BOOL "No linear algebra dependency")
+set(SINGULARITY_USE_SPINER OFF CACHE BOOL "Tables are not enabled yet")
+set(SINGULARITY_USE_EOSPAC OFF CACHE BOOL "No EOSPAC dependency")
+add_subdirectory(external/singularity-eos)
+if(PARTHENON_SINGLE_PRECISION)
+  target_compile_definitions(singularity-eos INTERFACE SINGLE_PRECISION_ENABLED=1)
+  # Upstream robust::make_bounded mixes a double literal and float Real in
+  # std::min. Shadow only this header in the build tree; keep the gitlink clean.
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/external/singularity-eos/singularity-utils/singularity-utils/robust_utils.hpp" singularity_robust_header)
+  string(REPLACE "vmax * (1.0 - EPS())" "vmax * (Real(1) - EPS())"
+    singularity_robust_header "${singularity_robust_header}")
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/singularity-compat/singularity-utils/robust_utils.hpp"
+    CONTENT "${singularity_robust_header}")
+  target_include_directories(singularity-eos BEFORE INTERFACE
+    "${CMAKE_CURRENT_BINARY_DIR}/singularity-compat")
+endif()
+
+option(AthenaPK_ENABLE_EOS_TESTING "Build focused device EOS tests" ${AthenaPK_ENABLE_TESTING})
+if(AthenaPK_ENABLE_EOS_TESTING)
+  enable_testing()
 endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

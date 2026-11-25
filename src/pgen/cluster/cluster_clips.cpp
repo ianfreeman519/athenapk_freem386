@@ -67,7 +67,7 @@ void ApplyClusterClips(MeshData<Real> *md, const parthenon::SimTime &tm,
     const Real clip_r2 = SQR(clip_r);
     const Real vceil2 = SQR(vceil);
     const Real vAceil2 = SQR(vAceil);
-    const Real gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+    const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
 
     const bool magnetic_fields = (hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd);
     Real added_dfloor_mass = 0.0, removed_vceil_energy = 0.0, added_vAceil_mass = 0.0,
@@ -143,12 +143,13 @@ void ApplyClusterClips(MeshData<Real> *md, const parthenon::SimTime &tm,
 
             if (eceil < std::numeric_limits<Real>::infinity()) {
               // Apply  internal energy ceiling as a pressure ceiling
-              const Real internal_e = prim(IPR, k, j, i) / (gm1 * prim(IDN, k, j, i));
+              const Real internal_e =
+                  thermo.InternalEnergy(prim(IDN, k, j, i), prim(IPR, k, j, i));
               if (internal_e > eceil) {
                 const Real removed_energy = prim(IDN, k, j, i) * (internal_e - eceil);
                 removed_eceil_energy_team += removed_energy * coords.CellVolume(k, j, i);
                 cons(IEN, k, j, i) -= removed_energy;
-                prim(IPR, k, j, i) = gm1 * prim(IDN, k, j, i) * eceil;
+                prim(IPR, k, j, i) = thermo.Pressure(prim(IDN, k, j, i), eceil);
               }
             }
           }

@@ -51,7 +51,6 @@ Real EstimateViscosityTimestep(MeshData<Real> *md) {
     fac = 1.0 / 6.0;
   }
 
-  const auto gm1 = hydro_pkg->Param<Real>("AdiabaticIndex");
   const auto &mom_diff = hydro_pkg->Param<MomentumDiffusivity>("mom_diff");
 
   if (mom_diff.GetType() == Viscosity::isotropic &&

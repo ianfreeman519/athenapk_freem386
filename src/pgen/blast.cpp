@@ -37,6 +37,7 @@
 #include <vector>
 
 // AthenaPK headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 #include "parthenon/prelude.hpp"
 #include "parthenon_arrays.hpp"
@@ -129,8 +130,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   Real da = pin->GetOrAddReal("problem/blast", "density_ambient", 1.0);
   Real prat = pin->GetReal("problem/blast", "pressure_ratio");
   Real drat = pin->GetOrAddReal("problem/blast", "density_ratio", 1.0);
-  Real gamma = pin->GetOrAddReal("hydro", "gamma", 5 / 3);
-  Real gm1 = gamma - 1.0;
+  const auto thermo =
+      pmb->packages.Get("Hydro")->Param<GasThermodynamics>("thermodynamics");
 
   // get coordinates of center of blast, and convert to Cartesian if necessary
   Real x0 = pin->GetOrAddReal("problem/blast", "x1_0", 0.0);
@@ -194,7 +195,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IM1, k, j, i) = 0.0;
         u(IM2, k, j, i) = 0.0;
         u(IM3, k, j, i) = 0.0;
-        u(IEN, k, j, i) = pres / gm1;
+        u(IEN, k, j, i) = thermo.EnergyDensity(u(IDN, k, j, i), pres);
       }
     }
   }

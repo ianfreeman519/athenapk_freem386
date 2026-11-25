@@ -15,6 +15,7 @@
 #include <parthenon/package.hpp>
 
 // Athena headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 #include "utils/error_checking.hpp"
 
@@ -37,7 +38,8 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
   auto d_out = pin->GetReal("problem/lw_implode", "d_out");
   auto p_out = pin->GetReal("problem/lw_implode", "p_out");
 
-  auto gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  const auto thermo =
+      pmb->packages.Get("Hydro")->Param<GasThermodynamics>("thermodynamics");
 
   // initialize conserved variables
   auto &mbd = pmb->meshblock_data.Get();
@@ -67,10 +69,10 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
         cons(IM3, k, j, i) = 0.0;
         if (coords.Xc<2>(j) > (y0 - coords.Xc<1>(i))) {
           cons(IDN, k, j, i) = d_out;
-          cons(IEN, k, j, i) = p_out / gm1;
+          cons(IEN, k, j, i) = thermo.EnergyDensity(d_out, p_out);
         } else {
           cons(IDN, k, j, i) = d_in;
-          cons(IEN, k, j, i) = p_in / gm1;
+          cons(IEN, k, j, i) = thermo.EnergyDensity(d_in, p_in);
         }
       });
 }

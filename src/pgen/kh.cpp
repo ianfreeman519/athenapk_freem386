@@ -31,6 +31,7 @@
 #include <random>
 
 // AthenaPK headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 #include "utils/error_checking.hpp"
 
@@ -49,8 +50,8 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
   auto ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   auto jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   auto kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
-  auto gam = pin->GetReal("hydro", "gamma");
-  auto gm1 = (gam - 1.0);
+  const auto thermo =
+      pmb->packages.Get("Hydro")->Param<GasThermodynamics>("thermodynamics");
 
   // Initialize conserved variables
   // Get a MeshBlockPack on device with all conserved variables
@@ -79,7 +80,7 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
                             std::exp(-(SQR(coords.Xc<2>(j))) / SQR(sigma));
           u(IM3, k, j, i) = 0.0;
           u(IEN, k, j, i) =
-              1.0 / gm1 +
+              thermo.EnergyDensity(u(IDN, k, j, i), 1.0) +
               0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i))) / u(IDN, k, j, i);
         });
 
@@ -109,7 +110,7 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
           u(IM2, k, j, i) *= u(IDN, k, j, i);
           u(IM3, k, j, i) = 0.0;
           u(IEN, k, j, i) =
-              1.0 / gm1 +
+              thermo.EnergyDensity(u(IDN, k, j, i), 1.0) +
               0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i))) / u(IDN, k, j, i);
         });
 
@@ -202,7 +203,7 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
 
           u(IM3, k, j, i) = 0.0;
           u(IEN, k, j, i) =
-              P0 / gm1 +
+              thermo.EnergyDensity(u(IDN, k, j, i), P0) +
               0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) /
                   u(IDN, k, j, i);
         });
@@ -233,7 +234,7 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
           u(IM3, k, j, i) = 0.0;
           // Pressure scaled to give a sound speed of 1 with gamma=1.4
           u(IEN, k, j, i) =
-              2.5 / gm1 +
+              thermo.EnergyDensity(u(IDN, k, j, i), 2.5) +
               0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i))) / u(IDN, k, j, i);
         });
   } else {

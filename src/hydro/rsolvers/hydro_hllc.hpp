@@ -37,10 +37,6 @@ struct Riemann<Fluid::euler, RiemannSolver::hllc> {
         const AdiabaticHydroEOS &eos, const Real c_h) {
     int ivy = IV1 + ((ivx - IV1) + 1) % 3;
     int ivz = IV1 + ((ivx - IV1) + 2) % 3;
-    Real gamma = eos.GetGamma();
-    Real gm1 = gamma - 1.0;
-    Real igm1 = 1.0 / gm1;
-
     parthenon::par_for_inner(member, il, iu, [&](const int i) {
       Real wli[(NHYDRO)], wri[(NHYDRO)];
       Real fl[(NHYDRO)], fr[(NHYDRO)], flxi[(NHYDRO)];
@@ -62,28 +58,14 @@ struct Riemann<Fluid::euler, RiemannSolver::hllc> {
       Real al, ar, el, er;
       Real cl = eos.SoundSpeed(wli);
       Real cr = eos.SoundSpeed(wri);
-      el = wli[IPR] * igm1 +
+      el = eos.EnergyDensity(wli[IDN], wli[IPR]) +
            0.5 * wli[IDN] * (SQR(wli[IV1]) + SQR(wli[IV2]) + SQR(wli[IV3]));
-      er = wri[IPR] * igm1 +
+      er = eos.EnergyDensity(wri[IDN], wri[IPR]) +
            0.5 * wri[IDN] * (SQR(wri[IV1]) + SQR(wri[IV2]) + SQR(wri[IV3]));
-      Real rhoa = .5 * (wli[IDN] + wri[IDN]); // average density
-      Real ca = .5 * (cl + cr);               // average sound speed
-      Real pmid = .5 * (wli[IPR] + wri[IPR] + (wli[IV1] - wri[IV1]) * rhoa * ca);
-
-      //--- Step 3.  Compute sound speed in L,R
-
-      Real ql, qr;
-      ql = (pmid <= wli[IPR])
-               ? 1.0
-               : std::sqrt(1.0 + (gamma + 1) / (2 * gamma) * (pmid / wli[IPR] - 1.0));
-      qr = (pmid <= wri[IPR])
-               ? 1.0
-               : std::sqrt(1.0 + (gamma + 1) / (2 * gamma) * (pmid / wri[IPR] - 1.0));
-
-      //--- Step 4.  Compute the max/min wave speeds based on L/R
-
-      al = wli[IV1] - cl * ql;
-      ar = wri[IV1] + cr * qr;
+      // Davis bounds require only the EOS acoustic speeds, not ideal-gas
+      // shock corrections involving gamma.
+      al = std::min(wli[IV1] - cl, wri[IV1] - cr);
+      ar = std::max(wli[IV1] + cl, wri[IV1] + cr);
 
       Real bp = ar > 0.0 ? ar : (TINY_NUMBER);
       Real bm = al < 0.0 ? al : -(TINY_NUMBER);

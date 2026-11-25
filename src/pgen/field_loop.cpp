@@ -45,6 +45,7 @@
 #include <parthenon/package.hpp>
 
 // Athena headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 #include "outputs/outputs.hpp"
 
@@ -124,7 +125,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
       pmb->cellbounds.ncellsj(IndexDomain::entire),
       pmb->cellbounds.ncellsi(IndexDomain::entire));
 
-  Real gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  const auto thermo =
+      pmb->packages.Get("Hydro")->Param<GasThermodynamics>("thermodynamics");
 
   // Read initial conditions, diffusion coefficients (if needed)
   Real rad = pin->GetReal("problem/field_loop", "rad");
@@ -314,7 +316,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
                           (ax(k, j + 1, i) - ax(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0;
 
         u(IEN, k, j, i) =
-            1.0 / gm1 +
+            thermo.EnergyDensity(u(IDN, k, j, i), 1.0) +
             0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i))) +
             0.5 * (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) /
                 u(IDN, k, j, i);

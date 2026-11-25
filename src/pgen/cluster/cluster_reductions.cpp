@@ -26,9 +26,6 @@ parthenon::Real LocalReduceColdGas(parthenon::MeshData<parthenon::Real> *md) {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
 
   const auto &cold_thresh = hydro_pkg->Param<Real>("reduction_cold_threshold");
-  auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
-  const auto e_thresh =
-      cold_thresh / mbar_over_kb / (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
 
   // Grab some necessary variables
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
@@ -37,7 +34,7 @@ parthenon::Real LocalReduceColdGas(parthenon::MeshData<parthenon::Real> *md) {
   IndexRange kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
   const auto nhydro = hydro_pkg->Param<int>("nhydro");
 
-  const Real gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
 
   Real cold_gas = 0.0;
 
@@ -52,8 +49,9 @@ parthenon::Real LocalReduceColdGas(parthenon::MeshData<parthenon::Real> *md) {
         auto &prim = prim_pack(b);
         const auto &coords = prim_pack.GetCoords(b);
 
-        const Real internal_e = prim(IPR, k, j, i) / (gm1 * prim(IDN, k, j, i));
-        if (internal_e < e_thresh) {
+        const Real internal_e =
+            thermo.InternalEnergy(prim(IDN, k, j, i), prim(IPR, k, j, i));
+        if (thermo.Temperature(prim(IDN, k, j, i), internal_e) < cold_thresh) {
           cold_gas_team += prim(IDN, k, j, i) * coords.CellVolume(k, j, i);
         }
       },

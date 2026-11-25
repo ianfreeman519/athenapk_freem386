@@ -17,6 +17,7 @@
 #include <parthenon/package.hpp>
 
 // AthenaPK headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 
 namespace orszag_tang {
@@ -30,7 +31,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto &mbd = pmb->meshblock_data.Get();
   auto &u = mbd->Get("cons").data;
 
-  Real gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  const auto thermo =
+      pmb->packages.Get("Hydro")->Param<GasThermodynamics>("thermodynamics");
   Real B0 = 1.0 / std::sqrt(4.0 * M_PI);
   Real d0 = 25.0 / (36.0 * M_PI);
   Real v0 = 1.0;
@@ -55,7 +57,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IB3, k, j, i) = 0.0;
 
         u(IEN, k, j, i) =
-            p0 / gm1 +
+            thermo.EnergyDensity(u(IDN, k, j, i), p0) +
             0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i)) +
                    (SQR(u(IM1, k, j, i)) + SQR(u(IM2, k, j, i)) + SQR(u(IM3, k, j, i))) /
                        u(IDN, k, j, i));

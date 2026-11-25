@@ -32,7 +32,6 @@ AGNTriggeringMode ParseAGNTriggeringMode(const std::string &mode_str);
  ************************************************************/
 class AGNTriggering {
  private:
-  const parthenon::Real gamma_;
   parthenon::Real mean_molecular_mass_;
 
  public:

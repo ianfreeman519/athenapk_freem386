@@ -267,8 +267,8 @@ void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *hyd
                      "input file or use a pressure floor "
                      "(defined code units) instead.");
     }
-    auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
-    eceil = Tceil / mbar_over_kb / (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+    eceil = hydro_pkg->Param<GasThermodynamics>("thermodynamics")
+                .EnergyFromTemperature(1.0, Tceil);
   }
   hydro_pkg->AddParam("cluster_dfloor", dfloor);
   hydro_pkg->AddParam("cluster_eceil", eceil);
@@ -484,8 +484,7 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
     auto &coords = pmb->coords;
 
     // Get Adiabatic Index
-    const Real gam = pin->GetReal("hydro", "gamma");
-    const Real gm1 = (gam - 1.0);
+    const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
 
     /************************************************************
      * Initialize the initial hydro state
@@ -501,7 +500,8 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
       const Real Mx = rho * ux;
       const Real My = rho * uy;
       const Real Mz = rho * uz;
-      const Real E = rho * (0.5 * (ux * ux + uy * uy + uz * uz) + pres / (gm1 * rho));
+      const Real E =
+          rho * (0.5 * (ux * ux + uy * uy + uz * uz) + thermo.InternalEnergy(rho, pres));
 
       parthenon::par_for(
           DEFAULT_LOOP_PATTERN, "Cluster::ProblemGenerator::UniformGas",
@@ -545,7 +545,7 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
             u(IM1, k, j, i) = 0.0;
             u(IM2, k, j, i) = 0.0;
             u(IM3, k, j, i) = 0.0;
-            u(IEN, k, j, i) = P_r / gm1;
+            u(IEN, k, j, i) = thermo.EnergyDensity(rho_r, P_r);
           });
     }
 
@@ -816,8 +816,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
                           const parthenon::SimTime & /*tm*/) {
   // get hydro
   auto pkg = pmb->packages.Get("Hydro");
-  const Real gam = pin->GetReal("hydro", "gamma");
-  const Real gm1 = (gam - 1.0);
+  const auto thermo = pkg->Param<GasThermodynamics>("thermodynamics");
 
   // get prim vars
   auto &data = pmb->meshblock_data.Get();
@@ -835,6 +834,9 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
   auto units = pkg->Param<Units>("units");
   auto mbar_over_kb = pkg->Param<Real>("mbar_over_kb");
   auto mbar = mbar_over_kb * units.k_boltzmann();
+  // Conventional astrophysical entropy proxy; this diagnostic is deliberately
+  // distinct from the EOS specific entropy and is not used as a closure.
+  const Real entropy_proxy_exponent = pin->GetReal("hydro", "gamma");
 
   // fill derived vars (*including ghost cells*)
   auto &coords = pmb->coords;
@@ -864,16 +866,16 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
         theta_sph(k, j, i) = std::acos(z / r);
 
         // compute entropy
-        const Real K = P / std::pow(rho / mbar, gam);
+        const Real K = P / std::pow(rho / mbar, entropy_proxy_exponent);
         entropy(k, j, i) = K;
 
         const Real v_mag = std::sqrt(SQR(v1) + SQR(v2) + SQR(v3));
-        const Real c_s = std::sqrt(gam * P / rho); // ideal gas EOS
+        const Real c_s = std::sqrt(thermo.SoundSpeedSquared(rho, P));
         const Real M_s = v_mag / c_s;
         mach_sonic(k, j, i) = M_s;
 
         // compute temperature
-        temperature(k, j, i) = mbar_over_kb * P / rho;
+        temperature(k, j, i) = thermo.TemperatureFromPressure(rho, P);
       });
   if (pkg->Param<Cooling>("enable_cooling") == Cooling::tabular) {
     auto &cooling_time = data->Get("cooling_time").data;
@@ -891,7 +893,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
           const Real P = prim(IPR, k, j, i);
 
           // compute cooling time
-          const Real eint = P / (rho * gm1);
+          const Real eint = thermo.InternalEnergy(rho, P);
           const Real edot = cooling_table_obj.DeDt(eint, rho);
           cooling_time(k, j, i) = (edot != 0) ? -eint / edot : NAN;
         });
@@ -917,7 +919,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
 
           // compute Alfven mach number
           const Real v_A = std::sqrt(B2 / rho);
-          const Real c_s = std::sqrt(gam * P / rho); // ideal gas EOS
+          const Real c_s = std::sqrt(thermo.SoundSpeedSquared(rho, P));
           mach_alfven(k, j, i) = mach_sonic(k, j, i) * c_s / v_A;
 
           // compute plasma beta

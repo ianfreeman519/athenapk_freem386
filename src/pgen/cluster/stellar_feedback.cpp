@@ -102,10 +102,8 @@ void StellarFeedback::FeedbackSrcTerm(parthenon::MeshData<parthenon::Real> *md,
   const auto nhydro = hydro_pkg->Param<int>("nhydro");
   const auto nscalars = hydro_pkg->Param<int>("nscalars");
 
-  // const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
   const auto units = hydro_pkg->Param<Units>("units");
   const auto mbar = hydro_pkg->Param<Real>("mu") * units.mh();
-  const auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
 
   const auto mass_to_energy = efficiency_ * SQR(units.speed_of_light());
   const auto stellar_radius = stellar_radius_;
@@ -146,7 +144,7 @@ void StellarFeedback::FeedbackSrcTerm(parthenon::MeshData<parthenon::Real> *md,
           return;
         }
 
-        auto temp = mbar_over_kb * prim(IPR, k, j, i) / prim(IDN, k, j, i);
+        auto temp = eos.TemperatureFromPressure(prim(IDN, k, j, i), prim(IPR, k, j, i));
         if (temp > temperature_threshold) {
           return;
         }
@@ -156,8 +154,7 @@ void StellarFeedback::FeedbackSrcTerm(parthenon::MeshData<parthenon::Real> *md,
         stellar_mass_team -= cell_delta_rho * coords.CellVolume(k, j, i);
 
         // First remove density at fixed temperature
-        AddDensityToConsAtFixedVelTemp(cell_delta_rho, cons, prim, eos.GetGamma(), k, j,
-                                       i);
+        AddDensityToConsAtFixedVelTemp(cell_delta_rho, cons, prim, eos, k, j, i);
         //  Then add thermal energy
         const auto cell_delta_energy_density = -mass_to_energy * cell_delta_rho;
         PARTHENON_REQUIRE(

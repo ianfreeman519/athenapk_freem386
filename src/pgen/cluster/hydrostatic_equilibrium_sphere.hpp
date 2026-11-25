@@ -13,6 +13,7 @@
 #include <parameter_input.hpp>
 
 // AthenaPK headers
+#include "../../eos/thermodynamics.hpp"
 #include "../../units.hpp"
 
 namespace cluster {
@@ -36,6 +37,7 @@ class HydrostaticEquilibriumSphere {
   // Graviational field and entropy profile
   const GravitationalField gravitational_field_;
   const EntropyProfile entropy_profile_;
+  const GasThermodynamics thermo_;
 
   // Physical constants
   parthenon::Real mh_, k_boltzmann_;
@@ -87,7 +89,7 @@ class HydrostaticEquilibriumSphere {
   // Get the temperature from density and pressure
   KOKKOS_INLINE_FUNCTION parthenon::Real T_from_rho_P(const parthenon::Real rho,
                                                       const parthenon::Real p) const {
-    const parthenon::Real T = p / (n_from_rho(rho) * k_boltzmann_);
+    const parthenon::Real T = thermo_.TemperatureFromPressure(rho, p);
     return T;
   }
 

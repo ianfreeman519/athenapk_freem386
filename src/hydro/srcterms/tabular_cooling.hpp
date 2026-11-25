@@ -24,6 +24,7 @@
 #include <outputs/io_wrapper.hpp>
 
 // AthenaPK headers
+#include "../../eos/thermodynamics.hpp"
 #include "../../main.hpp"
 #include "../../units.hpp"
 
@@ -104,7 +105,7 @@ class CoolingTableObj {
   unsigned int n_temp_;
 
   // Mean molecular mass * ( adiabatic_index -1) / boltzmann_constant
-  parthenon::Real mbar_gm1_over_k_B_;
+  GasThermodynamics thermo_;
 
   // (Hydrogen mass fraction / hydrogen atomic mass)^2
   parthenon::Real x_H_over_m_h2_;
@@ -112,17 +113,17 @@ class CoolingTableObj {
  public:
   CoolingTableObj()
       : log_lambdas_(), log_temp_start_(NAN), log_temp_final_(NAN), d_log_temp_(NAN),
-        n_temp_(0), mbar_gm1_over_k_B_(NAN), x_H_over_m_h2_(NAN) {}
+        n_temp_(0), thermo_(), x_H_over_m_h2_(NAN) {}
   CoolingTableObj(const parthenon::ParArray1D<parthenon::Real> log_lambdas,
                   const parthenon::Real log_temp_start,
                   const parthenon::Real log_temp_final, const parthenon::Real d_log_temp,
-                  const unsigned int n_temp, const parthenon::Real mbar_over_kb,
-                  const parthenon::Real adiabatic_index, const parthenon::Real x_H,
-                  const Units units)
+                  const unsigned int n_temp, const GasThermodynamics thermo,
+                  const parthenon::Real x_H, const Units units)
       : log_lambdas_(log_lambdas), log_temp_start_(log_temp_start),
         log_temp_final_(log_temp_final), d_log_temp_(d_log_temp), n_temp_(n_temp),
-        mbar_gm1_over_k_B_(mbar_over_kb * (adiabatic_index - 1)),
-        x_H_over_m_h2_(SQR(x_H / units.mh())) {}
+        thermo_(thermo), x_H_over_m_h2_(SQR(x_H / units.mh())) {}
+
+  const GasThermodynamics &Thermo() const { return thermo_; }
 
   // Interpolate a cooling rate from the table
   // from internal energy density and density
@@ -135,7 +136,7 @@ class CoolingTableObj {
       return 0;
     }
 
-    const Real temp = mbar_gm1_over_k_B_ * e;
+    const Real temp = thermo_.Temperature(rho, e);
     const Real log_temp = log10(temp);
     Real log_lambda;
     if (log_temp < log_temp_start_) {

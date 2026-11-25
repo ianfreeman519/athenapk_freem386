@@ -13,6 +13,7 @@
 #include <parthenon/package.hpp>
 
 // AthenaPK headers
+#include "../../eos/thermodynamics.hpp"
 #include "../../main.hpp"
 
 using namespace parthenon::package::prelude;
@@ -69,6 +70,8 @@ KOKKOS_INLINE_FUNCTION Real lim4(const Real A, const Real B, const Real C, const
 
 struct ThermalDiffusivity {
  private:
+  GasThermodynamics thermo_;
+  Real temperature_scale_;
   Real mbar_, me_, kb_;
   Conduction conduction_;
   ConductionCoeff conduction_coeff_type_;
@@ -78,8 +81,10 @@ struct ThermalDiffusivity {
  public:
   KOKKOS_INLINE_FUNCTION
   ThermalDiffusivity(Conduction conduction, ConductionCoeff conduction_coeff_type,
-                     Real coeff, Real mbar, Real me, Real kb)
-      : conduction_(conduction), conduction_coeff_type_(conduction_coeff_type),
+                     Real coeff, Real mbar, Real me, Real kb, GasThermodynamics thermo)
+      : thermo_(thermo),
+        temperature_scale_(thermo.Pressure(1.0, thermo.EnergyFromTemperature(1.0, 1.0))),
+        conduction_(conduction), conduction_coeff_type_(conduction_coeff_type),
         coeff_(coeff), mbar_(mbar), me_(me), kb_(kb) {}
 
   KOKKOS_INLINE_FUNCTION
@@ -87,6 +92,13 @@ struct ThermalDiffusivity {
 
   KOKKOS_INLINE_FUNCTION
   Conduction GetType() const { return conduction_; }
+
+  // Preserve the existing coefficient convention (gradient of R_ref*T),
+  // while evaluating temperature through the EOS at the actual density.
+  KOKKOS_INLINE_FUNCTION
+  Real ThermalVariable(Real rho, Real pressure) const {
+    return temperature_scale_ * thermo_.TemperatureFromPressure(rho, pressure);
+  }
 
   KOKKOS_INLINE_FUNCTION
   ConductionCoeff GetCoeffType() const { return conduction_coeff_type_; }

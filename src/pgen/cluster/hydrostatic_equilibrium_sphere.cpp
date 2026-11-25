@@ -40,7 +40,8 @@ HydrostaticEquilibriumSphere<GravitationalField, EntropyProfile>::
                                  parthenon::StateDescriptor *hydro_pkg,
                                  GravitationalField gravitational_field,
                                  EntropyProfile entropy_profile)
-    : gravitational_field_(gravitational_field), entropy_profile_(entropy_profile) {
+    : gravitational_field_(gravitational_field), entropy_profile_(entropy_profile),
+      thermo_(hydro_pkg->Param<GasThermodynamics>("thermodynamics")) {
   Units units(pin);
 
   mh_ = units.mh();
@@ -53,8 +54,6 @@ HydrostaticEquilibriumSphere<GravitationalField, EntropyProfile>::
                              1953.9724519818478 * units.kpc());
   rho_fix_ = pin->GetOrAddReal("problem/cluster/hydrostatic_equilibrium", "rho_fix",
                                8.607065015897638e-30 * units.g() / pow(units.kpc(), 3));
-  const Real gam = pin->GetReal("hydro", "gamma");
-  const Real gm1 = (gam - 1.0);
 
   r_sampling_ =
       pin->GetOrAddReal("problem/cluster/hydrostatic_equilibrium", "r_sampling", 4.0);

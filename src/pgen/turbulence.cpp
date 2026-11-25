@@ -31,6 +31,7 @@
 #include <vector>
 
 // AthenaPK headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 #include "../tracers/tracers.hpp"
 #include "../units.hpp"
@@ -54,7 +55,7 @@ template <HstQuan hst_quan>
 Real TurbulenceHst(MeshData<Real> *md) {
   auto pmb = md->GetBlockData(0)->GetBlockPointer();
   auto hydro_pkg = pmb->packages.Get("Hydro");
-  const auto gamma = hydro_pkg->Param<Real>("AdiabaticIndex");
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
   const auto fluid = hydro_pkg->Param<Fluid>("fluid");
 
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
@@ -84,8 +85,8 @@ Real TurbulenceHst(MeshData<Real> *md) {
                            prim(IV2, k, j, i) * prim(IV2, k, j, i) +
                            prim(IV3, k, j, i) * prim(IV3, k, j, i));
 
-        const auto c_s = Kokkos::sqrt(gamma * prim(IPR, k, j, i) /
-                                      prim(IDN, k, j, i)); // speed of sound
+        const auto c_s = Kokkos::sqrt(thermo.SoundSpeedSquared(
+            prim(IDN, k, j, i), prim(IPR, k, j, i))); // speed of sound
 
         const auto e_kin = 0.5 * prim(IDN, k, j, i) * vel2;
 
@@ -403,7 +404,8 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
 
   auto hydro_pkg = pmb->packages.Get("Hydro");
   const auto fluid = hydro_pkg->Param<Fluid>("fluid");
-  const auto gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  const auto thermo =
+      pmb->packages.Get("Hydro")->Param<GasThermodynamics>("thermodynamics");
   const auto p0 = pin->GetReal("problem/turbulence", "p0");
   const auto rho0 = pin->GetReal("problem/turbulence", "rho0");
   const auto x3min = pmesh->mesh_size.xmin(X3DIR);
@@ -519,7 +521,8 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
         u(IM2, k, j, i) = rho0 * v2;
         u(IM3, k, j, i) = rho0 * v3;
 
-        u(IEN, k, j, i) = p0 / gm1 + 0.5 * rho0 * (SQR(v1) + SQR(v2) + SQR(v3));
+        u(IEN, k, j, i) =
+            thermo.EnergyDensity(rho0, p0) + 0.5 * rho0 * (SQR(v1) + SQR(v2) + SQR(v3));
 
         if (fluid == Fluid::glmmhd) {
           u(IB1, k, j, i) /= b_norm;
@@ -677,7 +680,7 @@ void Rescale(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
   PARTHENON_REQUIRE(fluid == Fluid::euler,
                     "Rescaling only supported for hydro sims at the moment.");
 
-  const auto gamma = pkg->Param<Real>("AdiabaticIndex");
+  const auto thermo = pkg->Param<GasThermodynamics>("thermodynamics");
 
   Real Ms2_sum;
   Kokkos::parallel_reduce(
@@ -693,8 +696,11 @@ void Rescale(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt) {
                                     (SQR(cons(IM1, k, j, i)) + SQR(cons(IM2, k, j, i)) +
                                      SQR(cons(IM3, k, j, i))) /
                                     cons(IDN, k, j, i);
-        auto pres = (gamma - 1.0) * (cons(IEN, k, j, i) - kin_en_density);
-        lMs2_sum += 2.0 * kin_en_density / (gamma * pres) * coords.CellVolume(k, j, i);
+        auto pres =
+            thermo.Pressure(cons(IDN, k, j, i),
+                            (cons(IEN, k, j, i) - kin_en_density) / cons(IDN, k, j, i));
+        lMs2_sum += 2.0 * kin_en_density / thermo.BulkModulus(cons(IDN, k, j, i), pres) *
+                    coords.CellVolume(k, j, i);
       },
       Ms2_sum);
 
@@ -800,7 +806,7 @@ void InjectBlob(MeshData<Real> *md, const parthenon::SimTime &tm, const Real dt)
     PARTHENON_REQUIRE(fluid == Fluid::euler,
                       "Injecting only supported for hydro sims at the moment.");
 
-    const auto gamma = pkg->Param<Real>("AdiabaticIndex");
+    const auto thermo = pkg->Param<GasThermodynamics>("thermodynamics");
 
     pmb->par_for(
         "turbulence: inject blob", 0, cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e,
@@ -888,7 +894,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
 
     // for computing temperature from primitives
     auto units = hydro_pkg->Param<Units>("units");
-    auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
+    const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
 
     IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
     IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::entire);
@@ -899,7 +905,7 @@ void UserWorkBeforeOutput(MeshBlock *pmb, ParameterInput *pin,
           const Real rho = prim(IDN, k, j, i);
           const Real P = prim(IPR, k, j, i);
           // compute temperature
-          temperature(k, j, i) = mbar_over_kb * P / rho;
+          temperature(k, j, i) = thermo.TemperatureFromPressure(rho, P);
         });
   }
   if (pin->GetOrAddBoolean("problem/turbulence", "calc_vorticity_mag", false)) {

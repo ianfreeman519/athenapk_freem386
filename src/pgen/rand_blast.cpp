@@ -81,7 +81,7 @@ void RandomBlasts(MeshData<Real> *md, const parthenon::SimTime &tm, const Real) 
 
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
   const auto &eos = hydro_pkg->Param<AdiabaticGLMMHDEOS>("eos");
-  const auto gm1 = eos.GetGamma() - 1.0;
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
   auto blasts = blasts_; // make sure blasts is captured
   parthenon::par_for(
       DEFAULT_LOOP_PATTERN, "RandomBlastSource", parthenon::DevExecSpace(), 0,
@@ -97,7 +97,7 @@ void RandomBlasts(MeshData<Real> *md, const parthenon::SimTime &tm, const Real) 
                               SQR(z - blasts[blast_i][2]));
 
         if (dist < 0.005) {
-          cons(IEN, k, j, i) = 13649.6 / gm1 +
+          cons(IEN, k, j, i) = thermo.EnergyDensity(cons(IDN, k, j, i), 13649.6) +
                                0.5 * (SQR(cons(IB1, k, j, i)) + SQR(cons(IB2, k, j, i)) +
                                       SQR(cons(IB3, k, j, i))) +
                                (0.5 / cons(IDN, k, j, i)) *
@@ -122,8 +122,8 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  Real gamma = pin->GetOrAddReal("hydro", "gamma", 5 / 3);
-  Real gm1 = gamma - 1.0;
+  const auto thermo =
+      pmb->packages.Get("Hydro")->Param<GasThermodynamics>("thermodynamics");
   Real p0 = pin->GetOrAddReal("problem/rand_blast", "p0", 0.3);
   Real rho0 = pin->GetOrAddReal("problem/rand_blast", "rho0", 1.0);
   Real Bx0 = pin->GetOrAddReal("problem/rand_blast", "Bx0", 0.056117);
@@ -139,7 +139,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
       for (int i = ib.s; i <= ib.e; i++) {
         u(IDN, k, j, i) = rho0;
         u(IB1, k, j, i) = Bx0;
-        u(IEN, k, j, i) = p0 / gm1 + 0.5 * SQR(Bx0);
+        u(IEN, k, j, i) = thermo.EnergyDensity(u(IDN, k, j, i), p0) + 0.5 * SQR(Bx0);
       }
     }
   }

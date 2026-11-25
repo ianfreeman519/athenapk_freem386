@@ -95,8 +95,7 @@ AGNFeedback::AGNFeedback(parthenon::ParameterInput *pin,
   kinetic_jet_e_ = NAN;
 
   const auto units = hydro_pkg->Param<Units>("units");
-  auto mbar_gm1_over_kb =
-      hydro_pkg->Param<Real>("mbar_over_kb") * (pin->GetReal("hydro", "gamma") - 1);
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
 
   // Get jet velocity and temperature/internal_e if in the sim parameters. These are NAN
   // otherwise
@@ -109,7 +108,7 @@ AGNFeedback::AGNFeedback(parthenon::ParameterInput *pin,
     kinetic_jet_temperature_ =
         pin->GetReal("problem/cluster/agn_feedback", "kinetic_jet_temperature");
 
-    kinetic_jet_e_ = kinetic_jet_temperature_ / mbar_gm1_over_kb;
+    kinetic_jet_e_ = thermo.EnergyFromTemperature(1.0, kinetic_jet_temperature_);
   }
 
   if (std::isnan(kinetic_jet_velocity_) && std::isnan(kinetic_jet_temperature_)) {
@@ -129,7 +128,7 @@ AGNFeedback::AGNFeedback(parthenon::ParameterInput *pin,
     kinetic_jet_e_ =
         (efficiency_ * SQR(units.speed_of_light()) - 0.5 * SQR(kinetic_jet_velocity_)) /
         (1 - efficiency_);
-    kinetic_jet_temperature_ = mbar_gm1_over_kb * kinetic_jet_e_;
+    kinetic_jet_temperature_ = thermo.Temperature(1.0, kinetic_jet_e_);
   }
 
   // Verify all equations are satified. NAN's here should give failures
@@ -157,7 +156,7 @@ AGNFeedback::AGNFeedback(parthenon::ParameterInput *pin,
   // Compute the internal energy ceiling from the temperature ceiling
   const Real tceil = pin->GetOrAddReal("problem/cluster/agn_feedback", "Tceil",
                                        std::numeric_limits<Real>::infinity());
-  eceil_ = tceil / mbar_gm1_over_kb;
+  eceil_ = thermo.EnergyFromTemperature(1.0, tceil);
 
   // Add user history output variable for AGN power
   auto hst_vars = hydro_pkg->Param<parthenon::HstVar_list>(parthenon::hist_param_key);
@@ -300,7 +299,7 @@ void AGNFeedback::FeedbackSrcTerm(parthenon::MeshData<parthenon::Real> *md,
   const Real vceil = vceil_;
   const Real vceil2 = SQR(vceil);
   const Real eceil = eceil_;
-  const Real gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
   const auto enable_tracer = enable_tracer_;
   ////////////////////////////////////////////////////////////////////////////////
 
@@ -396,10 +395,11 @@ void AGNFeedback::FeedbackSrcTerm(parthenon::MeshData<parthenon::Real> *md,
           }
 
           // Apply  internal energy ceiling as a pressure ceiling
-          const Real internal_e = prim(IPR, k, j, i) / (gm1 * prim(IDN, k, j, i));
+          const Real internal_e =
+              thermo.InternalEnergy(prim(IDN, k, j, i), prim(IPR, k, j, i));
           if (eceil > 0 && internal_e > eceil) {
             cons(IEN, k, j, i) -= prim(IDN, k, j, i) * (internal_e - eceil);
-            prim(IPR, k, j, i) = gm1 * prim(IDN, k, j, i) * eceil;
+            prim(IPR, k, j, i) = thermo.Pressure(prim(IDN, k, j, i), eceil);
           }
         }
 

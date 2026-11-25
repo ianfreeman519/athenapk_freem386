@@ -266,13 +266,12 @@ TabularCooling::TabularCooling(ParameterInput *pin,
   }
 
   // Create a lightweight object for computing cooling rates within kernels
-  const auto mbar_over_kb = hydro_pkg->Param<Real>("mbar_over_kb");
-  const auto adiabatic_index = hydro_pkg->Param<Real>("AdiabaticIndex");
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
   const auto He_mass_fraction = hydro_pkg->Param<Real>("He_mass_fraction");
 
-  cooling_table_obj_ = CoolingTableObj(log_lambdas_, log_temp_start_, log_temp_final_,
-                                       d_log_temp_, n_temp_, mbar_over_kb,
-                                       adiabatic_index, 1.0 - He_mass_fraction, units);
+  cooling_table_obj_ =
+      CoolingTableObj(log_lambdas_, log_temp_start_, log_temp_final_, d_log_temp_,
+                      n_temp_, thermo, 1.0 - He_mass_fraction, units);
 }
 
 void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
@@ -281,7 +280,13 @@ void TabularCooling::SrcTerm(MeshData<Real> *md, const Real dt) const {
   } else if (integrator_ == CoolIntegrator::rk45) {
     SubcyclingFixedIntSrcTerm<RK45Stepper>(md, dt, RK45Stepper());
   } else if (integrator_ == CoolIntegrator::townsend) {
-    TownsendSrcTerm(md, dt);
+    // The analytic Townsend transform assumes constant Cv. Use the general
+    // energy ODE for models whose heat capacity depends on state.
+    if constexpr (GasThermodynamics::constant_specific_heat) {
+      TownsendSrcTerm(md, dt);
+    } else {
+      SubcyclingFixedIntSrcTerm<RK45Stepper>(md, dt, RK45Stepper());
+    }
   } else {
     PARTHENON_FAIL("Unknown cooling integrator.");
   }
@@ -297,8 +302,7 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
   // Grab member variables for compiler
 
   const CoolingTableObj cooling_table_obj = cooling_table_obj_;
-  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
-  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const auto thermo = cooling_table_obj_.Thermo();
 
   const unsigned int max_iter = max_iter_;
 
@@ -310,8 +314,6 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
   // or fluid solver floor
   const auto temp_cool_floor = std::pow(10.0, log_temp_start_); // low end of cool table
   const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
-
-  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb; // specific internal en.
 
   // Grab some necessary variables
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
@@ -330,6 +332,7 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
         auto &prim = prim_pack(b);
         // Need to use `cons` here as prim may still contain state at t_0;
         const Real rho = cons(IDN, k, j, i);
+        const Real internal_e_floor = thermo.EnergyFromTemperature(rho, temp_floor);
         // TODO(pgrete) with potentially more EOS, a separate get_pressure (or similar)
         // function could be useful.
         Real internal_e =
@@ -482,7 +485,7 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
         cons(IEN, k, j, i) += rho * (internal_e - internal_e_initial);
         // Latter technically not required if no other tasks follows before
         // ConservedToPrim conversion, but keeping it for now (better safe than sorry).
-        prim(IPR, k, j, i) = rho * internal_e * gm1;
+        prim(IPR, k, j, i) = thermo.Pressure(rho, internal_e);
       });
 }
 
@@ -495,8 +498,7 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
 
   const auto units = hydro_pkg->Param<Units>("units");
-  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
-  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const auto thermo = cooling_table_obj_.Thermo();
   const Real X_by_mh2 =
       std::pow((1 - hydro_pkg->Param<Real>("He_mass_fraction")) / units.mh(), 2);
 
@@ -505,7 +507,7 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
   const auto alpha_k = townsend_alpha_k_;
   const auto Y_k = townsend_Y_k_;
 
-  const auto internal_e_floor = T_floor_ / mbar_gm1_over_kb;
+  const auto temperature_floor = T_floor_;
   const auto temp_cool_floor = std::pow(10.0, log_temp_start_); // low end of cool table
 
   // Grab some necessary variables
@@ -531,6 +533,8 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
         auto &prim = prim_pack(b);
         // Need to use `cons` here as prim may still contain state at t_0;
         const auto rho = cons(IDN, k, j, i);
+        const auto internal_e_floor =
+            thermo.EnergyFromTemperature(rho, temperature_floor);
         // TODO(pgrete) with potentially more EOS, a separate get_pressure (or similar)
         // function could be useful.
         auto internal_e =
@@ -550,11 +554,11 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
           cons(IEN, k, j, i) += rho * (internal_e_floor - internal_e);
           // Latter technically not required if no other tasks follows before
           // ConservedToPrim conversion, but keeping it for now (better safe than sorry).
-          prim(IPR, k, j, i) = rho * internal_e_floor * gm1;
+          prim(IPR, k, j, i) = thermo.Pressure(rho, internal_e_floor);
           return;
         }
 
-        auto temp = mbar_gm1_over_kb * internal_e;
+        auto temp = thermo.Temperature(rho, internal_e);
         // Temperature is above floor (see conditional above) but below cooling table:
         // -> no cooling
         if (temp < temp_cool_floor) {
@@ -576,8 +580,8 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
                            (std::pow(temps(idx) / temp, alpha_k_m1) - 1.0) / alpha_k_m1;
 
         // Compute the adjusted TEF for new timestep (Eqn. 26) (term in brackets)
-        const auto tef_adj =
-            tef + lambda_final * dt / temp_final * mbar_gm1_over_kb * n_h2_by_rho;
+        const auto tef_adj = tef + lambda_final * dt / temp_final * n_h2_by_rho /
+                                       thermo.SpecificHeat(rho, internal_e);
 
         // TEF is a strictly decreasing function and new_tef > tef
         // Check if the new TEF falls into a lower bin, i.e., find the right bin for A7
@@ -593,13 +597,14 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
                              (temp_final / temps(idx)) * (tef_adj - Y_k(idx)),
                      1.0 / (1.0 - alpha_k(idx)));
         // Set new temp (at the lowest to the lower end of the cooling table)
-        const auto internal_e_new = temp_new > temp_cool_floor
-                                        ? temp_new / mbar_gm1_over_kb
-                                        : temp_cool_floor / mbar_gm1_over_kb;
+        const auto internal_e_new =
+            temp_new > temp_cool_floor
+                ? thermo.EnergyFromTemperature(rho, temp_new)
+                : thermo.EnergyFromTemperature(rho, temp_cool_floor);
         cons(IEN, k, j, i) += rho * (internal_e_new - internal_e);
         // Latter technically not required if no other tasks follows before
         // ConservedToPrim conversion, but keeping it for now (better safe than sorry).
-        prim(IPR, k, j, i) = rho * internal_e_new * gm1;
+        prim(IPR, k, j, i) = thermo.Pressure(rho, internal_e_new);
       });
 }
 
@@ -615,15 +620,12 @@ Real TabularCooling::EstimateTimeStep(MeshData<Real> *md) const {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
 
   const CoolingTableObj cooling_table_obj = cooling_table_obj_;
-  const auto gm1 = (hydro_pkg->Param<Real>("AdiabaticIndex") - 1.0);
-  const auto mbar_gm1_over_kb = hydro_pkg->Param<Real>("mbar_over_kb") * gm1;
+  const auto thermo = cooling_table_obj_.Thermo();
 
   // Determine the cooling floor, whichever is higher of the cooling table floor
   // or fluid solver floor
   const auto temp_cool_floor = std::pow(10.0, log_temp_start_); // low end of cool table
   const Real temp_floor = (T_floor_ > temp_cool_floor) ? T_floor_ : temp_cool_floor;
-
-  const Real internal_e_floor = temp_floor / mbar_gm1_over_kb; // specific internal en.
 
   // Grab some necessary variables
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
@@ -644,9 +646,10 @@ Real TabularCooling::EstimateTimeStep(MeshData<Real> *md) const {
         auto &prim = prim_pack(b);
 
         const Real rho = prim(IDN, k, j, i);
+        const Real internal_e_floor = thermo.EnergyFromTemperature(rho, temp_floor);
         const Real pres = prim(IPR, k, j, i);
 
-        const Real internal_e = pres / (rho * gm1);
+        const Real internal_e = thermo.InternalEnergy(rho, pres);
 
         const Real de_dt = cooling_table_obj.DeDt(internal_e, rho);
 
@@ -680,7 +683,7 @@ void TabularCooling::TestCoolingTable(ParameterInput *pin) const {
 
   // Everything needed by DeDt
   const CoolingTableObj cooling_table_obj = cooling_table_obj_;
-  const auto gm1 = pin->GetReal("hydro", "gamma") - 1.0;
+  const auto thermo = cooling_table_obj_.Thermo();
 
   // Make some device arrays to store the test data
   ParArray2D<Real> d_rho("d_rho", n_rho, n_pres), d_pres("d_pres", n_rho, n_pres),
@@ -695,7 +698,7 @@ void TabularCooling::TestCoolingTable(ParameterInput *pin) const {
         d_rho(j, i) = rho;
         d_pres(j, i) = pres;
 
-        const Real internal_e = pres / (rho * gm1);
+        const Real internal_e = thermo.InternalEnergy(rho, pres);
 
         d_internal_e(j, i) = internal_e;
 

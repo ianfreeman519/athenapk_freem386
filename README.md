@@ -165,3 +165,6 @@ data_file = phdf.phdf(data_filename)
 prim = data_file.Get("prim")
 ```
 see also an internal regression test that uses this interface [here](tst/regression/test_suites/aniso_therm_cond_ring_conv/aniso_therm_cond_ring_conv.py).
+
+For the Singularity-EOS ideal-gas integration and validation commands, see
+[general EOS support](docs/general_eos.md).

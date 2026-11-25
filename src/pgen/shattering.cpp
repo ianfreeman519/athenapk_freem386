@@ -24,6 +24,7 @@
 #include <parthenon/package.hpp>
 
 // AthenaPK headers
+#include "../eos/thermodynamics.hpp"
 #include "../hydro/srcterms/tabular_cooling.hpp"
 #include "../main.hpp"
 #include "../units.hpp"
@@ -37,10 +38,8 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
   // no access to package in this function so we use a local units object
   Units units(pin);
 
-  auto gamma = pin->GetReal("hydro", "gamma");
-  auto gm1 = (gamma - 1.0);
   const auto &pkg = mesh->packages.Get("Hydro");
-  const auto mbar_over_kb = pkg->Param<Real>("mbar_over_kb");
+  const auto thermo = pkg->Param<GasThermodynamics>("thermodynamics");
 
   // hardcoded, should be adjusted to domain bounds
   const Real l_box = 1.0;
@@ -67,15 +66,18 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
   const auto rho_f = chi_f * rho_0;
   const auto rho_cl = chi_i * rho_0;
 
-  const auto rhoe_cl = T_cl * rho_cl / mbar_over_kb / gm1;
-  const auto rhoe_hot = rhoe_cl; // asusmes pressure balance
-  const auto T_hot = rhoe_hot * mbar_over_kb * gm1 / rho_hot;
+  const auto rhoe_cl = rho_cl * thermo.EnergyFromTemperature(rho_cl, T_cl);
+  const auto rhoe_hot = thermo.EnergyDensity(
+      rho_hot, thermo.Pressure(rho_cl, rhoe_cl / rho_cl)); // asusmes pressure balance
+  const auto T_hot = thermo.Temperature(rho_hot, rhoe_hot / rho_hot);
 
-  const auto c_s_cl = std::sqrt(gamma * T_cl / mbar_over_kb);
+  const auto c_s_cl = std::sqrt(
+      thermo.SoundSpeedSquared(rho_cl, thermo.Pressure(rho_cl, rhoe_cl / rho_cl)));
   const auto t_sc_cl = 2 * r_cl / c_s_cl;
-  const auto c_s_floor = std::sqrt(gamma * T_floor / mbar_over_kb);
-  const auto e_floor = T_floor / (mbar_over_kb * gm1);
-  const auto e_cl = T_cl / (mbar_over_kb * gm1);
+  const auto c_s_floor = std::sqrt(thermo.SoundSpeedSquared(
+      rho_f, thermo.Pressure(rho_f, thermo.EnergyFromTemperature(rho_f, T_floor))));
+  const auto e_floor = thermo.EnergyFromTemperature(rho_f, T_floor);
+  const auto e_cl = thermo.EnergyFromTemperature(rho_cl, T_cl);
 
   pkg->AddParam<>("problem/shattering/r_cl", r_cl);
   pkg->AddParam<>("problem/shattering/rho_cl", rho_cl);

@@ -9,6 +9,7 @@
 #include <parthenon/package.hpp>
 
 // Athena headers
+#include "../eos/thermodynamics.hpp"
 #include "../main.hpp"
 
 namespace sod {
@@ -28,7 +29,7 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
   Real u_r = pin->GetOrAddReal("problem/sod", "u_r", 0.0);
   Real x_discont = pin->GetOrAddReal("problem/sod", "x_discont", 0.5);
 
-  Real gamma = pin->GetReal("hydro", "gamma");
+  const auto thermo = hydro_pkg->Param<GasThermodynamics>("thermodynamics");
 
   // initialize conserved variables
   auto &mbd = pmb->meshblock_data.Get();
@@ -41,11 +42,13 @@ void ProblemGenerator(MeshBlock *pmb, parthenon::ParameterInput *pin) {
         if (coords.Xc<1>(i) < x_discont) {
           cons(IDN, k, j, i) = rho_l;
           cons(IM1, k, j, i) = rho_l * u_l;
-          cons(IEN, k, j, i) = 0.5 * rho_l * u_l * u_l + pres_l / (gamma - 1.0);
+          cons(IEN, k, j, i) =
+              0.5 * rho_l * u_l * u_l + thermo.EnergyDensity(rho_l, pres_l);
         } else {
           cons(IDN, k, j, i) = rho_r;
           cons(IM1, k, j, i) = rho_r * u_r;
-          cons(IEN, k, j, i) = 0.5 * rho_r * u_r * u_r + pres_r / (gamma - 1.0);
+          cons(IEN, k, j, i) =
+              0.5 * rho_r * u_r * u_r + thermo.EnergyDensity(rho_r, pres_r);
         }
       });
 }

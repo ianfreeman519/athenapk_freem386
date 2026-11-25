@@ -7,3 +7,6 @@
 [submodule "external/catch2"]
 	path = external/catch2
 	url = https://github.com/catchorg/Catch2.git
+[submodule "external/singularity-eos"]
+	path = external/singularity-eos
+	url = https://github.com/lanl/singularity-eos.git
